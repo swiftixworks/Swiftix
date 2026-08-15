@@ -1,7 +1,7 @@
 # Swiftix Product Roadmap
 
 > Status: direction draft
-> Updated: 2026-08-13
+> Updated: 2026-08-15
 > Versions define capability boundaries, not release dates.
 
 ## Positioning and Version Rules
@@ -10,10 +10,12 @@ Swiftix remains an embeddable, observable lightweight operating-system and netwo
 
 - `1.x.0` adds backward-compatible capabilities; each minor version has one primary objective.
 - `1.x.y` contains only compatible bug, security, performance, and documentation fixes.
+- Before 1.0, one `0.minor` line is a compatibility series: breaking API
+  corrections advance the minor version, while patch releases remain compatible.
 - Features that do not meet their exit criteria remain experimental and do not block the stable portion of a minor release.
 - Plan 2.0 only when a stable API genuinely requires a breaking adjustment; no 2.0 work is currently scheduled.
 
-## 0.9 — Candidate Baseline
+## 0.9 — Candidate Baseline (established)
 
 Freeze the 1.0 API, formats, and support matrix without adding major features.
 
@@ -25,6 +27,16 @@ Freeze the 1.0 API, formats, and support matrix without adding major features.
 
 **Exit criterion:** an annotated `v0.9.0` establishes the API-review baseline,
 all repositories pin the same versions, and the baseline CI matrix is green.
+
+## 0.10 — Semantic Core Corrections
+
+Apply the bounded Linux-aligned lifecycle, descriptor, VFS, blocking-I/O, and
+storage corrections discovered after the 0.9 baseline. This is an intentional
+pre-1.0 API break; further breaking work requires another minor version.
+
+**Exit criterion:** the migration notes enumerate every 0.9 API break, the API
+gate accepts the 0.10 series transition and rejects unversioned breaks within
+0.10.x, and full public-consumer, serial, and platform CI remains green.
 
 ## 1.0 — Stable Foundation
 

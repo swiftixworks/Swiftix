@@ -16,7 +16,7 @@ GoToolchain.register(in: commands)
 kernel.spawn("sh", Programs.shell(tty: terminal.slave, commands: commands))
 loop.runUntilIdle()
 
-precondition(Swiftix.version == "0.9.0")
+precondition(Swiftix.version == "0.10.0")
 precondition(SwiftixRootFilesystemImageCodec.formatVersion == 1)
 precondition(SwiftixPackages.formatVersion == 2)
 precondition(GoExecutableImage.formatVersion == 10)

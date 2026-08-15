@@ -54,5 +54,5 @@
 
 public enum Swiftix: Sendable {
     /// Semantic version of the core.
-    public static let version = "0.9.0"
+    public static let version = "0.10.0"
 }

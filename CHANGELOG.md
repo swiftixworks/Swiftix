@@ -3,7 +3,10 @@
 Swiftix follows [Semantic Versioning](https://semver.org/). User-visible API,
 format, behavior and platform changes are recorded here.
 
-## Unreleased
+## Unreleased — 0.10.0
+
+This pre-1.0 minor intentionally changes the public kernel API described in the
+0.9-to-0.10 migration notes.
 
 ### Added
 
@@ -43,7 +46,7 @@ format, behavior and platform changes are recorded here.
 - Credential changes now inherit across spawn and enforce root/owner boundaries
   for identity, ownership, mode, and parent-directory mutation.
 
-## 0.9.0 — planned
+## 0.9.0 — 2026-08-15
 
 ### Added
 

@@ -5,7 +5,7 @@ import Testing
 struct InterfaceSeamTests {
 
     @Test func versionIsSet() {
-        #expect(Swiftix.version == "0.9.0")
+        #expect(Swiftix.version == "0.10.0")
     }
 
     /// A UDP send from a socket is emitted as a frame through the interface's
