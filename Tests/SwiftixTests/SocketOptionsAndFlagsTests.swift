@@ -47,6 +47,32 @@ struct SocketOptionsAndFlagsTests {
         #expect(captured.eof == [])
     }
 
+    @Test func duplicateDescriptorsShareFileStatusFlagChanges() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Capture {
+            var originalAfterDuplicateChange: FileStatusFlags?
+            var duplicateAfterOriginalChange: FileStatusFlags?
+        }
+        let captured = Capture()
+
+        kernel.spawn("shared-status-flags") { ctx in
+            let pipe = ctx.pipe()
+            let duplicate = ctx.dup(pipe.read)!
+
+            _ = ctx.setNonBlocking(duplicate, true)
+            captured.originalAfterDuplicateChange = ctx.fileStatusFlags(pipe.read)
+
+            _ = ctx.setNonBlocking(pipe.read, false)
+            captured.duplicateAfterOriginalChange = ctx.fileStatusFlags(duplicate)
+        }
+        loop.runUntilIdle()
+
+        #expect(captured.originalAfterDuplicateChange?.contains(.nonBlocking) == true)
+        #expect(captured.duplicateAfterOriginalChange?.contains(.nonBlocking) == false)
+    }
+
     @Test func socketOptionsRoundTripAndRejectNonSockets() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)

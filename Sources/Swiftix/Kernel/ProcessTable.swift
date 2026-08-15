@@ -1,7 +1,12 @@
-/// PID allocation and process lookup for the kernel's live process graph.
+/// PID allocation and lookup for retained live and zombie process identities.
 final class ProcessTable {
+    private let loop: EventLoop
     private var storage: [PID: Process] = [:]
     private var nextPID: PID = 1
+
+    init(loop: EventLoop = EventLoop()) {
+        self.loop = loop
+    }
 
     var count: Int { storage.count }
     var all: [Process] { Array(storage.values) }
@@ -17,7 +22,11 @@ final class ProcessTable {
     func allocate(name: String, args: [String], parent: PID) -> Process {
         let pid = nextPID
         nextPID += 1
-        let process = Process(pid: pid, ppid: parent, name: name)
+        let process = Process(
+            pid: pid,
+            ppid: parent,
+            name: name,
+            workScope: loop.makeCancellationScope())
         process.args = args
         storage[pid] = process
         return process

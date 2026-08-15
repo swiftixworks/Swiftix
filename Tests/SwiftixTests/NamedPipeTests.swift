@@ -37,20 +37,24 @@ struct NamedPipeTests {
         kernel.spawn("setup") { ctx in
             _ = ctx.mkfifo("/channel")
 
+            // Open and park the reader first. Swiftix's synchronous FIFO open is
+            // not itself a blocking syscall, so this explicitly establishes the
+            // reader before a writer (which would otherwise observe SIGPIPE).
+            ctx.spawn("reader") { reader in
+                let fd = reader.open("/channel", access: .readOnly)!
+                reader.read(fd, max: 99) { bytes in
+                    box.received = String(decoding: bytes, as: UTF8.self)
+                    reader.close(fd)
+                    reader.exit(0)
+                }
+            }
+
             // Writer process.
             ctx.spawn("writer") { writer in
                 let fd = writer.open("/channel", access: .writeOnly)!
                 writer.write(fd, Array("message".utf8))
                 writer.close(fd)
                 writer.exit(0)
-            }
-
-            // Reader process.
-            ctx.spawn("reader") { reader in
-                let fd = reader.open("/channel", access: .readOnly)!
-                box.received = String(decoding: reader.read(fd, max: 99), as: UTF8.self)
-                reader.close(fd)
-                reader.exit(0)
             }
 
             ctx.wait { _ in ctx.exit(0) }

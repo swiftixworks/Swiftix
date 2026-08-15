@@ -38,6 +38,50 @@ Protocol parsers, VFS nodes, process tables, socket state machines, compiler IR,
 and VM storage remain implementation details. Before 1.0 they must become
 internal or receive an explicit stable contract.
 
+## Linux semantic profile
+
+Swiftix targets Linux/POSIX-style observable behavior for its documented core
+primitives; it does not target Linux ABI or subsystem completeness. In
+particular, the stable direction is shared open-file descriptions, inode versus
+directory-entry separation, two-phase process exit/reap, multi-waiter blocking
+I/O, and last-close pipe behavior.
+
+The compatibility boundary remains explicit:
+
+- credentials implement inherited effective uid/gid/supplementary groups and a
+  compact mode-bit DAC subset, not real/saved IDs, capabilities, ACLs, or full
+  per-component search permission;
+- only the cgroup-v2-style pids controller is modeled, and a refused Swift
+  `spawn` returns PID `0` rather than exposing host `errno`;
+- UDP has one binding owner per port. `SO_REUSEADDR` can be stored/read as an
+  option but does not enable shared binding until a deterministic fanout model
+  exists;
+- process execution remains cooperative and logical-time-driven; Swiftix does
+  not execute Linux ELF binaries or create host processes.
+
+Consumers should rely on documented invariants and typed Swift APIs, not infer
+support from a familiar Linux name alone.
+
+## Storage and application-runtime boundary
+
+`BlockVolume` is the public persistence seam for page-oriented applications.
+Volume geometry is fixed after attachment; read, write, and flush completions
+run on the same serial executor that drives the Kernel. `flush` is the only
+durability barrier: a successful ordinary write means accepted, not necessarily
+crash-durable. Volume implementations report `BlockVolumeError`, while guest
+async syscalls translate failures to stable `SyscallError` cases.
+
+The synchronous `BlockDevice`/RamDisk methods remain available for existing
+teaching code. A durable adapter should implement `BlockVolume` directly and
+must not block the Kernel executor. `pread` and `pwrite` provide regular-file
+positional I/O without changing the shared open-file-description offset; they do
+not make the current in-memory VFS durable.
+
+Multi-Kernel application lifecycle is a downstream control-plane responsibility.
+The stable core seam is Kernel construction, rootfs restoration, volume/network
+attachment, process start/observation, and Kernel pause/resume/shutdown. Guest
+processes do not receive ambient authority to create or control sibling Kernels.
+
 CI compiles `Example/PublicAPISmoke` without `@testable import` and uses
 `Scripts/check-api-breakage.sh` against the latest version tag.
 
@@ -82,6 +126,31 @@ The 0.9 API review has already made these user-visible reductions:
   `NetworkInterface.ipv6Address`; IPv6 is outside the current contract;
 - install `awk` or an editor as distribution software when needed; they are no
   longer native built-ins.
+
+The process lifecycle contract also changed after the `v0.9.0` baseline:
+
+- `ProcessWaitStatus` now represents child state changes and includes
+  `.continued`; exhaustive switches must handle the new case.
+- terminal results are represented separately by `ProcessExitStatus`.
+- an exited child with a live parent remains visible as `Z` until a matching
+  wait consumes its terminal event, so `Kernel.processCount` includes zombies.
+- use `Kernel.snapshotProcesses()` and the live/zombie fields in
+  `snapshotResources()` when a consumer needs lifecycle diagnostics rather than
+  assuming every retained PID is executable.
+
+Other pre-1.0 semantic corrections in this window:
+
+- `dup`, `dup2`, and spawn inheritance now share one open-file description,
+  including file-status flags and last-close behavior;
+- `ProcessContext.setuid`/`setgid` now return success and do not let an
+  unprivileged process regain another identity; set gid/groups before dropping
+  a root uid;
+- cgroup `pids.max` refusal returns PID `0` without creating a waitable phantom
+  child, while moving an existing process into a full group succeeds;
+- readerless pipe/FIFO writes deliver `SIGPIPE`; throwing writes report
+  `SyscallError.brokenPipe` (`EPIPE`);
+- a second UDP bind never displaces a live incumbent, including when only the
+  newcomer enables `SO_REUSEADDR`.
 
 Unknown snapshot, rootfs, Go image, and package formats fail before mutating
 guest state. Preserve the old artifact and report every relevant version from

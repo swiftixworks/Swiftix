@@ -31,9 +31,8 @@ struct CgroupTests {
         #expect(kernel.cgroupPidsCurrent("/demo") == 1)
     }
 
-    /// `pids.max` refuses the spawn that would exceed it: the child is born
-    /// already exited (resource-limit status) and never runs its body. This is
-    /// the fork-bomb containment.
+    /// `pids.max` refuses the spawn that would exceed it before a PID or child
+    /// lifecycle is allocated. The non-throwing Swiftix spawn surface returns 0.
     @Test func pidsMaxRefusesSpawnBeyondLimit() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
@@ -41,26 +40,24 @@ struct CgroupTests {
         kernel.setCgroupPidsMax("/demo", 1)   // room for exactly one process
 
         let childRan = Flag()
-        let childStatus = Counter()
+        let childPID = Counter()
         kernel.spawn("parent") { ctx in
             _ = ctx.joinCgroup("/demo")        // parent occupies the single slot
-            ctx.spawn("child") { c in
+            childPID.value = ctx.spawn("child") { c in
                 childRan.value = true          // must NOT run — admission is refused
                 c.exit(0)
             }
-            ctx.wait { result in
-                if case .success(let event) = result { childStatus.value = Int(event.status.code) }
-                ctx.exit(0)
-            }
+            ctx.exit(0)
         }
         loop.runUntilIdle()
 
         #expect(childRan.value == false)
-        #expect(childStatus.value == Int(Kernel.cgroupDeniedStatus))
+        #expect(childPID.value == 0)
     }
 
-    /// Moving a live process into a full group is refused, leaving it where it was.
-    @Test func joinRefusedWhenGroupFull() {
+    /// Migration is organizational and may put a group above pids.max; the
+    /// over-limit group then refuses subsequent process creation.
+    @Test func joinMayMoveExistingProcessAboveLimit() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
         kernel.createCgroup("/g")
@@ -77,15 +74,16 @@ struct CgroupTests {
         let joined = Flag()
         let where0 = Box()
         kernel.spawn("second") { ctx in
-            joined.value = ctx.joinCgroup("/g")     // should fail
-            where0.value = ctx.cgroupPath           // still root
-            ctx.exit(0)
+            joined.value = ctx.joinCgroup("/g")
+            where0.value = ctx.cgroupPath
+            let pipe = ctx.pipe(); _ = pipe.write
+            ctx.read(pipe.read) { _ in }
         }
         loop.runUntilIdle()
 
-        #expect(joined.value == false)
-        #expect(where0.value == "/")
-        #expect(kernel.cgroupPidsCurrent("/g") == 1)
+        #expect(joined.value)
+        #expect(where0.value == "/g")
+        #expect(kernel.cgroupPidsCurrent("/g") == 2)
     }
 
     /// An empty group can be removed; a group with a live member cannot.
@@ -123,16 +121,19 @@ struct CgroupTests {
         let out = run(["cgcreate demo", "cgset demo pids.max 1", "cgexec demo forkone"],
                       register: { registry in
             registry.register(Command(name: "forkone", summary: "spawn one child") { ctx, _ in
-                ctx.spawn("kid") { kid in kid.print("kid ran\n"); kid.exit(0) }
+                let pid = ctx.spawn("kid") { kid in kid.print("kid ran\n"); kid.exit(0) }
+                guard pid != 0 else {
+                    ctx.print("kid denied\n")
+                    ctx.exit(11)
+                    return
+                }
                 ctx.wait { result in
-                    if case .success(let event) = result, event.status.code != 0 {
-                        ctx.print("kid denied code=\(event.status.code)\n")
-                    }
-                    ctx.exit(0)
+                    if case .success(let event) = result { ctx.exit(event.status.code) }
+                    else { ctx.exit(1) }
                 }
             })
         })
-        #expect(contains(out, Array("kid denied code=11".utf8)))
+        #expect(contains(out, Array("kid denied".utf8)))
         #expect(!contains(out, Array("kid ran".utf8)))
     }
 

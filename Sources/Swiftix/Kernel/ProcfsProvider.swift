@@ -70,9 +70,9 @@ enum ProcfsProvider {
 
     /// Mount the live per-process tree: `/proc/<pid>/status` and
     /// `/proc/<pid>/cmdline`, resolved from the process table each time they are
-    /// listed or opened (so processes appear/disappear as they spawn/exit). The
+    /// listed or opened (so processes appear at spawn and disappear at reap). The
     /// `/proc` directory becomes a *dynamic directory* whose computed children are
-    /// the live pids.
+    /// retained live and zombie pids.
     static func mountPerProcess(on vfs: VirtualFileSystem, processIntrospection: ProcessIntrospection) {
         guard let procDirectory = vfs.lookup("/proc") else { return }
         procDirectory.dynamicChildNames = {
@@ -92,11 +92,11 @@ enum ProcfsProvider {
 
         let status = VNode(file: "status")
         status.provider = { Array(statusText(row).utf8) }
-        directory.addChild(status)
+        directory.addChild(name: "status", node: status)
 
         let cmdline = VNode(file: "cmdline")
         cmdline.provider = { Array(row.command.utf8) }
-        directory.addChild(cmdline)
+        directory.addChild(name: "cmdline", node: cmdline)
 
         return directory
     }

@@ -87,6 +87,81 @@ struct PipelineTests {
         #expect(box.sawEOF)
     }
 
+    /// Multiple processes may block on one stream concurrently. One write wakes
+    /// enough readers to drain all available bytes instead of overwriting an
+    /// earlier reader's callback and leaving it parked forever.
+    @Test func onePipeWriteWakesMultipleBlockedReaders() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box { var chunks: [[UInt8]] = [] }
+        let box = Box()
+        kernel.spawn("parent") { ctx in
+            let pipe = ctx.pipe()
+            for name in ["reader-1", "reader-2"] {
+                ctx.spawn(name) { child in
+                    child.close(pipe.write)
+                    child.read(pipe.read, max: 1) { bytes in
+                        box.chunks.append(bytes)
+                        child.exit(0)
+                    }
+                }
+            }
+            ctx.spawn("writer") { child in
+                child.close(pipe.read)
+                child.write(pipe.write, Array("AB".utf8))
+                child.exit(0)
+            }
+            ctx.close(pipe.read)
+            ctx.close(pipe.write)
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(box.chunks == [[65], [66]])
+    }
+
+    /// With a handler installed, a write to a readerless pipe reports EPIPE and
+    /// delivers SIGPIPE without terminating the caller.
+    @Test func readerlessPipeWriteThrowsBrokenPipeAndDeliversSignal() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box { var caught = false; var error: SyscallError? }
+        let box = Box()
+        kernel.spawn("writer") { ctx in
+            ctx.signal(Signal.sigpipe.rawValue) { box.caught = true }
+            let pipe = ctx.pipe()
+            ctx.close(pipe.read)
+            do {
+                _ = try ctx.writeFile(pipe.write, [1])
+            } catch let error as SyscallError {
+                box.error = error
+            } catch {}
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(box.caught)
+        #expect(box.error == .brokenPipe)
+    }
+
+    /// SIGPIPE's default disposition terminates a process that writes after the
+    /// final read end closes.
+    @Test func readerlessPipeWriteTerminatesByDefault() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        kernel.spawn("writer") { ctx in
+            let pipe = ctx.pipe()
+            ctx.close(pipe.read)
+            ctx.write(pipe.write, [1])
+        }
+        loop.runUntilIdle()
+
+        #expect(kernel.processCount == 0)
+    }
+
     // MARK: - Shell pipelines + redirection
 
     @Test func shellPipesEchoIntoCat() {

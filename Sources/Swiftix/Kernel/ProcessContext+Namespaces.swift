@@ -120,9 +120,9 @@ extension ProcessContext {
     }
 
     /// Move *this* process into the cgroup at `path` (the moral equivalent of
-    /// writing its pid to `cgroup.procs`). Refuses — leaving the process where it
-    /// is — when the target subtree is at its `pids.max`, or when the path is
-    /// unknown.
+    /// writing its pid to `cgroup.procs`). Existing-process migration may place
+    /// the group above `pids.max`; the limit applies to subsequent child creation.
+    /// Returns `false` only when the path is unknown.
     @discardableResult
     public func joinCgroup(_ path: String) -> Bool {
         kernel.joinCgroup(pid: process.pid, path: path)

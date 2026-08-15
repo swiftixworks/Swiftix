@@ -141,13 +141,13 @@ extension BuiltinCommands {
                 switch command.body {
                 case let .sync(body):
                     let wrapped = Command(name: command.name, summary: command.summary, category: command.category) { child, childArgs in
-                        child.setuid(uid); child.setgid(uid)
+                        child.setgid(uid); child.setuid(uid)
                         body(child, childArgs)
                     }
                     ctx.run(wrapped, args: commandArgs)
                 case let .async(body):
                     ctx.spawn(commandArgs[0], args: commandArgs) { (child: ProcessContext) async in
-                        child.setuid(uid); child.setgid(uid)
+                        child.setgid(uid); child.setuid(uid)
                         await body(child, commandArgs)
                     }
                 }

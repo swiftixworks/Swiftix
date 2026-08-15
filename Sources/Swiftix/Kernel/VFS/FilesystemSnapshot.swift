@@ -395,7 +395,7 @@ extension VirtualFileSystem {
                 guard case let .directory(entries) = record.contents else { continue }
                 for entry in entries {
                     guard let child = nodes[entry.inodeID] else { return nil }
-                    directory.addHardLink(name: entry.name, node: child)
+                    directory.addChild(name: entry.name, node: child)
                 }
             }
             return nodes[rootID]
@@ -411,7 +411,7 @@ extension VirtualFileSystem {
                       let child = buildLegacyNode(name: childName, from: childSnapshot) else {
                     return nil
                 }
-                directory.addHardLink(name: childName, node: child)
+                directory.addChild(name: childName, node: child)
             }
             return directory
         case let .file(bytes):

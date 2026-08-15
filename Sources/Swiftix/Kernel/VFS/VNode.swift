@@ -1,4 +1,4 @@
-/// A VFS node (inode). A node is a directory (named children), a regular file
+/// A VFS node (inode). A node is a directory (named entries), a regular file
 /// (byte contents), a symbolic link (a stored target path resolved on lookup),
 /// or a named pipe (FIFO). Ownership (uid/gid) and mode bits are enforced when
 /// a process opens a file; root retains the usual bypass.
@@ -18,7 +18,6 @@ final class VNode {
     }
 
     let kind: Kind
-    private(set) var name: String
     var mode: FileMode
     /// Owner user ID (default 0 = root).
     var uid: UInt32 = 0
@@ -62,9 +61,9 @@ final class VNode {
     /// is eligible for deallocation (deferred deletion).
     var nlink: Int
 
-    /// Count of open file descriptors referencing this node (across all
-    /// processes). Incremented when a `RegularFileHandle` / `FifoEndpoint` is
-    /// created; decremented on `close`. When both `nlink == 0` and
+    /// Count of open-file descriptions referencing this node (across all
+    /// processes). `dup` and spawn inheritance share a description, so the count
+    /// changes only on independent opens and last-close. When both `nlink == 0` and
     /// `openHandles == 0`, the node's data is released.
     var openHandles: Int = 0
 
@@ -106,33 +105,29 @@ final class VNode {
         case exclusive(holder: Int)
     }
 
-    init(directory name: String) {
+    init(directory _: String) {
         self.kind = .directory
-        self.name = name
         self.mode = .directoryDefault
         self.linkTarget = ""
         self.nlink = 2  // parent entry + implicit "."
     }
 
-    init(file name: String) {
+    init(file _: String) {
         self.kind = .file
-        self.name = name
         self.mode = .regularDefault
         self.linkTarget = ""
         self.nlink = 1
     }
 
-    init(symlink name: String, target: String) {
+    init(symlink _: String, target: String) {
         self.kind = .symlink
-        self.name = name
         self.mode = .symlinkDefault
         self.linkTarget = target
         self.nlink = 1
     }
 
-    init(fifo name: String) {
+    init(fifo _: String) {
         self.kind = .fifo
-        self.name = name
         self.mode = .fifoDefault
         self.linkTarget = ""
         self.nlink = 1
@@ -142,29 +137,18 @@ final class VNode {
         children[name]
     }
 
+    /// Add one directory entry. The name belongs to the containing directory,
+    /// not to the inode: hard links can therefore give the same VNode multiple
+    /// independent names without choosing a mutable "canonical" name.
     @discardableResult
-    func addChild(_ node: VNode) -> VNode {
-        children[node.name] = node
-        return node
-    }
-
-    /// Add a hard link: store `node` under `name` in this directory without
-    /// renaming the node itself. The same VNode is now reachable through multiple
-    /// directory entries (possibly with different names).
-    func addHardLink(name: String, node: VNode) {
+    func addChild(name: String, node: VNode) -> VNode {
         children[name] = node
+        return node
     }
 
     @discardableResult
     func removeChild(_ name: String) -> Bool {
         children.removeValue(forKey: name) != nil
-    }
-
-    /// Change the directory-entry name while retaining inode identity and open
-    /// handles. Only `VirtualFileSystem.rename` calls this after detaching the
-    /// node from its old parent.
-    func rename(to name: String) {
-        self.name = name
     }
 
     /// Byte size of a regular file (synthetic files report their current computed

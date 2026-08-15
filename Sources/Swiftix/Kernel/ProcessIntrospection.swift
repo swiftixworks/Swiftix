@@ -1,4 +1,4 @@
-/// Value snapshots used by procfs and diagnostics without exposing live processes.
+/// Value snapshots used by procfs and diagnostics without exposing processes.
 struct ProcessSnapshotRow {
     let pid: PID
     let ppid: PID
@@ -47,7 +47,7 @@ final class ProcessIntrospection {
         .sorted { $0.pid < $1.pid }
     }
 
-    /// The row for a single pid, or `nil` if no such process is live. Used by the
+    /// The row for a single retained pid, including a zombie. Used by the
     /// per-process `/proc/<pid>` synthetic directories.
     func row(for pid: PID) -> ProcessSnapshotRow? {
         processTable.process(pid).map { Self.row(from: $0) }
@@ -62,18 +62,23 @@ final class ProcessIntrospection {
             pgid: pgid ?? process.processGroupID,
             sid: sid ?? process.sessionID,
             name: process.name,
-            state: stateName(process.state),
+            state: stateName(process),
             ticks: process.scheduleTicks,
             fds: process.fileDescriptors.openDescriptors.count,
             command: process.args.isEmpty ? process.name : process.args.joined(separator: " "))
     }
 
-    static func stateName(_ state: Process.State) -> String {
-        switch state {
+    static func stateName(_ process: Process) -> String {
+        stateName(runState: process.runState, lifecycle: process.lifecycle)
+    }
+
+    static func stateName(runState: Process.RunState,
+                          lifecycle: Process.Lifecycle = .live) -> String {
+        if case .zombie = lifecycle { return "Z" }
+        switch runState {
         case .runnable, .running: return "R"
-        case .blocked: return "S"
+        case .waiting: return "S"
         case .stopped: return "T"
-        case .zombie: return "Z"
         }
     }
 }

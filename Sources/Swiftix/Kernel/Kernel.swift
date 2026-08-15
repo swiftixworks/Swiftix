@@ -25,13 +25,8 @@ public final class Kernel {
     /// The cgroup hierarchy (pids controller). A process is admitted to its
     /// parent's group at spawn; a `pids.max` on that subtree can refuse the spawn.
     private(set) lazy var cgroups = CgroupController(isAlive: { [weak self] pid in
-        self?.processTable.contains(pid) ?? false
+        self?.processTable.process(pid)?.isLive ?? false
     })
-
-    /// The exit status a process is born with when its cgroup refuses admission
-    /// (the subtree's `pids.max` is reached) — the resource-limit failure a real
-    /// `fork` reports as `EAGAIN`.
-    static let cgroupDeniedStatus: Int32 = 11
 
     /// The scheduler/clock — shared across instances in a running simulation.
     public let loop: EventLoop
@@ -58,7 +53,7 @@ public final class Kernel {
     /// command set. `nil` until a shell (or the consumer) installs one.
     public var commandRegistry: CommandRegistry?
 
-    private let processTable = ProcessTable()
+    private lazy var processTable = ProcessTable(loop: loop)
     private lazy var processIntrospection = ProcessIntrospection(processTable: processTable)
     private lazy var processGroups = ProcessGroupController(processTable: processTable)
     private lazy var childWaitQueue = ChildWaitQueue(processTable: processTable)
@@ -69,18 +64,19 @@ public final class Kernel {
         signalParent: { [weak self] pid, signal in
             self?.kill(pid, signal: signal)
         },
-        willReap: { [weak self] process in
-            // Drop the exiting process from its PID namespace and every ancestor.
+        willExit: { [weak self] process in
+            self?.processDidExit(process)
+        },
+        willReap: { process in
+            // PID identity remains namespace-visible while the process is a
+            // zombie and is removed only by the final parent/host reap.
             var namespace: PIDNamespace? = process.pidNamespace
             while let current = namespace {
                 current.unregister(global: process.pid)
                 namespace = current.parent
             }
-            self?.processDidReap(process)
         })
     private lazy var processScheduler = ProcessScheduler(
-        loop: loop,
-        workOwner: workOwner,
         processTable: processTable,
         deliverPendingSignals: { [weak self] process in
             self?.signalDispatcher.deliverPendingSignals(process) ?? false
@@ -96,6 +92,9 @@ public final class Kernel {
         },
         terminate: { [weak self] process, signal in
             self?.processExit.terminate(process, bySignal: signal)
+        },
+        signalParent: { [weak self] pid, signal in
+            self?.kill(pid, signal: signal)
         })
 
     public init(loop: EventLoop) {
@@ -104,8 +103,38 @@ public final class Kernel {
         self.workOwner = workOwner
         self.netns = NetworkNamespace(loop: loop, workOwner: workOwner)
         vfs.clock = { [weak loop] in loop?.now ?? 0 }
+        childWaitQueue.onExitConsumed = { [weak self] parent, child in
+            self?.processExit.reapExitedChild(parent: parent, child: child)
+        }
         mountProcFS()
     }
+
+    /// Attach a consumer-supplied storage volume to this node. The core owns
+    /// only the guest-visible registration; persistence, encryption, and host
+    /// file access remain responsibilities of the supplying adapter.
+    ///
+    /// Attach volumes before starting applications that depend on them. Like
+    /// every Kernel mutation, this method is called on the EventLoop's serial
+    /// executor. The volume must deliver asynchronous completions on that same
+    /// executor.
+    public func attachBlockVolume(_ volume: any BlockVolume, named name: String) throws {
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else {
+            throw SyscallError.invalidArgument
+        }
+        guard volume.sectorSize > 0, volume.sectorCount >= 0 else {
+            throw SyscallError.invalidArgument
+        }
+        let (capacity, overflow) = volume.sectorSize.multipliedReportingOverflow(by: volume.sectorCount)
+        guard !overflow, capacity == volume.capacity else {
+            throw SyscallError.invalidArgument
+        }
+        guard blockDevices.attach(name: name, volume: volume) else {
+            throw SyscallError.fileExists
+        }
+    }
+
+    /// Stable names of the volumes currently exposed to this node.
+    public var blockVolumeNames: [String] { blockDevices.names }
 
     /// Whether this kernel's process and protocol work is currently frozen.
     public var isPaused: Bool { lifecycleState == .paused }
@@ -120,12 +149,25 @@ public final class Kernel {
         loop.schedule(after: delay, owner: workOwner, work)
     }
 
+    /// Schedule work owned by one live process. Logical exit physically removes
+    /// it even while the lightweight PID remains present as a zombie.
+    func schedule(for process: Process, after delay: Double, _ work: @escaping () -> Void) {
+        guard processTable.contains(process.pid), process.isLive else { return }
+        process.workScope.schedule(after: delay) { [weak process] in
+            guard let process, process.isLive else { return }
+            work()
+        }
+    }
+
     /// Freeze this kernel while allowing other kernels on the shared EventLoop to
     /// continue. Timer deadlines retain their remaining duration across resume.
     public func pause() {
         guard lifecycleState == .active else { return }
         lifecycleState = .paused
         netns.stack.pause()
+        for process in processTable.all where process.isLive {
+            process.workScope.pause()
+        }
         loop.pause(workOwner)
     }
 
@@ -134,6 +176,9 @@ public final class Kernel {
         guard lifecycleState == .paused else { return }
         lifecycleState = .active
         netns.stack.resume()
+        for process in processTable.all where process.isLive {
+            process.workScope.resume()
+        }
         loop.resume(workOwner)
 
         let continuations = Array(pausedAsyncContinuations.values)
@@ -160,11 +205,12 @@ public final class Kernel {
         asyncTasks.removeAll(keepingCapacity: false)
         for task in tasks { task.cancel() }
 
-        // Snapshot first because termination mutates the table. SIGKILL provides
-        // the existing cancelWaits + closeAll + namespace/cgroup reap path.
-        for process in processTable.all where processTable.contains(process.pid) {
+        // Snapshot first because logical exit can reparent children and satisfy
+        // pending waits. Shutdown then force-reaps any retained zombies.
+        for process in processTable.all where process.isLive {
             processExit.terminate(process, bySignal: Signal.sigkill.rawValue)
         }
+        processExit.forceReapAll()
         netns.stack.shutdown()
 
         // Cancelling checked continuations enqueues their final Swift jobs on the
@@ -176,8 +222,9 @@ public final class Kernel {
     public var processCount: Int { processTable.count }
     func process(_ pid: PID) -> Process? { processTable.process(pid) }
 
-    /// Register a one-shot callback for a live process's exit. The callback runs
-    /// after the process has left the table, on this Kernel's serial executor.
+    /// Register a one-shot callback for a live process's logical exit. The
+    /// callback runs after runtime resources are released; a child may remain in
+    /// the table as a zombie until its parent waits.
     /// This is the consumer seam used to keep terminal-session UI synchronized
     /// with a top-level shell without making Process itself public.
     @discardableResult
@@ -185,7 +232,7 @@ public final class Kernel {
         _ pid: PID,
         _ observer: @escaping (ProcessWaitStatus) -> Void
     ) -> Bool {
-        guard let process = processTable.process(pid) else { return false }
+        guard let process = processTable.process(pid), process.isLive else { return false }
         process.exitObservers.append(observer)
         return true
     }
@@ -245,7 +292,10 @@ public final class Kernel {
     /// computed from live state (not cached), so successive calls always reflect
     /// the current reality.
     public struct ResourceSnapshot: Sendable, Equatable {
+        /// Retained process identities: live processes plus zombies.
         public let processes: Int
+        public let liveProcesses: Int
+        public let zombieProcesses: Int
         public let openFileDescriptors: Int
         public let tcpConnections: Int
         public let networkInterfaces: Int
@@ -255,16 +305,76 @@ public final class Kernel {
     /// Snapshot current resource usage across the kernel.
     public func snapshotResources() -> ResourceSnapshot {
         let fdCount = processTable.all.reduce(0) { $0 + $1.fileDescriptors.openDescriptors.count }
+        let liveCount = processTable.all.lazy.filter(\.isLive).count
+        let zombieCount = processTable.all.count - liveCount
         let tcpCount = netns.stack.tcpConnectionCount
         let ifCount = netns.stack.interfaceCount
         let nodeCount = vfs.nodeCount
         return ResourceSnapshot(
             processes: processTable.count,
+            liveProcesses: liveCount,
+            zombieProcesses: zombieCount,
             openFileDescriptors: fdCount,
             tcpConnections: tcpCount,
             networkInterfaces: ifCount,
             vfsNodeCount: nodeCount
         )
+    }
+
+    /// Lifecycle component of a process diagnostic snapshot. Run state and
+    /// lifecycle are intentionally separate: a zombie is terminal identity,
+    /// while runnable/waiting/stopped describe only executable processes.
+    public enum ProcessLifecycleSnapshot: String, Sendable, Equatable {
+        case live
+        case exiting
+        case zombie
+    }
+
+    /// Immutable, public process diagnostics. `state` uses the familiar Linux
+    /// display letters (`R`, `S`, `T`, `Z`); the other fields explain how that
+    /// view was derived without exposing the kernel's mutable Process object.
+    public struct ProcessSnapshot: Sendable, Equatable {
+        public let pid: PID
+        public let parentPID: PID
+        public let processGroupID: PID
+        public let sessionID: PID
+        public let name: String
+        public let state: String
+        public let lifecycle: ProcessLifecycleSnapshot
+        public let exitStatus: ProcessExitStatus?
+        public let waitReasons: [String]
+        public let queuedSteps: Int
+        public let scheduleTicks: Int
+        public let openFileDescriptors: Int
+        public let pendingSignals: [Int32]
+    }
+
+    /// Snapshot every retained process, including waitable zombies, ordered by
+    /// global PID. Call on the kernel's serial executor like other kernel APIs.
+    public func snapshotProcesses() -> [ProcessSnapshot] {
+        processTable.all.map { process in
+            let lifecycle: ProcessLifecycleSnapshot
+            switch process.lifecycle {
+            case .live: lifecycle = .live
+            case .exiting: lifecycle = .exiting
+            case .zombie: lifecycle = .zombie
+            }
+            return ProcessSnapshot(
+                pid: process.pid,
+                parentPID: process.ppid,
+                processGroupID: process.processGroupID,
+                sessionID: process.sessionID,
+                name: process.name,
+                state: ProcessIntrospection.stateName(process),
+                lifecycle: lifecycle,
+                exitStatus: process.terminalStatus,
+                waitReasons: process.waitReasons.map(\.description),
+                queuedSteps: process.queuedSteps,
+                scheduleTicks: process.scheduleTicks,
+                openFileDescriptors: process.fileDescriptors.openDescriptors.count,
+                pendingSignals: process.pendingSignals)
+        }
+        .sorted { $0.pid < $1.pid }
     }
 
     public var foregroundProcessGroupID: PID? { processGroups.foregroundProcessGroupID }
@@ -346,8 +456,8 @@ public final class Kernel {
     /// it (and its continuations) as jobs on the `EventLoop`.
     private lazy var asyncHost = AsyncProcessHost(executor: loop.executor)
 
-    /// One cancellation handle per live async process. Handles are removed when
-    /// the process is reaped and cancelled en masse during kernel shutdown.
+    /// One cancellation handle per live async process. Handles are removed at
+    /// logical exit and cancelled en masse during kernel shutdown.
     private var asyncTasks: [PID: Task<Void, Never>] = [:]
 
     /// Async task jobs are opaque to `SerialExecutor.enqueue`, so a job already
@@ -362,12 +472,12 @@ public final class Kernel {
     public func spawn(_ name: String, args: [String] = [], parent: PID = 0,
                       _ body: @escaping (ProcessContext) -> Void) -> PID {
         guard lifecycleState != .shutdown else { return 0 }
+        guard parent == 0 || processTable.process(parent)?.isLive == true else { return 0 }
+        guard cgroups.canAdmitChild(parentPID: parent) else { return 0 }
         let process = processTable.allocate(name: name, args: args, parent: parent)
+        if lifecycleState == .paused { process.workScope.pause() }
         inherit(into: process, from: parent)
-        guard cgroups.admitChild(pid: process.pid, parentPID: parent) else {
-            denySpawn(process)
-            return process.pid
-        }
+        cgroups.admitChild(pid: process.pid, parentPID: parent)
         let context = ProcessContext(process: process, kernel: self)
         runStep(process) { body(context) }
         return process.pid
@@ -380,6 +490,9 @@ public final class Kernel {
         if let parent = processTable.process(parentPID) {
             child.cwd = parent.cwd
             child.environment = parent.environment
+            child.uid = parent.uid
+            child.gid = parent.gid
+            child.supplementaryGroups = parent.supplementaryGroups
             child.processGroupID = parent.processGroupID
             child.sessionID = parent.sessionID
             child.fileDescriptors.clone(from: parent.fileDescriptors)
@@ -417,9 +530,9 @@ public final class Kernel {
     /// the async/throwing syscall frontend (`await ctx.tcpRecv(fd)`, …) and makes
     /// progress purely via `advance(by:)` / `runUntilIdle()` — no wall-clock.
     ///
-    /// `blockedOn` / `runStep` accounting is preserved exactly as the callback
+    /// Wait-registry / `runStep` accounting is preserved exactly as the callback
     /// path (R1.6, R3.4): the async syscalls bridge to the same callback
-    /// primitives, which do the `blockedOn += 1` / `-= 1` bookkeeping and dispatch
+    /// primitives, which register/end structured waits and dispatch
     /// each resumption through `runStep`. The body's first hop is itself posted as
     /// a `runStep`, so the process is scheduled on the loop exactly like a
     /// synchronous body.
@@ -427,23 +540,23 @@ public final class Kernel {
     public func spawn(_ name: String, args: [String] = [], parent: PID = 0,
                       _ body: @escaping (ProcessContext) async -> Void) -> PID {
         guard lifecycleState != .shutdown else { return 0 }
+        guard parent == 0 || processTable.process(parent)?.isLive == true else { return 0 }
+        guard cgroups.canAdmitChild(parentPID: parent) else { return 0 }
         let process = processTable.allocate(name: name, args: args, parent: parent)
+        if lifecycleState == .paused { process.workScope.pause() }
         inherit(into: process, from: parent)
-        guard cgroups.admitChild(pid: process.pid, parentPID: parent) else {
-            denySpawn(process)
-            return process.pid
-        }
+        cgroups.admitChild(pid: process.pid, parentPID: parent)
         let host = asyncHost
         let executor = asyncExecutor
         runStep(process) { [weak self] in
             guard let self else { return }
-            // Hold the process "blocked" for the entire lifetime of the async
+            // Hold the process "waiting" for the entire lifetime of the async
             // body: without this, `finishStep` (run right after this launch step)
-            // would see `blockedOn == 0` and reap the process before the body's
+            // would see no registered wait and exit the process before the body's
             // task ever runs. This mirrors the callback path, where a parked
-            // syscall keeps `blockedOn > 0` (R1.6, R3.4). The matching decrement
+            // syscall keeps a wait registered (R1.6, R3.4). The matching release
             // happens in `finishAsyncBody` when the body returns.
-            process.blockedOn += 1
+            process.asyncBodyWaitID = process.beginWait(.asyncBody)
             let payload = AsyncProcessHost.Payload(
                 body: body,
                 context: ProcessContext(process: process, kernel: self),
@@ -476,15 +589,17 @@ public final class Kernel {
     func awaitAsyncExecution(_ process: Process) async -> Bool {
         switch lifecycleState {
         case .active:
-            return processTable.contains(process.pid)
+            return processTable.contains(process.pid) && process.isLive
         case .shutdown:
             return false
         case .paused:
             return await withCheckedContinuation { continuation in
                 guard lifecycleState == .paused,
-                      processTable.contains(process.pid) else {
+                      processTable.contains(process.pid), process.isLive else {
                     continuation.resume(returning:
-                        lifecycleState == .active && processTable.contains(process.pid))
+                        lifecycleState == .active
+                            && processTable.contains(process.pid)
+                            && process.isLive)
                     return
                 }
                 pausedAsyncContinuations[process.pid] = continuation
@@ -492,7 +607,7 @@ public final class Kernel {
         }
     }
 
-    private func processDidReap(_ process: Process) {
+    private func processDidExit(_ process: Process) {
         if let continuation = pausedAsyncContinuations.removeValue(forKey: process.pid) {
             continuation.resume(returning: false)
         }
@@ -501,44 +616,25 @@ public final class Kernel {
         }
     }
 
-    /// Release the lifetime hold taken by the async `spawn` when the body returns.
-    /// Scheduled as a normal step so the usual `finishStep` fate applies: with the
-    /// hold removed (and no other blocking syscall pending) the process exits and
-    /// is reaped, exactly like a synchronous body returning. If the body already
-    /// called `exit(_:)`, `finishStep` honors that zombie state instead.
+    /// Release the lifetime hold taken by async `spawn` when the body returns.
+    /// An explicit `ctx.exit` has already performed logical exit; otherwise the
+    /// body returning is the process's normal status-0 exit.
     func finishAsyncBody(_ process: Process) {
         asyncTasks[process.pid] = nil
-        // If the body already exited via `ctx.exit`
-        // capture its status: `runStep` resets `state` to `.running` before
-        // running work, which would otherwise drop the status and let
-        // `finishStep` default to 0. We restore the zombie state inside the step
-        // so `finishStep` honors the real wait status.
-        let pendingStatus: ProcessWaitStatus?
-        if case .zombie(let status) = process.state {
-            pendingStatus = status
-        } else {
-            pendingStatus = nil
+        guard processTable.contains(process.pid), process.isLive else { return }
+        if let waitID = process.asyncBodyWaitID {
+            process.endWait(waitID)
+            process.asyncBodyWaitID = nil
         }
-        runStep(process) {
-            process.blockedOn -= 1
-            if let pendingStatus { process.state = .zombie(status: pendingStatus) }
-        }
-    }
-
-    /// A spawn whose cgroup admission was refused: the process is born and
-    /// immediately exits with the resource-limit status, without ever running its
-    /// body. The status is set *inside* the step (like `finishAsyncBody`) because
-    /// `runStep` resets `state` to `.running` before running the work; `finishStep`
-    /// then sees the zombie and reaps it, so the parent's `wait` observes the
-    /// failure exactly as for any other short-lived child.
-    private func denySpawn(_ process: Process) {
-        runStep(process) {
-            process.state = .zombie(status: .exited(Kernel.cgroupDeniedStatus))
-        }
+        processExit.handleExit(process, status: ProcessExitStatus.exited(0))
     }
 
     func runStep(_ process: Process, _ work: @escaping () -> Void) {
         processScheduler.runStep(process, work)
+    }
+
+    func exit(_ process: Process, code: Int32) {
+        processExit.handleExit(process, status: ProcessExitStatus.exited(code))
     }
 
     // MARK: - Control groups (cgroups: pids controller)
@@ -575,10 +671,11 @@ public final class Kernel {
     }
 
     /// Move a live process into the cgroup at `path` (the `cgroup.procs` write).
-    /// Refuses when the target subtree is full, or when the path is unknown.
+    /// Migration may exceed `pids.max`; creation is what the controller limits.
     @discardableResult
     func joinCgroup(pid: PID, path: String) -> Bool {
-        guard let group = cgroups.cgroup(path) else { return false }
+        guard processTable.process(pid)?.isLive == true,
+              let group = cgroups.cgroup(path) else { return false }
         return cgroups.move(pid: pid, to: group)
     }
 
@@ -586,10 +683,13 @@ public final class Kernel {
     func cgroupPath(of pid: PID) -> String { cgroups.cgroupOf(pid).path }
 
     /// `pids.current` for the cgroup at `path`, or `nil` if it does not exist.
-    /// The root's current count is the whole process table.
+    /// The root count includes live processes but excludes zombies, which no
+    /// longer consume cgroup execution capacity.
     func cgroupPidsCurrent(_ path: String) -> Int? {
         guard let group = cgroups.cgroup(path) else { return nil }
-        return group === cgroups.root ? processTable.count : cgroups.liveCount(group)
+        return group === cgroups.root
+            ? processTable.all.filter(\.isLive).count
+            : cgroups.liveCount(group)
     }
 
     /// The VFS path of a cgroup's directory under `/sys/fs/cgroup`.
@@ -604,7 +704,9 @@ public final class Kernel {
         let isRoot = group === cgroups.root
         vfs.createSyntheticFile(dir + "/pids.current") { [weak self] in
             guard let self else { return [] }
-            let current = isRoot ? self.processTable.count : self.cgroups.liveCount(group)
+            let current = isRoot
+                ? self.processTable.all.filter(\.isLive).count
+                : self.cgroups.liveCount(group)
             return Array("\(current)\n".utf8)
         }
         vfs.createSyntheticFile(dir + "/pids.max") {
@@ -613,7 +715,7 @@ public final class Kernel {
         vfs.createSyntheticFile(dir + "/cgroup.procs") { [weak self] in
             guard let self else { return [] }
             let pids = isRoot
-                ? self.processTable.all.map(\.pid).sorted()
+                ? self.processTable.all.filter(\.isLive).map(\.pid).sorted()
                 : self.cgroups.directLiveMembers(group)
             let text = pids.map(String.init).joined(separator: "\n")
             return Array((pids.isEmpty ? "" : text + "\n").utf8)
@@ -712,6 +814,7 @@ public final class Kernel {
             guard let self else { return [] }
             let snap = self.snapshotResources()
             let text = "processes=\(snap.processes) fds=\(snap.openFileDescriptors)"
+                + " live=\(snap.liveProcesses) zombies=\(snap.zombieProcesses)"
                 + " tcp=\(snap.tcpConnections) interfaces=\(snap.networkInterfaces)"
                 + " vnodes=\(snap.vfsNodeCount)\n"
             return Array(text.utf8)

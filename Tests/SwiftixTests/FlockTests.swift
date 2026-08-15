@@ -114,6 +114,35 @@ struct FlockTests {
         #expect(box.relocked)
     }
 
+    @Test func closingOneDuplicateDoesNotReleaseOpenDescriptionLock() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box {
+            var blockedWhileDuplicateOpen = false
+            var acquiredAfterLastDuplicateClosed = false
+        }
+        let box = Box()
+
+        kernel.spawn("test") { ctx in
+            let locked = ctx.open("/lockfile", create: true)!
+            let duplicate = ctx.dup(locked)!
+            _ = ctx.flock(locked, operation: .exclusive)
+            ctx.close(locked)
+
+            let contender = ctx.open("/lockfile")!
+            box.blockedWhileDuplicateOpen = !ctx.flock(contender, operation: .exclusive)
+
+            ctx.close(duplicate)
+            box.acquiredAfterLastDuplicateClosed = ctx.flock(contender, operation: .exclusive)
+            ctx.close(contender)
+        }
+        loop.runUntilIdle()
+
+        #expect(box.blockedWhileDuplicateOpen)
+        #expect(box.acquiredAfterLastDuplicateClosed)
+    }
+
     @Test func hardLinkedPathsShareLockState() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)

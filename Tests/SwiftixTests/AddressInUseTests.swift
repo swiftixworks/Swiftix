@@ -5,8 +5,8 @@ import Testing
 /// open — or a second UDP bind — on a port already in use is rejected instead of
 /// silently displacing the incumbent (the bug that let two `httpd` instances both
 /// "succeed" on port 80). The port becomes reusable once the last descriptor
-/// handle to the owning socket closes (explicit close or process exit), and
-/// `SO_REUSEADDR` waives the UDP conflict check.
+/// handle to the owning socket closes (explicit close or process exit). UDP
+/// remains a deliberate single-owner model until shared-port fanout exists.
 @Suite("Address in use (EADDRINUSE)")
 struct AddressInUseTests {
 
@@ -151,8 +151,9 @@ struct AddressInUseTests {
         #expect(result.second == false)
     }
 
-    /// `SO_REUSEADDR` waives the UDP conflict check (explicit reuse takes over).
-    @Test func udpBindWithReuseAddressWaivesConflict() {
+    /// Merely setting `SO_REUSEADDR` on the newcomer must not overwrite the
+    /// incumbent in a single-owner demultiplexer.
+    @Test func udpReuseAddressDoesNotStealExistingBinding() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
 
@@ -169,7 +170,28 @@ struct AddressInUseTests {
         loop.advance(by: 0.1)
 
         #expect(result.first)
-        #expect(result.reuse)
+        #expect(result.reuse == false)
+    }
+
+    /// Binding port zero selects a real ephemeral port, so the resulting socket
+    /// never occupies the demultiplexer's reserved key zero.
+    @Test func udpBindPortZeroAllocatesEphemeralPort() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Result { var bound = false }
+        let result = Result()
+        kernel.spawn("binder") { ctx in
+            let socket = ctx.socket()!
+            result.bound = ctx.bind(socket, address: nil, port: 0)
+            let pipe = ctx.pipe(); _ = pipe.write
+            ctx.read(pipe.read) { _ in }
+        }
+        loop.advance(by: 0.1)
+
+        #expect(result.bound)
+        #expect(kernel.netns.stack.snapshotUDPPorts().contains(0) == false)
+        #expect(kernel.netns.stack.snapshotUDPPorts().count == 1)
     }
 
     /// Closing a bound UDP socket frees the port for a fresh bind.

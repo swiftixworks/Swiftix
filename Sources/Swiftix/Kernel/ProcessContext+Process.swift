@@ -4,19 +4,23 @@ extension ProcessContext {
 
     // MARK: - Process control
 
+    /// Spawn a child, returning its PID or `0` when creation is refused (for
+    /// example because the inherited cgroup reached `pids.max`).
     @discardableResult
     public func spawn(_ name: String, args: [String] = [],
                       _ body: @escaping (ProcessContext) -> Void) -> PID {
-        kernel.spawn(name, args: args, parent: process.pid, body)
+        guard process.isLive else { return 0 }
+        return kernel.spawn(name, args: args, parent: process.pid, body)
     }
 
     /// Spawn a child whose body is an `async` function (uses the loop-bound
-    /// executor). Lets a program launch long-running or `await`-driven children
-    /// (servers, clients) with the same ergonomics as the synchronous overload.
+    /// executor). Returns `0` under the same refusal conditions as the
+    /// synchronous overload.
     @discardableResult
     public func spawn(_ name: String, args: [String] = [],
                       _ body: @escaping (ProcessContext) async -> Void) -> PID {
-        kernel.spawn(name, args: args, parent: process.pid, body)
+        guard process.isLive else { return 0 }
+        return kernel.spawn(name, args: args, parent: process.pid, body)
     }
 
     /// This process's argument vector (POSIX `argv`); `arguments[0]` is the
@@ -64,13 +68,18 @@ extension ProcessContext {
     @discardableResult
     public func chdir(_ path: String) -> Bool {
         let resolved = absolute(path)
-        guard let node = kernel.vfs.lookup(resolved, mounts: mountNS), node.kind == .directory else { return false }
+        guard let node = kernel.vfs.lookup(resolved, mounts: mountNS),
+              node.kind == .directory,
+              permits(node, .execute) else { return false }
         process.cwd = resolved
         return true
     }
 
+    /// Perform logical exit immediately. Callers must return from their command
+    /// body after this call; process-owned scheduling, waits, descriptors, and
+    /// child creation are disabled as soon as it returns.
     public func exit(_ code: Int32 = 0) {
-        process.state = .zombie(status: .exited(code))
+        kernel.exit(process, code: code)
     }
 
     // MARK: - Command table (the shell's "/bin")
@@ -164,18 +173,43 @@ extension ProcessContext {
 
     // MARK: - Credentials (uid/gid)
 
-    /// Current effective user ID (permissive-first: stored, not enforced).
+    /// Current effective user ID used by the VFS DAC checks.
     public func getuid() -> UInt32 { process.uid }
-    /// Current effective group ID (permissive-first: stored, not enforced).
+    /// Current effective group ID used by the VFS DAC checks.
     public func getgid() -> UInt32 { process.gid }
 
-    /// Set the effective user ID. No privilege check (permissive-first).
-    public func setuid(_ uid: UInt32) { process.uid = uid }
-    /// Set the effective group ID. No privilege check (permissive-first).
-    public func setgid(_ gid: UInt32) { process.gid = gid }
+    /// Supplementary groups used by group-mode checks, stable-sorted for callers.
+    public func getgroups() -> [UInt32] { process.supplementaryGroups.sorted() }
 
-    /// Change ownership of a file. No privilege check (permissive-first).
+    /// Change the effective uid in Swiftix's compact credential model. Root may
+    /// drop to any uid; an unprivileged process cannot regain or switch identity.
+    @discardableResult
+    public func setuid(_ uid: UInt32) -> Bool {
+        guard process.uid == 0 || process.uid == uid else { return false }
+        process.uid = uid
+        return true
+    }
+
+    /// Change the effective gid. Call before dropping uid when transitioning a
+    /// root process to another identity.
+    @discardableResult
+    public func setgid(_ gid: UInt32) -> Bool {
+        guard process.uid == 0 || process.gid == gid else { return false }
+        process.gid = gid
+        return true
+    }
+
+    /// Replace supplementary groups. Only root may change the set.
+    @discardableResult
+    public func setgroups(_ groups: [UInt32]) -> Bool {
+        guard process.uid == 0 else { return false }
+        process.supplementaryGroups = Set(groups)
+        return true
+    }
+
+    /// Change ownership of a file. This compact model reserves chown for root.
     public func chown(_ path: String, uid: UInt32, gid: UInt32) -> Bool {
+        guard process.uid == 0 else { return false }
         guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
         node.uid = uid
         node.gid = gid
@@ -186,6 +220,7 @@ extension ProcessContext {
     /// Change mode (permission bits) of a file.
     public func chmod(_ path: String, mode: FileMode) -> Bool {
         guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
+        guard process.uid == 0 || process.uid == node.uid else { return false }
         node.mode = mode
         node.touchChange(kernel.loop.now)
         return true
@@ -199,26 +234,36 @@ extension ProcessContext {
         guard !stat.mode.intersection(anyExecute).isEmpty else { return false }
         if getuid() == 0 { return true }
         if getuid() == stat.uid { return stat.mode.contains(.ownerExecute) }
-        if getgid() == stat.gid { return stat.mode.contains(.groupExecute) }
+        if getgid() == stat.gid || process.supplementaryGroups.contains(stat.gid) {
+            return stat.mode.contains(.groupExecute)
+        }
         return stat.mode.contains(.otherExecute)
     }
 
-    /// Whether this process's credentials permit read (or, with `write`, write)
-    /// access to `node`. Root (uid 0) is always permitted; otherwise the owner,
-    /// group, or other permission triad is selected by comparing the process's
-    /// uid/gid to the node's, and the relevant `r`/`w` bit is checked.
-    func permits(_ node: VNode, write: Bool) -> Bool {
+    enum FilePermission {
+        case read
+        case write
+        case execute
+    }
+
+    /// Whether this process's effective credentials permit an access to `node`.
+    /// Root bypasses DAC; otherwise owner, group (including supplementary
+    /// groups), or other mode bits are selected exactly once.
+    func permits(_ node: VNode, _ permission: FilePermission) -> Bool {
         if process.uid == 0 { return true }   // root bypasses permission checks
-        let readBit: FileMode
-        let writeBit: FileMode
+        let bits: (read: FileMode, write: FileMode, execute: FileMode)
         if process.uid == node.uid {
-            (readBit, writeBit) = (.ownerRead, .ownerWrite)
-        } else if process.gid == node.gid {
-            (readBit, writeBit) = (.groupRead, .groupWrite)
+            bits = (.ownerRead, .ownerWrite, .ownerExecute)
+        } else if process.gid == node.gid || process.supplementaryGroups.contains(node.gid) {
+            bits = (.groupRead, .groupWrite, .groupExecute)
         } else {
-            (readBit, writeBit) = (.otherRead, .otherWrite)
+            bits = (.otherRead, .otherWrite, .otherExecute)
         }
-        return node.mode.contains(write ? writeBit : readBit)
+        switch permission {
+        case .read: return node.mode.contains(bits.read)
+        case .write: return node.mode.contains(bits.write)
+        case .execute: return node.mode.contains(bits.execute)
+        }
     }
 
 
@@ -232,16 +277,19 @@ extension ProcessContext {
     }
 
     /// Read a sector from a named block device. Returns nil if the device doesn't
-    /// exist or the sector is out of range.
+    /// exist, is asynchronous-only, or the sector is out of range. New database
+    /// and service code should use the async/throwing overload, which supports
+    /// durable volumes and distinguishes these failures.
     public func readBlock(device: String, sector: Int) -> [UInt8]? {
-        kernel.blockDevices.device(device)?.read(sector: sector)
+        kernel.blockDevices.synchronousDevice(device)?.read(sector: sector)
     }
 
-    /// Write a sector to a named block device. Returns false if the device doesn't
-    /// exist, the sector is out of range, or the data size is wrong.
+    /// Write a sector to a synchronous block device. Returns false if the device
+    /// doesn't exist, is asynchronous-only, the sector is out of range, or the
+    /// data size is wrong. New code should use the async/throwing overload.
     @discardableResult
     public func writeBlock(device: String, sector: Int, data: [UInt8]) -> Bool {
-        kernel.blockDevices.device(device)?.write(sector: sector, data: data) ?? false
+        kernel.blockDevices.synchronousDevice(device)?.write(sector: sector, data: data) ?? false
     }
 
     /// List all registered block device names.
@@ -249,13 +297,18 @@ extension ProcessContext {
         kernel.blockDevices.names
     }
 
+    /// Fixed geometry for one attached volume, or nil when the name is unknown.
+    public func blockVolumeInfo(_ name: String) -> BlockVolumeInfo? {
+        kernel.blockDevices.info(name)
+    }
+
     /// Install a handler for a signal (replaces the default disposition).
     public func signal(_ number: Int32, _ handler: @escaping () -> Void) {
         process.signalHandlers[number] = handler
     }
 
-    /// The process's current blocked signal set. SIGKILL and SIGCONT are never
-    /// retained here.
+    /// The process's current blocked signal set. SIGKILL and SIGSTOP are never
+    /// retained here; SIGCONT may be masked but its resume effect is immediate.
     public var signalMask: Set<Int32> {
         process.signalMask
     }
@@ -331,13 +384,13 @@ extension ProcessContext {
     /// parked and resumes on the single loop thread. Call as the tail of a step.
     /// The async front-end is `try await ctx.sleep(_)`.
     public func sleep(_ seconds: Double, resume: @escaping () -> Void) {
-        process.blockedOn += 1
         let kernel = self.kernel
         let process = self.process
-        kernel.schedule(after: seconds) { [weak kernel, weak process] in
+        let waitID = process.beginWait(.sleep(deadline: kernel.loop.now + max(0, seconds)))
+        kernel.schedule(for: process, after: seconds) { [weak kernel, weak process] in
             guard let kernel, let process else { return }
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume()
             }
         }

@@ -199,10 +199,6 @@ final class TCPConnection {
         get { notifications.onEstablished }
         set { notifications.onEstablished = newValue }
     }
-    var onReadable: (() -> Void)? {
-        get { notifications.onReadable }
-        set { notifications.onReadable = newValue }
-    }
     private weak var listener: TCPListener?
     private let notifications = TCPConnectionNotifications()
     private let transmitter: TCPTransmitter
@@ -271,6 +267,7 @@ final class TCPConnection {
         if windowWasZero && advertisedWindow > 0 && state == .established {
             perform(.sendAck)
         }
+        if !receiveBuffer.isEmpty { notifications.readable() }
         return out
     }
 
@@ -295,6 +292,10 @@ final class TCPConnection {
 
     func addReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {
         notifications.addReadinessListener(listener)
+    }
+
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        notifications.addReadWaiter(waiter)
     }
 
     /// Begin (or continue) an orderly close.

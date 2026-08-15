@@ -18,7 +18,7 @@ struct PermissionTests {
         final class Result { var error: SyscallError?; var opened = false }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             do {
                 let fd = try ctx.openFile("/secret")
                 result.opened = true
@@ -42,7 +42,7 @@ struct PermissionTests {
         final class Result { var opened = false }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             if let fd = try? ctx.openFile("/pub") { result.opened = true; ctx.close(fd) }
             ctx.exit(0)
         }
@@ -59,7 +59,7 @@ struct PermissionTests {
         final class Result { var error: SyscallError? }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             do {
                 _ = try ctx.openFile("/ro", truncate: true)             // open to modify
             } catch let error as SyscallError {
@@ -84,7 +84,7 @@ struct PermissionTests {
         }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             do {
                 let fd = try ctx.openFile("/ro")
                 result.nonThrowingWrite = ctx.write(fd, Array("changed".utf8))
@@ -116,7 +116,7 @@ struct PermissionTests {
         final class Result { var error: SyscallError? }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             do {
                 _ = try ctx.openFile("/ro", flags: [], access: .writeOnly)
             } catch let error as SyscallError {
@@ -152,13 +152,74 @@ struct PermissionTests {
         final class Result { var opened = false }
         let result = Result()
         kernel.spawn("user") { ctx in
-            ctx.setuid(1000); ctx.setgid(1000)
+            ctx.setgid(1000); ctx.setuid(1000)
             if let fd = try? ctx.openFile("/mine") { result.opened = true; ctx.close(fd) }
             ctx.exit(0)
         }
         loop.runUntilIdle()
 
         #expect(result.opened)                                          // owner may read
+    }
+
+    @Test func supplementaryGroupSelectsGroupPermissionBits() {
+        let (loop, kernel) = boot()
+        seedFile(kernel, loop, path: "/shared", contents: "group data",
+                 mode: [.ownerRead, .ownerWrite, .groupRead])
+        kernel.spawn("set-group-owner") { ctx in
+            _ = ctx.chown("/shared", uid: 0, gid: 42)
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        final class Result { var contents = "" }
+        let result = Result()
+        kernel.spawn("user") { ctx in
+            ctx.setgroups([42])
+            ctx.setgid(1000)
+            ctx.setuid(1000)
+            if let fd = try? ctx.openFile("/shared") {
+                result.contents = String(decoding: ctx.read(fd, max: 64), as: UTF8.self)
+                ctx.close(fd)
+            }
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(result.contents == "group data")
+    }
+
+    @Test func nonRootCannotCreateOrRemoveInsideReadOnlyDirectory() {
+        let (loop, kernel) = boot()
+        kernel.spawn("seed") { ctx in
+            _ = ctx.mkdir("/locked")
+            _ = ctx.open("/locked/existing", create: true)
+            _ = ctx.chmod("/locked", mode: [
+                .ownerRead, .ownerWrite, .ownerExecute,
+                .groupRead, .groupExecute,
+                .otherRead, .otherExecute,
+            ])
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        final class Result { var createError: SyscallError?; var removed = true }
+        let result = Result()
+        kernel.spawn("user") { ctx in
+            ctx.setgid(1000)
+            ctx.setuid(1000)
+            do {
+                _ = try ctx.openFile("/locked/new", create: true)
+            } catch let error as SyscallError {
+                result.createError = error
+            } catch {}
+            result.removed = ctx.remove("/locked/existing")
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(result.createError == .permissionDenied)
+        #expect(result.removed == false)
+        #expect(kernel.vfs.lookup("/locked/existing") != nil)
     }
 
     // MARK: - Through the shell (chmod / su / whoami)

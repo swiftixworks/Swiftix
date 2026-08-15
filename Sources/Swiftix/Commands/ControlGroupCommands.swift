@@ -10,8 +10,8 @@
 ///   cgdelete demo            # remove the (empty) group
 ///
 /// A process placed in `demo` and its descendants count against `pids.max`;
-/// spawning past the limit is refused by the kernel (the child is born already
-/// exited), which is how a `pids.max` contains a fork bomb.
+/// spawning past the limit returns pid 0 without allocating a process, which is
+/// how a `pids.max` contains a fork bomb.
 ///
 /// These run on the single loop-bound executor like every other command.
 extension BuiltinCommands {
@@ -85,11 +85,11 @@ extension BuiltinCommands {
                 guard let command = ctx.resolveCommand(commandArgs[0]) else {
                     ctx.fail("cgexec: \(commandArgs[0]): command not found", code: 127); return
                 }
-                // Join the group in the child; abort (without running the body) if
-                // the group's pids.max is already reached.
+                // Existing-process migration is allowed above pids.max; the
+                // limit applies when the child subsequently spawns.
                 func placeIntoGroup(_ child: ProcessContext) -> Bool {
                     if child.joinCgroup(group) { return true }
-                    child.error("cgexec: cgroup '\(group)' pids.max reached")
+                    child.error("cgexec: cgroup '\(group)' does not exist")
                     child.exit(1)
                     return false
                 }

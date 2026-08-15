@@ -14,6 +14,7 @@ struct SyscallErrorTests {
         #expect(SyscallError.fileExists.code == 17)             // EEXIST
         #expect(SyscallError.isADirectory.code == 21)           // EISDIR
         #expect(SyscallError.invalidArgument.code == 22)        // EINVAL
+        #expect(SyscallError.brokenPipe.code == 32)             // EPIPE
         #expect(SyscallError.connectionReset.code == 104)       // ECONNRESET
         #expect(SyscallError.notConnected.code == 107)          // ENOTCONN
     }
@@ -22,7 +23,7 @@ struct SyscallErrorTests {
     @Test func distinctCasesHaveDistinctCodes() {
         let all: [SyscallError] = [
             .noSuchFileOrDirectory, .interrupted, .badFileDescriptor, .wouldBlock, .noChildProcess,
-            .isADirectory, .fileExists, .connectionReset, .notConnected, .invalidArgument,
+            .isADirectory, .fileExists, .brokenPipe, .connectionReset, .notConnected, .invalidArgument,
         ]
         let codes = all.map(\.code)
         #expect(Set(codes).count == all.count)

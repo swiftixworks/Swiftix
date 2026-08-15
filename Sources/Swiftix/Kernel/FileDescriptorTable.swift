@@ -1,23 +1,66 @@
 /// A process's open file descriptors: small non-negative integers mapping to
 /// open file objects. By convention fd 0/1/2 are stdin/stdout/stderr.
 final class FileDescriptorTable {
-    private struct Entry {
+    /// One system-wide open-file description. Multiple descriptors created by
+    /// `dup` or inherited by `spawn` share this object, and therefore share the
+    /// file offset held by `object`, the access mode, and file-status flags.
+    ///
+    /// `FileObject.opened/closed` bracket the lifetime of this description, not
+    /// each descriptor that points at it. This is what makes pipe endpoint counts,
+    /// socket bindings, deferred deletion, and `flock` survive until the last
+    /// duplicate descriptor is closed.
+    private final class OpenFileDescription {
         let object: FileObject
-        var flags: FileStatusFlags
         let access: FileAccessMode
+        var statusFlags: FileStatusFlags
+        private var descriptorReferences = 0
+
+        init(object: FileObject,
+             statusFlags: FileStatusFlags,
+             access: FileAccessMode) {
+            self.object = object
+            self.statusFlags = statusFlags
+            self.access = access
+        }
+
+        func retainDescriptor() {
+            if descriptorReferences == 0 { object.opened() }
+            descriptorReferences += 1
+        }
+
+        func releaseDescriptor() {
+            guard descriptorReferences > 0 else { return }
+            descriptorReferences -= 1
+            if descriptorReferences == 0 { object.closed() }
+        }
+    }
+
+    private struct Entry {
+        let description: OpenFileDescription
     }
 
     private var table: [Int: Entry] = [:]
+    private var isSealed = false
 
     /// Install `object` at the lowest free descriptor and return it.
     @discardableResult
     func allocate(_ object: FileObject,
                   flags: FileStatusFlags = [],
                   access: FileAccessMode = .readWrite) -> Int {
+        guard !isSealed else { return -1 }
+        let description = OpenFileDescription(object: object,
+                                              statusFlags: flags,
+                                              access: access)
+        return allocate(description)
+    }
+
+    /// Install another descriptor for an existing open-file description.
+    private func allocate(_ description: OpenFileDescription) -> Int {
+        guard !isSealed else { return -1 }
         var fd = 0
         while table[fd] != nil { fd += 1 }
-        table[fd] = Entry(object: object, flags: flags, access: access)
-        object.opened()
+        table[fd] = Entry(description: description)
+        description.retainDescriptor()
         return fd
     }
 
@@ -28,51 +71,78 @@ final class FileDescriptorTable {
                  at fd: Int,
                  flags: FileStatusFlags = [],
                  access: FileAccessMode = .readWrite) {
-        table[fd]?.object.closed()
-        table[fd] = Entry(object: object, flags: flags, access: access)
-        object.opened()
+        guard !isSealed else { return }
+        let description = OpenFileDescription(object: object,
+                                              statusFlags: flags,
+                                              access: access)
+        install(description, at: fd)
+    }
+
+    private func install(_ description: OpenFileDescription, at fd: Int) {
+        guard !isSealed else { return }
+        table[fd]?.description.releaseDescriptor()
+        table[fd] = Entry(description: description)
+        description.retainDescriptor()
     }
 
     func object(_ fd: Int) -> FileObject? {
-        table[fd]?.object
+        table[fd]?.description.object
     }
 
     func flags(_ fd: Int) -> FileStatusFlags? {
-        table[fd]?.flags
+        table[fd]?.description.statusFlags
     }
 
     func access(_ fd: Int) -> FileAccessMode? {
-        table[fd]?.access
+        table[fd]?.description.access
     }
 
     @discardableResult
     func setFlags(_ fd: Int, _ flags: FileStatusFlags) -> Bool {
-        guard var entry = table[fd] else { return false }
-        entry.flags = flags
-        table[fd] = entry
+        guard let description = table[fd]?.description else { return false }
+        description.statusFlags = flags
         return true
     }
 
     func close(_ fd: Int) {
-        table[fd]?.object.closed()
+        table[fd]?.description.releaseDescriptor()
         table[fd] = nil
+    }
+
+    /// Duplicate `fd` to the lowest free descriptor while preserving the shared
+    /// open-file description.
+    func duplicate(_ fd: Int) -> Int? {
+        guard let description = table[fd]?.description else { return nil }
+        return allocate(description)
+    }
+
+    /// Duplicate `fd` onto `target` (`dup2`). Closing an existing target releases
+    /// only that descriptor reference; the source description remains live.
+    @discardableResult
+    func duplicate(_ fd: Int, onto target: Int) -> Bool {
+        guard let description = table[fd]?.description else { return false }
+        if fd == target { return true }
+        install(description, at: target)
+        return true
     }
 
     /// Copy every descriptor from `other` into this (empty) table, sharing the
     /// same open-file descriptions and counting a new handle for each — the
     /// descriptor half of `fork`/`spawn` inheritance.
     func clone(from other: FileDescriptorTable) {
+        guard !isSealed else { return }
         for (fd, entry) in other.table {
             table[fd] = entry
-            entry.object.opened()
+            entry.description.retainDescriptor()
         }
     }
 
     /// Release every descriptor (process exit): each object's handle is closed so
     /// reference-counted resources (pipes) see their writers/readers go away.
     func closeAll() {
-        for entry in table.values { entry.object.closed() }
+        for entry in table.values { entry.description.releaseDescriptor() }
         table.removeAll()
+        isSealed = true
     }
 
     var openDescriptors: [Int] { table.keys.sorted() }

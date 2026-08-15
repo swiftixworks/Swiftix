@@ -124,7 +124,13 @@ struct WaitTests {
         loop.advance(by: 0)
 
         #expect(captured.waitedEvent == nil)
-        #expect(kernel.processCount == 2)
+        // The fast child has exited but remains as a visible zombie until the
+        // parent consumes its status after the specifically-waited slow child.
+        #expect(kernel.processCount == 3)
+        #expect(kernel.process(captured.fastPID).map {
+            if case .zombie(.exited(3)) = $0.lifecycle { return true }
+            return false
+        } == true)
 
         loop.advance(by: 2)
         loop.runUntilIdle()

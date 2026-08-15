@@ -83,7 +83,7 @@ struct SignalsTests {
 
         pty.writeFromApp([0x1A])                    // Ctrl-Z -> SIGTSTP
         loop.runUntilIdle()
-        #expect(kernel.process(jobPID).map { if case .stopped = $0.state { return true } else { return false } } == true)
+        #expect(kernel.process(jobPID)?.isStopped == true)
 
         pty.writeFromApp(Array("hello\n".utf8))     // typed while stopped: deferred, not consumed yet
         loop.runUntilIdle()

@@ -131,6 +131,28 @@ struct FileSystemTests {
         #expect(box.sparse == Array("abXYef".utf8) + [0, 0, 0x7A])
     }
 
+    @Test func duplicatedDescriptorsShareOneFileOffset() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box { var first: [UInt8] = []; var second: [UInt8] = [] }
+        let box = Box()
+        kernel.spawn("dup-offset") { ctx in
+            let original = ctx.open("/f", create: true, access: .readWrite)!
+            ctx.write(original, Array("abc".utf8))
+            _ = ctx.seek(original, to: 0, whence: 0)
+            let duplicate = ctx.dup(original)!
+            box.first = ctx.read(original, max: 1)
+            box.second = ctx.read(duplicate, max: 1)
+            ctx.close(original)
+            ctx.close(duplicate)
+        }
+        loop.runUntilIdle()
+
+        #expect(box.first == Array("a".utf8))
+        #expect(box.second == Array("b".utf8))
+    }
+
     @Test func appendFlagWritesAtEndAfterSeek() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)

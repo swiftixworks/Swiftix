@@ -1,5 +1,4 @@
-/// Tests for uid/gid credentials and chown/chmod (permissive-first: stored but
-/// not enforced for access checks).
+/// Tests for Swiftix's compact effective-credential model and ownership changes.
 import Testing
 @testable import Swiftix
 
@@ -32,8 +31,8 @@ struct CredentialsTests {
         let result = Result()
 
         kernel.spawn("test") { ctx in
-            ctx.setuid(1000)
             ctx.setgid(1000)
+            ctx.setuid(1000)
             result.uid = ctx.getuid()
             result.gid = ctx.getgid()
             ctx.exit(0)
@@ -42,6 +41,64 @@ struct CredentialsTests {
 
         #expect(result.uid == 1000)
         #expect(result.gid == 1000)
+    }
+
+    @Test func childInheritsCredentialsAndCannotRegainRoot() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Result {
+            var uid: UInt32 = 0
+            var gid: UInt32 = 0
+            var regainedRoot = true
+        }
+        let result = Result()
+        kernel.spawn("parent") { ctx in
+            ctx.setgid(1000)
+            ctx.setuid(1000)
+            ctx.spawn("child") { child in
+                result.uid = child.getuid()
+                result.gid = child.getgid()
+                result.regainedRoot = child.setuid(0)
+                child.exit(0)
+            }
+            ctx.wait { _ in ctx.exit(0) }
+        }
+        loop.runUntilIdle()
+
+        #expect(result.uid == 1000)
+        #expect(result.gid == 1000)
+        #expect(result.regainedRoot == false)
+    }
+
+    @Test func onlyRootCanChangeSupplementaryGroupsOrForeignOwnership() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Result {
+            var changedGroups = true
+            var changedOwner = true
+            var changedMode = true
+        }
+        let result = Result()
+        kernel.spawn("seed") { ctx in
+            _ = ctx.open("/root-owned", create: true)
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+        kernel.spawn("user") { ctx in
+            ctx.setgid(1000)
+            ctx.setuid(1000)
+            result.changedGroups = ctx.setgroups([42])
+            result.changedOwner = ctx.chown("/root-owned", uid: 1000, gid: 1000)
+            result.changedMode = ctx.chmod("/root-owned", mode: [.ownerRead])
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(result.changedGroups == false)
+        #expect(result.changedOwner == false)
+        #expect(result.changedMode == false)
     }
 
     @Test func chownChangesFileOwnership() {

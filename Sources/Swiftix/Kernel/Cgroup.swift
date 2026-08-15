@@ -9,8 +9,9 @@
 ///
 /// A process is admitted to its group when it is spawned (a child inherits its
 /// parent's group). If admitting it would push the group — or any ancestor — past
-/// `pids.max`, the spawn is refused: the child is born already exited with a
-/// resource-limit status. That is how a `pids.max` bounds a fork bomb.
+/// `pids.max`, creation fails before allocating a PID. Moving an existing process
+/// remains an organizational operation and is allowed even above the limit; the
+/// limit then blocks subsequent creation, matching cgroup-v2 pids semantics.
 ///
 /// Reference type, mutated only on the single serial executor (no lock), like the
 /// rest of the kernel core. Kept `internal`; the consumer boundary is the
@@ -142,32 +143,27 @@ final class CgroupController {
         return true
     }
 
-    /// Admit a freshly-spawned `pid` into its parent's group (inheritance). The
-    /// root group is never limited, so top-level processes are always admitted.
-    /// Returns `false` when a `pids.max` on the target subtree is already reached.
-    @discardableResult
-    func admitChild(pid: PID, parentPID: PID) -> Bool {
+    /// Whether a child can be created in its parent's inherited group.
+    func canAdmitChild(parentPID: PID) -> Bool {
         let target = cgroupOf(parentPID)
-        guard canAdmit(target) else { return false }
+        return canAdmit(target)
+    }
+
+    /// Record a freshly-created child's inherited membership after admission.
+    func admitChild(pid: PID, parentPID: PID) {
+        let target = cgroupOf(parentPID)
         if target !== root { membership[pid] = target }
-        return true
     }
 
     /// Move a live process into `group` (the `cgroup.procs` write / `cgexec`
-    /// placement). Refuses — leaving the process where it was — when the target
-    /// subtree is full. Returns `true` on success.
+    /// placement). This is organizational rather than process creation, so it is
+    /// allowed even when the destination is at/above `pids.max`.
     @discardableResult
     func move(pid: PID, to group: Cgroup) -> Bool {
         let old = cgroupOf(pid)
         if old === group { return true }
-        let previous = membership[pid]
-        membership[pid] = nil                    // tentatively drop for the count
-        if canAdmit(group) {
-            if group !== root { membership[pid] = group }
-            return true
-        }
-        membership[pid] = previous               // revert
-        return false
+        membership[pid] = group === root ? nil : group
+        return true
     }
 
     /// Drop memberships for pids that have exited (keeps the index bounded).

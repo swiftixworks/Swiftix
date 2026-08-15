@@ -37,7 +37,12 @@ extension ProcessContext {
     ///   file.
     @discardableResult
     public func mkdir(_ path: String) -> Bool {
-        kernel.vfs.createDirectory(absolute(path), mounts: mountNS) != nil
+        let resolved = absolute(path)
+        let existing = kernel.vfs.lookup(resolved, follow: false, mounts: mountNS)
+        guard existing != nil || canMutateParent(of: resolved) else { return false }
+        guard let node = kernel.vfs.createDirectory(resolved, mounts: mountNS) else { return false }
+        if existing == nil { applyCreationOwnership(to: node) }
+        return true
     }
 
     /// Remove a file or empty directory at `path` (POSIX `unlink`/`rmdir`).
@@ -46,7 +51,9 @@ extension ProcessContext {
     ///   a non-empty directory.
     @discardableResult
     public func remove(_ path: String) -> Bool {
-        kernel.vfs.remove(absolute(path), mounts: mountNS)
+        let resolved = absolute(path)
+        guard canMutateParent(of: resolved) else { return false }
+        return kernel.vfs.remove(resolved, mounts: mountNS)
     }
 
     /// Metadata for the node at `path`, or `nil` if it does not exist. Symbolic
@@ -69,7 +76,13 @@ extension ProcessContext {
     /// - Returns: `true` on success, `false` if `path` already exists.
     @discardableResult
     public func symlink(_ target: String, at path: String) -> Bool {
-        kernel.vfs.createSymlink(absolute(path), target: target, mounts: mountNS) != nil
+        let resolved = absolute(path)
+        guard canMutateParent(of: resolved),
+              let node = kernel.vfs.createSymlink(resolved, target: target, mounts: mountNS) else {
+            return false
+        }
+        applyCreationOwnership(to: node)
+        return true
     }
 
     /// The target path of the symbolic link at `path` (POSIX `readlink`), or
@@ -87,7 +100,9 @@ extension ProcessContext {
     /// directory or doesn't exist, or if `linkPath` already exists.
     @discardableResult
     public func link(_ targetPath: String, at linkPath: String) -> Bool {
-        kernel.vfs.link(absolute(targetPath), at: absolute(linkPath), mounts: mountNS)
+        let destination = absolute(linkPath)
+        guard canMutateParent(of: destination) else { return false }
+        return kernel.vfs.link(absolute(targetPath), at: destination, mounts: mountNS)
     }
 
     // MARK: - Named pipes (FIFO)
@@ -96,7 +111,11 @@ extension ProcessContext {
     /// success, `false` if the path already exists.
     @discardableResult
     public func mkfifo(_ path: String) -> Bool {
-        kernel.vfs.createFifo(absolute(path), mounts: mountNS) != nil
+        let resolved = absolute(path)
+        guard canMutateParent(of: resolved),
+              let node = kernel.vfs.createFifo(resolved, mounts: mountNS) else { return false }
+        applyCreationOwnership(to: node)
+        return true
     }
 
     // MARK: - Advisory file locking (flock)
@@ -138,6 +157,7 @@ extension ProcessContext {
     @discardableResult
     public func utimes(_ path: String, atime: Double? = nil, mtime: Double? = nil) -> Bool {
         guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
+        guard process.uid == 0 || process.uid == node.uid || permits(node, .write) else { return false }
         let now = kernel.loop.now
         node.atime = atime ?? now
         node.mtime = mtime ?? now
@@ -169,8 +189,14 @@ extension ProcessContext {
 
     @discardableResult
     public func write(_ fd: Int, _ bytes: [UInt8]) -> Int {
-        guard process.fileDescriptors.access(fd)?.canWrite == true else { return 0 }
-        return process.fileDescriptors.object(fd)?.write(bytes) ?? 0
+        guard process.fileDescriptors.access(fd)?.canWrite == true,
+              let object = process.fileDescriptors.object(fd) else { return 0 }
+        if !bytes.isEmpty,
+           (object as? BrokenPipeDetecting)?.hasBrokenPipe == true {
+            kernel.kill(process.pid, signal: Signal.sigpipe.rawValue)
+            return 0
+        }
+        return object.write(bytes)
     }
 
     /// Current file-status flags for an open descriptor, or `nil` if it is not open.
@@ -245,9 +271,9 @@ extension ProcessContext {
         let kernel = self.kernel
         let process = self.process
         if !immediate.isEmpty || timeout == 0 {
-            process.blockedOn += 1
+            let waitID = process.beginWait(.readiness(requests.map(\.fd)))
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(immediate)
             }
             return
@@ -257,7 +283,7 @@ extension ProcessContext {
             var completed = false
             var subscriptions: [ReadinessSubscription] = []
             var finish: (() -> Void)?
-            var cancellationID: Int?
+            var waitID: Int?
 
             func cancelSubscriptions() {
                 for subscription in subscriptions {
@@ -275,33 +301,32 @@ extension ProcessContext {
                 action?()
             }
 
-            func cancel(process: Process?) {
+            func cancel() {
                 guard !completed else { return }
                 completed = true
                 cancelSubscriptions()
                 finish = nil
-                if let process, process.blockedOn > 0 {
-                    process.blockedOn -= 1
-                }
             }
         }
 
         let state = WaitState()
-        process.blockedOn += 1
         let context = self
+        state.waitID = process.beginWait(.readiness(requests.map(\.fd)))
 
         state.finish = { [context, weak kernel, weak process] in
             guard let kernel, let process else { return }
-            if let cancellationID = state.cancellationID {
-                process.removeWaitCancellation(cancellationID)
+            if let waitID = state.waitID {
+                process.disarmWaitCancellation(waitID)
             }
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                if let waitID = state.waitID { process.endWait(waitID) }
                 resume(context.poll(requests))
             }
         }
-        state.cancellationID = process.addWaitCancellation { [state, weak process] in
-            state.cancel(process: process)
+        if let waitID = state.waitID {
+            process.setWaitCancellation({ [state] in
+                state.cancel()
+            }, for: waitID)
         }
         let complete: () -> Void = { [state] in state.complete() }
 
@@ -316,7 +341,7 @@ extension ProcessContext {
         }
 
         if let timeout {
-            kernel.schedule(after: timeout, complete)
+            kernel.schedule(for: process, after: timeout, complete)
         }
     }
 
@@ -405,9 +430,11 @@ extension ProcessContext {
     /// `ls` built-in; procfs directories (e.g. `/proc/net`) list too.
     public func listDirectory(_ path: String) -> [String]? {
         guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS),
-              node.kind == .directory else { return nil }
-        var entries = node.children.values
-            .map { $0.kind == .directory ? $0.name + "/" : $0.name }
+              node.kind == .directory,
+              permits(node, .read), permits(node, .execute) else { return nil }
+        var entries = node.children.map { name, child in
+            child.kind == .directory ? name + "/" : name
+        }
         // Computed entries of a dynamic directory (e.g. live pids under /proc);
         // they are directories, so they list with a trailing "/".
         if let dynamic = node.dynamicChildNames?() {
@@ -453,6 +480,9 @@ extension ProcessContext {
                          access: FileAccessMode) throws -> Int {
         let resolved = absolute(path)
         let existing = kernel.vfs.lookup(resolved, mounts: mountNS)
+        if existing == nil, flags.contains(.create), !canMutateParent(of: resolved) {
+            throw SyscallError.permissionDenied
+        }
         return try openFileNode(existing: existing,
                                 create: { kernel.vfs.createFile(resolved, mounts: mountNS) },
                                 flags: flags,
@@ -468,6 +498,14 @@ extension ProcessContext {
                          access: FileAccessMode = .readOnly) throws -> Int {
         let (root, relative) = try scopedRootAndPath(scope, path)
         let existing = kernel.vfs.lookup(relative, beneath: root)
+        if existing == nil, flags.contains(.create) {
+            guard let parent = kernel.vfs.parentDirectory(of: relative, beneath: root) else {
+                throw SyscallError.noSuchFileOrDirectory
+            }
+            guard permits(parent, .write), permits(parent, .execute) else {
+                throw SyscallError.permissionDenied
+            }
+        }
         return try openFileNode(existing: existing,
                                 create: { kernel.vfs.createFile(relative, beneath: root) },
                                 flags: flags,
@@ -493,8 +531,11 @@ extension ProcessContext {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard node.kind == .directory else { throw SyscallError.notADirectory }
-        var entries = node.children.values.map {
-            FileSystemDirectoryEntry(name: $0.name, type: $0.fileType)
+        guard permits(node, .read), permits(node, .execute) else {
+            throw SyscallError.permissionDenied
+        }
+        var entries = node.children.map { name, child in
+            FileSystemDirectoryEntry(name: name, type: child.fileType)
         }
         if let dynamic = node.dynamicChildNames?() {
             entries += dynamic.map { FileSystemDirectoryEntry(name: $0, type: .directory) }
@@ -508,9 +549,16 @@ extension ProcessContext {
         if kernel.vfs.lookup(relative, follow: false, beneath: root) != nil {
             throw SyscallError.fileExists
         }
-        guard kernel.vfs.createDirectory(relative, beneath: root) != nil else {
+        guard let parent = kernel.vfs.parentDirectory(of: relative, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
+        guard permits(parent, .write), permits(parent, .execute) else {
+            throw SyscallError.permissionDenied
+        }
+        guard let node = kernel.vfs.createDirectory(relative, beneath: root) else {
+            throw SyscallError.noSuchFileOrDirectory
+        }
+        applyCreationOwnership(to: node)
     }
 
     /// Remove a file or empty directory relative to a filesystem capability.
@@ -519,6 +567,7 @@ extension ProcessContext {
         guard kernel.vfs.lookup(relative, follow: false, beneath: root) != nil else {
             throw SyscallError.noSuchFileOrDirectory
         }
+        try requireMutableParent(of: relative, beneath: root)
         guard kernel.vfs.remove(relative, beneath: root) else {
             throw SyscallError.permissionDenied
         }
@@ -531,6 +580,7 @@ extension ProcessContext {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard node.kind != .directory else { throw SyscallError.isADirectory }
+        try requireMutableParent(of: relative, beneath: root)
         guard kernel.vfs.remove(relative, beneath: root) else {
             throw SyscallError.permissionDenied
         }
@@ -544,6 +594,7 @@ extension ProcessContext {
         }
         guard node.kind == .directory else { throw SyscallError.notADirectory }
         guard node.children.isEmpty else { throw SyscallError.directoryNotEmpty }
+        try requireMutableParent(of: relative, beneath: root)
         guard kernel.vfs.remove(relative, beneath: root) else {
             throw SyscallError.permissionDenied
         }
@@ -558,6 +609,8 @@ extension ProcessContext {
                        in destinationScope: FileSystemScope) throws {
         let (sourceRoot, sourceRelative) = try scopedRootAndPath(sourceScope, sourcePath)
         let (destinationRoot, destinationRelative) = try scopedRootAndPath(destinationScope, destinationPath)
+        try requireMutableParent(of: sourceRelative, beneath: sourceRoot)
+        try requireMutableParent(of: destinationRelative, beneath: destinationRoot)
         do {
             try kernel.vfs.rename(sourceRelative,
                                   beneath: sourceRoot,
@@ -603,6 +656,30 @@ extension ProcessContext {
         return (root, path)
     }
 
+    /// Parent-directory DAC for namespace-mutating operations. The ordinary
+    /// convenience VFS historically creates missing parents for root; non-root
+    /// callers must name an existing writable/searchable immediate parent.
+    private func canMutateParent(of absolutePath: String) -> Bool {
+        guard let parent = kernel.vfs.parentDirectory(of: absolutePath, mounts: mountNS) else {
+            return process.uid == 0
+        }
+        return permits(parent, .write) && permits(parent, .execute)
+    }
+
+    private func requireMutableParent(of relativePath: String, beneath root: VNode) throws {
+        guard let parent = kernel.vfs.parentDirectory(of: relativePath, beneath: root) else {
+            throw SyscallError.noSuchFileOrDirectory
+        }
+        guard permits(parent, .write), permits(parent, .execute) else {
+            throw SyscallError.permissionDenied
+        }
+    }
+
+    private func applyCreationOwnership(to node: VNode) {
+        node.uid = process.uid
+        node.gid = process.gid
+    }
+
     private func openFileNode(existing: VNode?,
                               create: () -> VNode?,
                               flags: OpenFlags,
@@ -619,8 +696,8 @@ extension ProcessContext {
         // Named pipe (FIFO): opening it creates a FifoEndpoint connected to the
         // node's shared PipeBuffer. The first open lazily creates the buffer.
         if let existing, existing.kind == .fifo {
-            if access.canRead, !permits(existing, write: false) { throw SyscallError.permissionDenied }
-            if access.canWrite, !permits(existing, write: true) { throw SyscallError.permissionDenied }
+            if access.canRead, !permits(existing, .read) { throw SyscallError.permissionDenied }
+            if access.canWrite, !permits(existing, .write) { throw SyscallError.permissionDenied }
             if existing.fifoBuffer == nil { existing.fifoBuffer = PipeBuffer() }
             let buffer = existing.fifoBuffer!
             let isWrite = access.canWrite && !access.canRead
@@ -633,11 +710,11 @@ extension ProcessContext {
             throw SyscallError.invalidArgument
         }
         // Permission check (EACCES) against the exact access carried by the new
-        // descriptor. Root bypasses all checks, matching Unix. Creating a brand-new
-        // file still skips parent-directory enforcement, which remains out of scope.
+        // descriptor. Root bypasses all checks, matching Unix. Parent-directory
+        // mutation permission is validated by the path-aware frontend above.
         if let existing, existing.kind == .file {
-            if access.canRead, !permits(existing, write: false) { throw SyscallError.permissionDenied }
-            if access.canWrite, !permits(existing, write: true) { throw SyscallError.permissionDenied }
+            if access.canRead, !permits(existing, .read) { throw SyscallError.permissionDenied }
+            if access.canWrite, !permits(existing, .write) { throw SyscallError.permissionDenied }
         }
         let node = flags.contains(.create) ? create() : existing
         guard let node else {
@@ -710,6 +787,11 @@ extension ProcessContext {
               process.fileDescriptors.access(fd)?.canWrite == true else {
             throw SyscallError.badFileDescriptor
         }
+        if !bytes.isEmpty,
+           (object as? BrokenPipeDetecting)?.hasBrokenPipe == true {
+            kernel.kill(process.pid, signal: Signal.sigpipe.rawValue)
+            throw SyscallError.brokenPipe
+        }
         let readiness = object.readiness
         if !bytes.isEmpty,
            fileStatusFlags(fd)?.contains(.nonBlocking) == true,
@@ -718,6 +800,31 @@ extension ProcessContext {
             throw SyscallError.wouldBlock
         }
         return object.write(bytes)
+    }
+
+    /// Read up to `max` bytes at an explicit position without changing the
+    /// shared open-file-description offset. This is the Swiftix `pread` contract
+    /// used by page-oriented applications.
+    public func pread(_ fd: Int, max: Int, offset: Int) throws -> [UInt8] {
+        guard max >= 0, offset >= 0 else { throw SyscallError.invalidArgument }
+        guard process.fileDescriptors.access(fd)?.canRead == true,
+              let file = process.fileDescriptors.object(fd) as? RegularFileHandle else {
+            throw SyscallError.badFileDescriptor
+        }
+        return file.read(at: offset, max: max)
+    }
+
+    /// Write at an explicit position without changing the shared
+    /// open-file-description offset. Append status does not redirect positional
+    /// writes, matching the pager-friendly `pwrite` behavior.
+    @discardableResult
+    public func pwrite(_ fd: Int, _ bytes: [UInt8], offset: Int) throws -> Int {
+        guard offset >= 0 else { throw SyscallError.invalidArgument }
+        guard process.fileDescriptors.access(fd)?.canWrite == true,
+              let file = process.fileDescriptors.object(fd) as? RegularFileHandle else {
+            throw SyscallError.badFileDescriptor
+        }
+        return file.write(bytes, at: offset)
     }
 
     /// Close a descriptor.
@@ -745,10 +852,7 @@ extension ProcessContext {
     /// same open-file description. Returns the new descriptor, or `nil` if `fd`
     /// is not open.
     public func dup(_ fd: Int) -> Int? {
-        guard let object = process.fileDescriptors.object(fd) else { return nil }
-        return process.fileDescriptors.allocate(object,
-                                                flags: fileStatusFlags(fd) ?? [],
-                                                access: fileAccessMode(fd) ?? .readWrite)
+        process.fileDescriptors.duplicate(fd)
     }
 
     /// Duplicate `fd` onto `target` (POSIX `dup2`): after the call `target` refers
@@ -759,13 +863,7 @@ extension ProcessContext {
     /// - Returns: `true` on success, `false` if `fd` is not open.
     @discardableResult
     public func dup2(_ fd: Int, onto target: Int) -> Bool {
-        guard let object = process.fileDescriptors.object(fd) else { return false }
-        if fd == target { return true }
-        process.fileDescriptors.install(object,
-                                        at: target,
-                                        flags: fileStatusFlags(fd) ?? [],
-                                        access: fileAccessMode(fd) ?? .readWrite)
-        return true
+        process.fileDescriptors.duplicate(fd, onto: target)
     }
 
     /// Convenience: write a UTF-8 string to stdout (fd 1).

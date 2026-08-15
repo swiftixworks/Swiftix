@@ -17,7 +17,7 @@ final class ProcessGroupController {
 
     func processIDs(inProcessGroup processGroupID: PID) -> Set<PID> {
         return Set(processTable.all
-            .filter { $0.processGroupID == processGroupID }
+            .filter { $0.isLive && $0.processGroupID == processGroupID }
             .map(\.pid))
     }
 
@@ -32,6 +32,7 @@ final class ProcessGroupController {
         }
         let members = pids.compactMap { processTable.process($0) }
         guard members.count == pids.count,
+              members.allSatisfy(\.isLive),
               members.allSatisfy({ $0.sessionID == sessionID }) else { return nil }
 
         let groups = Set(members.map(\.processGroupID))
@@ -62,7 +63,9 @@ final class ProcessGroupController {
     }
 
     private func processGroup(_ processGroupID: PID, belongsTo sessionID: PID) -> Bool {
-        let members = processTable.all.filter { $0.processGroupID == processGroupID }
+        let members = processTable.all.filter {
+            $0.isLive && $0.processGroupID == processGroupID
+        }
         return !members.isEmpty && members.allSatisfy { $0.sessionID == sessionID }
     }
 
@@ -72,13 +75,15 @@ final class ProcessGroupController {
     @discardableResult
     func setProcessGroup(_ pids: [PID], groupID requestedGroupID: PID? = nil) -> PID? {
         let members = pids.compactMap { processTable.process($0) }
-        guard !members.isEmpty, members.count == pids.count else { return nil }
+        guard !members.isEmpty,
+              members.count == pids.count,
+              members.allSatisfy(\.isLive) else { return nil }
         let sessions = Set(members.map(\.sessionID))
         guard sessions.count == 1, let sessionID = sessions.first else { return nil }
 
         let processGroupID = requestedGroupID ?? members[0].pid
         let existingMembers = processTable.all.filter {
-            $0.processGroupID == processGroupID
+            $0.isLive && $0.processGroupID == processGroupID
         }
         if existingMembers.isEmpty {
             guard members.contains(where: { $0.pid == processGroupID }) else { return nil }
@@ -92,7 +97,9 @@ final class ProcessGroupController {
 
     func processDidExit() {
         guard let foregroundProcessGroupID else { return }
-        if !processTable.all.contains(where: { $0.processGroupID == foregroundProcessGroupID }) {
+        if !processTable.all.contains(where: {
+            $0.isLive && $0.processGroupID == foregroundProcessGroupID
+        }) {
             self.foregroundProcessGroupID = nil
         }
     }

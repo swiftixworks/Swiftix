@@ -68,7 +68,9 @@ extension Kernel {
     /// if the path is not a directory.
     private func directoryEntries(_ absolutePath: String) -> [String]? {
         guard let node = vfs.lookup(absolutePath), node.kind == .directory else { return nil }
-        return node.children.values.map { $0.kind == .directory ? $0.name + "/" : $0.name }
+        return node.children.map { name, child in
+            child.kind == .directory ? name + "/" : name
+        }
     }
 
     /// Executable regular files visible through the shell process's `$PATH`.
@@ -81,12 +83,12 @@ extension Kernel {
         for entry in path.split(separator: ":", omittingEmptySubsequences: false) {
             let directory = Self.resolve(entry.isEmpty ? "." : String(entry), cwd: shell.cwd)
             guard let node = vfs.lookup(directory), node.kind == .directory else { continue }
-            for child in node.children.values where child.kind == .file {
+            for (name, child) in node.children where child.kind == .file {
                 let executable: FileMode = [
                     .ownerExecute, .groupExecute, .otherExecute,
                 ]
                 if !child.mode.intersection(executable).isEmpty {
-                    names.insert(child.name)
+                    names.insert(name)
                 }
             }
         }

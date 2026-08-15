@@ -1,12 +1,16 @@
 /// Centralizes TCP waiter wakeups and readiness notifications.
 final class TCPConnectionNotifications {
     var onEstablished: (() -> Void)?
-    var onReadable: (() -> Void)?
 
     private let readinessBroadcaster = ReadinessBroadcaster()
+    private let readWaiters = WaitQueue()
 
     func addReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {
         readinessBroadcaster.add(listener)
+    }
+
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        readWaiters.add(waiter)
     }
 
     func established() {
@@ -15,7 +19,7 @@ final class TCPConnectionNotifications {
     }
 
     func readable() {
-        onReadable?()
+        readWaiters.notifyOne()
         readinessBroadcaster.notify()
     }
 
@@ -25,6 +29,6 @@ final class TCPConnectionNotifications {
 
     func unblockConnectAndRead() {
         onEstablished?()
-        onReadable?()
+        readWaiters.notifyAll()
     }
 }

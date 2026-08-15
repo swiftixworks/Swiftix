@@ -16,8 +16,16 @@ extension NetworkStack {
         UDPSocket(stack: self)
     }
 
-    func registerUDPSocket(_ socket: UDPSocket, port: UInt16) {
+    /// Install a single-owner UDP binding. Shared-port fanout is intentionally
+    /// deferred until the stack has an explicit delivery policy; never replace a
+    /// live incumbent silently.
+    @discardableResult
+    func registerUDPSocket(_ socket: UDPSocket, port: UInt16) -> Bool {
+        if let incumbent = transport.udpSockets[port], incumbent !== socket {
+            return false
+        }
         transport.udpSockets[port] = socket
+        return true
     }
 
     func allocateEphemeralPort() -> UInt16 {
@@ -103,9 +111,7 @@ extension NetworkStack {
         transport.tcpListeners[port] != nil
     }
 
-    /// True when a UDP socket is already bound to `port`. `bind` consults this so a
-    /// second bind to a live port fails with EADDRINUSE instead of silently
-    /// stealing the port from the incumbent socket.
+    /// True when a UDP socket is already bound to `port`.
     func udpPortRegistered(port: UInt16) -> Bool {
         transport.udpSockets[port] != nil
     }

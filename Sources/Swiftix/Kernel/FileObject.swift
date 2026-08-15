@@ -1,10 +1,6 @@
-/// Everything-is-a-file: the kernel manipulates open files, pipes, ttys and
-/// (later) sockets through this one interface.
-///
-/// Read/write are **non-blocking** in this MVP slice — a `read` with no data
-/// returns an empty array. True blocking semantics (a process parking until
-/// data arrives, then being rescheduled) arrive with the scheduler/signal work;
-/// see Kernel.swift and Signals.swift.
+/// Everything-is-a-file: the kernel manipulates open files, pipes, ttys, and
+/// sockets through one object interface. The object methods are immediate;
+/// blocking syscall frontends park through readiness/wait queues around them.
 public struct IOReadiness: OptionSet, Sendable, Equatable, CustomStringConvertible {
     public let rawValue: UInt8
 
@@ -101,6 +97,37 @@ final class ReadinessBroadcaster {
     }
 }
 
+/// FIFO wait queue for one-shot blocking operations. Readiness listeners are
+/// broadcast snapshots for `poll`; operation waiters are different: one unit of
+/// newly available data normally wakes one reader, while EOF/teardown wakes all.
+/// Keeping this tiny distinction prevents multiple blocked reads from overwriting
+/// one callback or all consuming the same readiness edge.
+final class WaitQueue {
+    private var nextID = 0
+    private var waiters: [(id: Int, action: () -> Void)] = []
+
+    func add(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        let id = nextID
+        nextID += 1
+        waiters.append((id: id, action: waiter))
+        return ReadinessSubscription { [weak self] in
+            self?.waiters.removeAll { $0.id == id }
+        }
+    }
+
+    func notifyOne() {
+        guard !waiters.isEmpty else { return }
+        let waiter = waiters.removeFirst().action
+        waiter()
+    }
+
+    func notifyAll() {
+        let actions = waiters.map(\.action)
+        waiters.removeAll(keepingCapacity: true)
+        for action in actions { action() }
+    }
+}
+
 public protocol FileObject: AnyObject {
     func read(max: Int) -> [UInt8]
     @discardableResult func write(_ bytes: [UInt8]) -> Int
@@ -108,16 +135,14 @@ public protocol FileObject: AnyObject {
     /// Current non-blocking readiness for `poll`/`select`-style frontends.
     var readiness: IOReadiness { get }
 
-    /// A new descriptor handle now references this open-file description — called
-    /// by the descriptor table on allocate / install / `dup` / inheritance. Types
-    /// with shared state that must survive until the *last* handle closes (pipes)
-    /// use this to reference-count; most files ignore it.
+    /// A new open-file description owns this object. `dup` and inheritance share
+    /// that description and do not call this again. Types with endpoint state
+    /// (pipes and sockets) use this to count independently opened descriptions.
     func opened()
 
-    /// A descriptor handle to this description was removed (`close`, or process
-    /// exit). Paired with `opened()`; the underlying resource is torn down when
-    /// the last handle goes away. Sockets close their connection explicitly
-    /// (`tcpClose`) rather than here, so for them this is a no-op.
+    /// The last descriptor referring to this open-file description was removed.
+    /// Paired with `opened()`; the underlying resource may now release endpoint
+    /// state, locks, or deferred file data.
     func closed()
 }
 
@@ -132,7 +157,14 @@ extension FileObject {
 /// sockets use their own datagram/connection receive instead.
 protocol ReadableStream: FileObject {
     var hasBytesAvailable: Bool { get }
-    var onReadable: (() -> Void)? { get set }
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription
+}
+
+/// A stream write endpoint that can lose every reader. The syscall layer uses
+/// this narrow capability to translate the condition into EPIPE + SIGPIPE
+/// without teaching unrelated `FileObject` implementations about signals.
+protocol BrokenPipeDetecting: AnyObject {
+    var hasBrokenPipe: Bool { get }
 }
 
 /// A descriptor with a random-access read offset (POSIX `lseek`). Regular files
@@ -145,17 +177,15 @@ protocol Seekable: AnyObject {
 /// Shared FIFO byte buffer behind a pipe's two ends. It reference-counts the open
 /// write and read handles across *all* processes (fds are inherited on `spawn`),
 /// so the write side is considered closed — and a blocked reader observes EOF —
-/// only when the last write handle goes away. A parked reader is woken via
-/// `onReadable` when data is written or when the write side reaches EOF.
+/// only when the last write handle goes away. Parked readers are woken in FIFO
+/// order when data arrives, and all are woken when the write side reaches EOF.
 final class PipeBuffer {
     static let capacity = 64 * 1_024
     private var bytes = BoundedFIFOQueue<UInt8>(capacity: capacity)
     private var writeHandles = 0
     private var readHandles = 0
     private let readinessBroadcaster = ReadinessBroadcaster()
-
-    /// Wakes a parked reader (set by the blocking `read` syscall on the read end).
-    var onReadable: (() -> Void)?
+    private let readWaiters = WaitQueue()
 
     /// True once every write handle has been closed (EOF for the reader).
     var writeClosed: Bool { writeHandles <= 0 }
@@ -164,12 +194,15 @@ final class PipeBuffer {
     private(set) var readClosed = false
 
     func openWriteHandle() { writeHandles += 1 }
-    func openReadHandle() { readHandles += 1 }
+    func openReadHandle() {
+        readHandles += 1
+        readClosed = false
+    }
 
     func closeWriteHandle() {
         writeHandles -= 1
         if writeHandles <= 0 {
-            onReadable?()   // last writer gone => wake reader for EOF
+            readWaiters.notifyAll()   // last writer gone => every reader sees EOF
             readinessBroadcaster.notify()
         }
     }
@@ -187,7 +220,7 @@ final class PipeBuffer {
         guard !readClosed, !data.isEmpty else { return 0 }
         let accepted = bytes.append(contentsOf: data)
         if accepted > 0 {
-            onReadable?()
+            readWaiters.notifyOne()
             readinessBroadcaster.notify()
         }
         return accepted
@@ -196,6 +229,7 @@ final class PipeBuffer {
     func dequeue(max maxBytes: Int) -> [UInt8] {
         let wasFull = !hasWriteCapacity
         let result = bytes.popFirst(maxBytes)
+        if !bytes.isEmpty { readWaiters.notifyOne() }
         if wasFull, !result.isEmpty { readinessBroadcaster.notify() }
         return result
     }
@@ -205,13 +239,17 @@ final class PipeBuffer {
     func addReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {
         readinessBroadcaster.add(listener)
     }
+
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        readWaiters.add(waiter)
+    }
 }
 
 /// One end of a unidirectional pipe. The write end appends; the read end drains
 /// and can be blocked on (`ReadableStream`). Handle open/close are counted on the
 /// shared buffer so EOF fires only after the last writer closes — across process
 /// boundaries, since `spawn` inherits descriptors.
-final class PipeEndpoint: FileObject, ReadableStream, ReadinessEventSource {
+final class PipeEndpoint: FileObject, ReadableStream, ReadinessEventSource, BrokenPipeDetecting {
     private let buffer: PipeBuffer
     let isWriteEnd: Bool
 
@@ -227,6 +265,8 @@ final class PipeEndpoint: FileObject, ReadableStream, ReadinessEventSource {
         !isWriteEnd && (buffer.count > 0 || buffer.writeClosed)
     }
 
+    var hasBrokenPipe: Bool { isWriteEnd && !buffer.hasReaders }
+
     var readiness: IOReadiness {
         if isWriteEnd {
             var mask: IOReadiness = buffer.hasReaders && buffer.hasWriteCapacity ? [.writable] : []
@@ -239,9 +279,8 @@ final class PipeEndpoint: FileObject, ReadableStream, ReadinessEventSource {
         return mask
     }
 
-    var onReadable: (() -> Void)? {
-        get { buffer.onReadable }
-        set { buffer.onReadable = newValue }
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        buffer.addReadWaiter(waiter)
     }
 
     func read(max maxBytes: Int) -> [UInt8] {
@@ -318,6 +357,18 @@ final class RegularFileHandle: FileObject, Seekable {
         return out
     }
 
+    /// Read without observing or changing the shared open-file-description
+    /// offset. Database pagers use this in place of a seek/read pair.
+    func read(at position: Int, max maxBytes: Int) -> [UInt8] {
+        let data = snapshot ?? vnode.fileContents
+        guard position >= 0, maxBytes > 0, position < data.count else { return [] }
+        let (requestedEnd, overflow) = position.addingReportingOverflow(maxBytes)
+        let end = overflow ? data.count : min(requestedEnd, data.count)
+        let out = Array(data[position..<end])
+        vnode.touchAccess(clock())
+        return out
+    }
+
     @discardableResult
     func write(_ bytes: [UInt8]) -> Int {
         guard snapshot == nil else { return 0 }   // synthetic files are read-only
@@ -325,6 +376,17 @@ final class RegularFileHandle: FileObject, Seekable {
         let written = vnode.writeFileContents(bytes, at: offset)
         offset = offset.addingReportingOverflow(written).partialValue
         vnode.touchModify(clock())
+        return written
+    }
+
+    /// Write without observing or changing the shared open-file-description
+    /// offset. Append mode affects ordinary writes only; positional writes always
+    /// target the caller-supplied location, matching `pwrite`.
+    @discardableResult
+    func write(_ bytes: [UInt8], at position: Int) -> Int {
+        guard snapshot == nil, position >= 0 else { return 0 }
+        let written = vnode.writeFileContents(bytes, at: position)
+        if written > 0 { vnode.touchModify(clock()) }
         return written
     }
 
@@ -350,7 +412,7 @@ final class RegularFileHandle: FileObject, Seekable {
 /// backed by the VNode's shared `PipeBuffer` — two unrelated processes that open
 /// the same FIFO path get endpoints of the same buffer, enabling IPC through the
 /// filesystem namespace.
-final class FifoEndpoint: FileObject, ReadableStream, ReadinessEventSource {
+final class FifoEndpoint: FileObject, ReadableStream, ReadinessEventSource, BrokenPipeDetecting {
     private let buffer: PipeBuffer
     let isWriteEnd: Bool
     private let vnode: VNode
@@ -365,6 +427,8 @@ final class FifoEndpoint: FileObject, ReadableStream, ReadinessEventSource {
         !isWriteEnd && (buffer.count > 0 || buffer.writeClosed)
     }
 
+    var hasBrokenPipe: Bool { isWriteEnd && !buffer.hasReaders }
+
     var readiness: IOReadiness {
         if isWriteEnd {
             var mask: IOReadiness = buffer.hasReaders && buffer.hasWriteCapacity ? [.writable] : []
@@ -377,9 +441,8 @@ final class FifoEndpoint: FileObject, ReadableStream, ReadinessEventSource {
         return mask
     }
 
-    var onReadable: (() -> Void)? {
-        get { buffer.onReadable }
-        set { buffer.onReadable = newValue }
+    func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        buffer.addReadWaiter(waiter)
     }
 
     func read(max maxBytes: Int) -> [UInt8] {

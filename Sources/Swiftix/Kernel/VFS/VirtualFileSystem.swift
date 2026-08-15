@@ -1,7 +1,8 @@
 /// An in-memory (tmpfs) filesystem tree. Scope: absolute paths; directory,
 /// regular-file, symbolic-link, and named-pipe (FIFO) nodes; create / lookup;
 /// synthetic (procfs/sysfs) files; hard links with nlink tracking; deferred
-/// deletion (unlink-while-open). Mounts, permissions, and device nodes are next.
+/// deletion (unlink-while-open); mount projection; and device nodes. Access
+/// policy stays in `ProcessContext`, while this type owns path resolution.
 final class VirtualFileSystem {
     let root = VNode(directory: "/")
 
@@ -71,6 +72,32 @@ final class VirtualFileSystem {
                     relativePath,
                     follow: follow,
                     absoluteSymlinkRoot: root)
+    }
+
+    /// Resolve the immediate parent directory of an absolute path in a mount
+    /// namespace. Intermediate symlinks are followed exactly as in `lookup`.
+    func parentDirectory(of path: String, mounts: MountNamespace? = nil) -> VNode? {
+        let (origin, subpath) = mountOrigin(path, mounts)
+        return parentDirectory(of: subpath, beneath: origin, absoluteSymlinkRoot: nil)
+    }
+
+    /// Resolve the immediate parent while remaining anchored beneath a
+    /// capability root, including absolute symlink targets.
+    func parentDirectory(of relativePath: String, beneath root: VNode) -> VNode? {
+        parentDirectory(of: relativePath, beneath: root, absoluteSymlinkRoot: root)
+    }
+
+    private func parentDirectory(of path: String,
+                                 beneath root: VNode,
+                                 absoluteSymlinkRoot: VNode?) -> VNode? {
+        let parts = components(path)
+        guard !parts.isEmpty else { return nil }
+        let parentPath = parts.dropLast().joined(separator: "/")
+        let parent = walk(from: root,
+                          parentPath,
+                          follow: true,
+                          absoluteSymlinkRoot: absoluteSymlinkRoot)
+        return parent?.kind == .directory ? parent : nil
     }
 
     /// The starting tree and path for resolving `path`: the deepest mount whose
@@ -154,7 +181,7 @@ final class VirtualFileSystem {
         guard let parent = lookup(parentPath, beneath: root),
               parent.kind == .directory else { return nil }
         if let existing = parent.child(name) { return existing }
-        return parent.addChild(make(name))
+        return parent.addChild(name: name, node: make(name))
     }
 
     /// Remove a file or empty directory beneath a capability root without letting
@@ -226,8 +253,7 @@ final class VirtualFileSystem {
         }
 
         _ = sourceParent.removeChild(sourceName)
-        source.rename(to: destinationName)
-        destinationParent.addChild(source)
+        destinationParent.addChild(name: destinationName, node: source)
     }
 
     private func contains(_ root: VNode, node candidate: VNode) -> Bool {
@@ -259,12 +285,13 @@ final class VirtualFileSystem {
         guard let name = parts.last else { return nil }
         var node = origin
         for part in parts.dropLast() {
-            let child = node.child(part) ?? node.addChild(VNode(directory: part))
+            let child = node.child(part)
+                ?? node.addChild(name: part, node: VNode(directory: part))
             child.touchAll(clock())
             node = child
         }
         if node.child(name) != nil { return nil }
-        let link = node.addChild(VNode(symlink: name, target: target))
+        let link = node.addChild(name: name, node: VNode(symlink: name, target: target))
         let now = clock()
         link.touchAll(now)
         node.touchModify(now)
@@ -281,7 +308,7 @@ final class VirtualFileSystem {
             if let existing = node.child(part) {
                 node = existing
             } else {
-                let dir = node.addChild(VNode(directory: part))
+                let dir = node.addChild(name: part, node: VNode(directory: part))
                 dir.touchAll(now)
                 node.touchModify(now)
                 node = dir
@@ -304,7 +331,7 @@ final class VirtualFileSystem {
             if let existing = node.child(part) {
                 node = existing
             } else {
-                let dir = node.addChild(VNode(directory: part))
+                let dir = node.addChild(name: part, node: VNode(directory: part))
                 dir.touchAll(now)
                 node.touchModify(now)
                 node = dir
@@ -313,7 +340,7 @@ final class VirtualFileSystem {
         if let existing = node.child(fileName) {
             return existing.kind == .file ? existing : nil
         }
-        let file = node.addChild(VNode(file: fileName))
+        let file = node.addChild(name: fileName, node: VNode(file: fileName))
         file.touchAll(now)
         node.touchModify(now)
         return file
@@ -331,7 +358,7 @@ final class VirtualFileSystem {
                 guard existing.kind == .directory else { return nil }
                 node = existing
             } else {
-                let dir = node.addChild(VNode(directory: part))
+                let dir = node.addChild(name: part, node: VNode(directory: part))
                 dir.touchAll(now)
                 node.touchModify(now)
                 node = dir
@@ -406,11 +433,9 @@ final class VirtualFileSystem {
             parent = next
         }
         guard parent.child(name) == nil else { return false }  // already exists
-        // Point new directory entry at the same VNode. We temporarily rename the
-        // node to the new entry name — but since a VNode can now appear under
-        // multiple names (hard link), we use a helper that installs it under the
-        // given name without changing its canonical name.
-        parent.addHardLink(name: name, node: target)
+        // A directory entry owns its name; the inode-like VNode is shared without
+        // mutation, so sibling hard links retain independent names.
+        parent.addChild(name: name, node: target)
         let now = clock()
         target.nlink += 1
         target.touchChange(now)
@@ -433,14 +458,14 @@ final class VirtualFileSystem {
             if let existing = node.child(part) {
                 node = existing
             } else {
-                let dir = node.addChild(VNode(directory: part))
+                let dir = node.addChild(name: part, node: VNode(directory: part))
                 dir.touchAll(now)
                 node.touchModify(now)
                 node = dir
             }
         }
         if node.child(name) != nil { return nil }  // already exists
-        let fifo = node.addChild(VNode(fifo: name))
+        let fifo = node.addChild(name: name, node: VNode(fifo: name))
         fifo.touchAll(now)
         node.touchModify(now)
         return fifo

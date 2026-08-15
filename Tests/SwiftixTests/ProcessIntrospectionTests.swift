@@ -10,7 +10,7 @@ struct ProcessIntrospectionTests {
         let child = table.allocate(name: "child", args: ["child"], parent: parent.pid)
         child.processGroupID = parent.pid
         child.sessionID = parent.sessionID
-        child.state = .blocked
+        child.runState = .waiting
 
         let rows = ProcessIntrospection(processTable: table).snapshotProcesses()
 
@@ -64,10 +64,12 @@ struct ProcessIntrospectionTests {
     }
 
     @Test func stateNamesMatchLinuxProcConventions() {
-        #expect(ProcessIntrospection.stateName(.runnable) == "R")
-        #expect(ProcessIntrospection.stateName(.running) == "R")
-        #expect(ProcessIntrospection.stateName(.blocked) == "S")
-        #expect(ProcessIntrospection.stateName(.stopped) == "T")
-        #expect(ProcessIntrospection.stateName(.zombie(status: .exited(0))) == "Z")
+        #expect(ProcessIntrospection.stateName(runState: .runnable) == "R")
+        #expect(ProcessIntrospection.stateName(runState: .running) == "R")
+        #expect(ProcessIntrospection.stateName(runState: .waiting) == "S")
+        #expect(ProcessIntrospection.stateName(runState: .stopped) == "T")
+        #expect(ProcessIntrospection.stateName(
+            runState: .stopped,
+            lifecycle: .zombie(.exited(0))) == "Z")
     }
 }

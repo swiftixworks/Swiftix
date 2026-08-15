@@ -125,7 +125,7 @@ public final class PseudoTerminal {
     /// UTF-8 byte insertion point within `inputLine`.
     private var cursor = 0
 
-    fileprivate var slaveReadWaiter: (() -> Void)?
+    private let slaveReadWaiters = WaitQueue()
     private let slaveReadinessBroadcaster = ReadinessBroadcaster()
     public var onOutput: (() -> Void)?
     public var onControlC: (() -> Void)?
@@ -140,9 +140,7 @@ public final class PseudoTerminal {
         if rawMode {
             guard !bytes.isEmpty else { return }
             slaveReadable.append(contentsOf: bytes)
-            let waiter = slaveReadWaiter
-            slaveReadWaiter = nil
-            waiter?()
+            slaveReadWaiters.notifyOne()
             slaveReadinessBroadcaster.notify()
             return
         }
@@ -242,9 +240,7 @@ public final class PseudoTerminal {
                 slaveReadable.append(contentsOf: inputLine)
                 inputLine.removeAll(); cursor = 0
                 resetHistoryBrowsing()
-                let waiter = slaveReadWaiter
-                slaveReadWaiter = nil
-                waiter?()
+                slaveReadWaiters.notifyOne()
                 slaveReadinessBroadcaster.notify()
                 continue
             }
@@ -314,9 +310,7 @@ public final class PseudoTerminal {
             cursor = 0
             resetHistoryBrowsing()
         }
-        let waiter = slaveReadWaiter
-        slaveReadWaiter = nil
-        waiter?()
+        slaveReadWaiters.notifyOne()
         slaveReadinessBroadcaster.notify()
     }
 
@@ -494,13 +488,19 @@ public final class PseudoTerminal {
     // MARK: - Slave side (used by the shell)
 
     fileprivate func slaveRead(max: Int) -> [UInt8] {
-        slaveReadable.popFirst(max)
+        let result = slaveReadable.popFirst(max)
+        if !slaveReadable.isEmpty { slaveReadWaiters.notifyOne() }
+        return result
     }
 
     fileprivate var slaveHasData: Bool { !slaveReadable.isEmpty }
 
     fileprivate func addSlaveReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {
         slaveReadinessBroadcaster.add(listener)
+    }
+
+    fileprivate func addSlaveReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+        slaveReadWaiters.add(waiter)
     }
 
     fileprivate func slaveWrite(_ bytes: [UInt8]) -> Int {
@@ -551,9 +551,8 @@ public final class PseudoTerminal {
         }
 
         var hasBytesAvailable: Bool { terminal.slaveHasData }
-        var onReadable: (() -> Void)? {
-            get { terminal.slaveReadWaiter }
-            set { terminal.slaveReadWaiter = newValue }
+        func addReadWaiter(_ waiter: @escaping () -> Void) -> ReadinessSubscription {
+            terminal.addSlaveReadWaiter(waiter)
         }
 
         func addReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {

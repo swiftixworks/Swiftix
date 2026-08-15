@@ -3,9 +3,9 @@
 /// through a Swift-native API rather than a binary syscall-number ABI; Swiftix
 /// does not run unmodified Linux ELF binaries.
 public final class ProcessContext {
-    /// `unowned`: a context is a transient handle to a live process. The kernel
-    /// keeps the process alive while it runs or is blocked and never resumes a
-    /// reaped one (see `Kernel.runStep`), so this is always valid in use — and
+    /// `unowned`: a context is a transient executable handle. The kernel keeps
+    /// the identity alive while user code runs and never schedules it after
+    /// logical exit (see `Kernel.runStep`), so this is always valid in use — and
     /// being unowned avoids a process <-> context retain cycle when a blocking
     /// continuation captures the context.
     unowned let process: Process
@@ -23,9 +23,9 @@ public final class ProcessContext {
 
     /// Schedule runtime work in this process's Kernel lifecycle scope. Embedded
     /// runtimes should prefer this over scheduling directly on `eventLoop`, so a
-    /// VM suspend freezes their timers and power-off cancels them.
+    /// VM suspend freezes their timers and process exit physically cancels them.
     public func schedule(after delay: Double, _ work: @escaping () -> Void) {
-        kernel.schedule(after: delay, work)
+        kernel.schedule(for: process, after: delay, work)
     }
 
     /// This process's mount-namespace view, passed to every VFS path operation so

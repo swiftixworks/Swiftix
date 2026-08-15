@@ -2,7 +2,7 @@
 //
 // Each method here is a thin adapter that bridges to the existing callback
 // (`resume:`-style) syscall on `ProcessContext` via a checked continuation, so
-// the underlying park/wake primitives (`runStep`, `blockedOn`, and the
+// the underlying park/wake primitives (`runStep`, the wait registry, and the
 // connection/stream waiters) — and therefore the protocol behavior and message
 // ordering — are unchanged (R3.1, R3.2, R3.4). The async methods are new
 // overloads layered on top; every existing callback syscall keeps its exact
@@ -28,13 +28,28 @@ private final class InterruptibleAsyncWaitState {
     var cancellationID: Int?
 }
 
+private extension BlockVolumeError {
+    var syscallError: SyscallError {
+        switch self {
+        case .outOfRange, .invalidTransferSize:
+            return .invalidArgument
+        case .noSpace:
+            return .noSpace
+        case .readOnly:
+            return .readOnlyFileSystem
+        case .inputOutput:
+            return .inputOutput
+        }
+    }
+}
+
 extension ProcessContext {
 
     private func awaitInterruptible<Value: Sendable>(_ register: (@escaping (Value) -> Void) -> Void) async throws -> Value {
         let value = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value, Error>) in
             let state = InterruptibleAsyncWaitState()
             let process = self.process
-            state.cancellationID = process.addWaitCancellation {
+            state.cancellationID = process.beginWait(.asyncContinuation) {
                 guard !state.didFinish else { return }
                 state.didFinish = true
                 continuation.resume(throwing: SyscallError.interrupted)
@@ -43,7 +58,8 @@ extension ProcessContext {
                 guard !state.didFinish else { return }
                 state.didFinish = true
                 if let process, let cancellationID = state.cancellationID {
-                    process.removeWaitCancellation(cancellationID)
+                    process.disarmWaitCancellation(cancellationID)
+                    process.endWait(cancellationID)
                 }
                 continuation.resume(returning: value)
             }
@@ -250,6 +266,62 @@ extension ProcessContext {
         }
     }
 
+    // MARK: - Durable block volumes
+
+    /// Read one sector without blocking the Kernel executor. A RamDisk may
+    /// complete inline; a durable adapter resumes this process after its backing
+    /// I/O has completed on the Swiftix-driving executor.
+    public func readBlock(device: String, sector: Int) async throws -> [UInt8] {
+        guard let volume = kernel.blockDevices.volume(device) else {
+            throw SyscallError.noSuchDevice
+        }
+        guard sector >= 0, sector < volume.sectorCount else {
+            throw SyscallError.invalidArgument
+        }
+        let result: Result<[UInt8], BlockVolumeError> = try await awaitInterruptible { finish in
+            volume.read(sector: sector, completion: finish)
+        }
+        switch result {
+        case .success(let bytes):
+            return bytes
+        case .failure(let error):
+            throw error.syscallError
+        }
+    }
+
+    /// Write exactly one sector without changing any file-descriptor offset.
+    /// Success means the volume accepted the write; call `flushBlockVolume` for
+    /// a crash-durability barrier.
+    public func writeBlock(device: String, sector: Int, data: [UInt8]) async throws {
+        guard let volume = kernel.blockDevices.volume(device) else {
+            throw SyscallError.noSuchDevice
+        }
+        guard sector >= 0, sector < volume.sectorCount,
+              data.count == volume.sectorSize else {
+            throw SyscallError.invalidArgument
+        }
+        let result: Result<Void, BlockVolumeError> = try await awaitInterruptible { finish in
+            volume.write(sector: sector, data: data, completion: finish)
+        }
+        if case .failure(let error) = result {
+            throw error.syscallError
+        }
+    }
+
+    /// Establish the volume's durability barrier. After this returns, all writes
+    /// completed before the call survive the volume's documented crash model.
+    public func flushBlockVolume(_ device: String) async throws {
+        guard let volume = kernel.blockDevices.volume(device) else {
+            throw SyscallError.noSuchDevice
+        }
+        let result: Result<Void, BlockVolumeError> = try await awaitInterruptible { finish in
+            volume.flush(completion: finish)
+        }
+        if case .failure(let error) = result {
+            throw error.syscallError
+        }
+    }
+
     // MARK: - Timers
 
     /// Await `seconds` of logical time, throwing `.interrupted` if the process is
@@ -260,15 +332,14 @@ extension ProcessContext {
             let kernel = self.kernel
             let process = self.process
 
-            process.blockedOn += 1
-            state.cancellationID = process.addWaitCancellation {
+            state.cancellationID = process.beginWait(
+                .sleep(deadline: kernel.loop.now + max(0, seconds))) {
                 guard !state.didFinish else { return }
                 state.didFinish = true
-                if process.blockedOn > 0 { process.blockedOn -= 1 }
                 continuation.resume(throwing: SyscallError.interrupted)
             }
 
-            kernel.schedule(after: seconds) { [weak kernel, weak process] in
+            kernel.schedule(for: process, after: seconds) { [weak kernel, weak process] in
                 guard let kernel, let process else {
                     guard !state.didFinish else { return }
                     state.didFinish = true
@@ -279,9 +350,9 @@ extension ProcessContext {
                     guard !state.didFinish else { return }
                     state.didFinish = true
                     if let cancellationID = state.cancellationID {
-                        process.removeWaitCancellation(cancellationID)
+                        process.disarmWaitCancellation(cancellationID)
+                        process.endWait(cancellationID)
                     }
-                    process.blockedOn -= 1
                     continuation.resume()
                 }
             }

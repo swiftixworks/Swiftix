@@ -349,10 +349,12 @@ extension BuiltinCommands {
         switch name.uppercased() {
         case "INT", "SIGINT":   return Signal.sigint.rawValue
         case "KILL", "SIGKILL": return Signal.sigkill.rawValue
+        case "PIPE", "SIGPIPE": return Signal.sigpipe.rawValue
         case "TERM", "SIGTERM": return Signal.sigterm.rawValue
         case "CHLD", "SIGCHLD": return Signal.sigchld.rawValue
         case "CONT", "SIGCONT": return Signal.sigcont.rawValue
-        case "STOP", "TSTP", "SIGTSTP": return Signal.sigtstp.rawValue
+        case "STOP", "SIGSTOP": return Signal.sigstop.rawValue
+        case "TSTP", "SIGTSTP": return Signal.sigtstp.rawValue
         default: return nil
         }
     }

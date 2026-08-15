@@ -50,20 +50,18 @@ final class UDPSocket: FileObject, ReadinessEventSource, SocketOptionStorage {
         stack.unregisterUDPSocket(self, port: localPort)
     }
 
-    /// Bind to `address`/`port`. Returns `false` (EADDRINUSE) when another UDP
-    /// socket already holds `port`, so a second `dnsd` on the same port fails
-    /// rather than silently stealing datagrams from the incumbent. `SO_REUSEADDR`
-    /// waives the check (the demux keeps one socket per port, so the later bind
-    /// then takes over — matching an explicit reuse request). Binding port 0
-    /// (ephemeral/any) is always allowed.
+    /// Bind to `address`/`port`. The current UDP demultiplexer has one owner per
+    /// port, so duplicate binds return `false` even when SO_REUSEADDR is stored;
+    /// silently replacing the incumbent would violate both sockets' lifetime.
+    /// Port 0 selects an available ephemeral port.
     @discardableResult
     func bind(address: IPv4Address?, port: UInt16) -> Bool {
-        if port != 0, stack.udpPortRegistered(port: port), !options.contains(.reuseAddress) {
-            return false
-        }
+        guard localPort == 0 else { return false }
+        let selectedPort = port == 0 ? stack.allocateEphemeralPort() : port
+        guard !stack.udpPortRegistered(port: selectedPort),
+              stack.registerUDPSocket(self, port: selectedPort) else { return false }
         localAddress = address
-        localPort = port
-        stack.registerUDPSocket(self, port: port)
+        localPort = selectedPort
         return true
     }
 
@@ -72,7 +70,10 @@ final class UDPSocket: FileObject, ReadinessEventSource, SocketOptionStorage {
         if localPort == 0 {
             // Auto-assign an ephemeral source port for an unbound socket.
             localPort = stack.allocateEphemeralPort()
-            stack.registerUDPSocket(self, port: localPort)
+            guard stack.registerUDPSocket(self, port: localPort) else {
+                localPort = 0
+                return false
+            }
         }
         return stack.sendUDP(sourcePort: localPort,
                             destinationAddress: address,

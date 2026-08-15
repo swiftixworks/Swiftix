@@ -112,6 +112,53 @@ struct HardLinkTests {
         #expect(box.contentAfterUnlink == "data")
     }
 
+    @Test func directoryEntriesKeepIndependentHardLinkNames() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box { var entries: [String] = [] }
+        let box = Box()
+
+        kernel.spawn("test") { ctx in
+            _ = ctx.open("/original", create: true)
+            _ = ctx.link("/original", at: "/alias")
+            box.entries = ctx.listDirectory("/") ?? []
+        }
+        loop.runUntilIdle()
+
+        #expect(box.entries.contains("original"))
+        #expect(box.entries.contains("alias"))
+        #expect(box.entries.filter { $0 == "original" }.count == 1)
+    }
+
+    @Test func renamingOneHardLinkDoesNotRenameItsSibling() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Box {
+            var entries: [String] = []
+            var siblingStillResolves = false
+            var renamedResolves = false
+        }
+        let box = Box()
+
+        kernel.spawn("test") { ctx in
+            _ = ctx.mkdir("/sandbox")
+            let scope = FileSystemScope(rootPath: "/sandbox")
+            _ = ctx.open("/sandbox/original", create: true)
+            _ = ctx.link("/sandbox/original", at: "/sandbox/alias")
+            try? ctx.rename("alias", in: scope, to: "renamed", in: scope)
+            box.entries = ctx.listDirectory("/sandbox") ?? []
+            box.siblingStillResolves = ctx.stat("/sandbox/original") != nil
+            box.renamedResolves = ctx.stat("/sandbox/renamed") != nil
+        }
+        loop.runUntilIdle()
+
+        #expect(box.entries == ["original", "renamed"])
+        #expect(box.siblingStillResolves)
+        #expect(box.renamedResolves)
+    }
+
     @Test func hardLinkFailsForDirectories() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)

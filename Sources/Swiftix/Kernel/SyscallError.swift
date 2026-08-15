@@ -14,6 +14,8 @@ public enum SyscallError: Error, Equatable, Sendable {
     case badFileDescriptor
     /// A blocking operation was interrupted by process termination or a signal (EINTR).
     case interrupted
+    /// A backing device failed to complete a valid operation (EIO).
+    case inputOutput
     /// A non-blocking operation has nothing ready right now (EAGAIN).
     case wouldBlock
     /// A wait was requested but the process has no living or un-waited children (ECHILD).
@@ -24,14 +26,22 @@ public enum SyscallError: Error, Equatable, Sendable {
     case notADirectory
     /// A directory removal was requested for a non-empty directory (ENOTEMPTY).
     case directoryNotEmpty
+    /// A pipe or FIFO write has no remaining reader (EPIPE).
+    case brokenPipe
     /// Exclusive create was requested but the file already exists (EEXIST).
     case fileExists
+    /// A requested device is not attached to this Kernel (ENODEV).
+    case noSuchDevice
     /// The connection was aborted by an inbound RST (ECONNRESET).
     case connectionReset
     /// The socket is not connected (ENOTCONN).
     case notConnected
     /// An argument was invalid, e.g. a buffered datagram whose fields cannot be extracted (EINVAL).
     case invalidArgument
+    /// A bounded storage object has no capacity for the write (ENOSPC).
+    case noSpace
+    /// A write targeted a read-only storage object (EROFS).
+    case readOnlyFileSystem
     /// The caller's credentials do not permit the requested access to the file (EACCES).
     case permissionDenied
     /// A capability-scoped path attempted to escape its preopened root.
@@ -42,14 +52,19 @@ public enum SyscallError: Error, Equatable, Sendable {
         switch self {
         case .noSuchFileOrDirectory: return 2   // ENOENT
         case .interrupted:           return 4   // EINTR
+        case .inputOutput:           return 5   // EIO
         case .badFileDescriptor:     return 9   // EBADF
         case .noChildProcess:        return 10  // ECHILD
         case .permissionDenied, .capabilityViolation: return 13  // EACCES / ENOTCAPABLE analogue
         case .wouldBlock:            return 11  // EAGAIN
         case .fileExists:            return 17  // EEXIST
+        case .noSuchDevice:          return 19  // ENODEV
         case .notADirectory:          return 20  // ENOTDIR
         case .isADirectory:          return 21  // EISDIR
         case .invalidArgument:       return 22  // EINVAL
+        case .noSpace:               return 28  // ENOSPC
+        case .readOnlyFileSystem:    return 30  // EROFS
+        case .brokenPipe:            return 32  // EPIPE
         case .connectionReset:       return 104 // ECONNRESET
         case .notConnected:          return 107 // ENOTCONN
         case .directoryNotEmpty:     return 39  // ENOTEMPTY

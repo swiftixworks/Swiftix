@@ -52,8 +52,8 @@ extension ProcessContext {
     @discardableResult
     public func bind(_ fd: Int, address: IPv4Address?, port: UInt16) -> Bool {
         if let udp = process.fileDescriptors.object(fd) as? UDPSocket {
-            // Propagate EADDRINUSE: false when the port is already bound (and the
-            // socket did not opt into SO_REUSEADDR).
+            // Propagate EADDRINUSE from the stack's explicit single-owner UDP
+            // binding model; options never authorize silent table replacement.
             return udp.bind(address: address, port: port)
         }
         if let tcp = process.fileDescriptors.object(fd) as? TCPSocket {
@@ -100,30 +100,23 @@ extension ProcessContext {
     public func recvfrom(_ fd: Int,
                   resume: @escaping (_ bytes: [UInt8], _ address: IPv4Address, _ port: UInt16) -> Void) {
         guard let socket = process.fileDescriptors.object(fd) as? UDPSocket else { return }
-        process.blockedOn += 1
         let kernel = self.kernel
         let process = self.process
         var completed = false
         var subscription: ReadinessSubscription?
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak process] in
+        let waitID = process.beginWait(.datagram(fd: fd)) {
             guard !completed else { return }
             completed = true
             subscription?.cancel()
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
         }
         subscription = socket.park { [weak kernel, weak process] datagram in
             guard let kernel, let process else { return }
             guard !completed else { return }
             completed = true
             subscription?.cancel()
-            if let cancellationID {
-                process.removeWaitCancellation(cancellationID)
-            }
+            process.disarmWaitCancellation(waitID)
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(datagram.payload, datagram.sourceAddress, datagram.sourcePort)
             }
         }
@@ -149,19 +142,14 @@ extension ProcessContext {
                   ttl: UInt8 = 64,
                   timeout: Double = 1.0,
                   resume: @escaping (_ from: IPv4Address?, _ replyTTL: UInt8, _ rttSeconds: Double) -> Void) {
-        process.blockedOn += 1
         let kernel = self.kernel
         let process = self.process
         let sentAt = kernel.loop.now
         var completed = false
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak kernel, weak process] in
+        let waitID = process.beginWait(.icmp(identifier: identifier, sequence: sequence)) { [weak kernel] in
             guard !completed else { return }
             completed = true
             kernel?.netns.stack.cancelEcho(identifier: identifier, sequence: sequence)
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
         }
         kernel.netns.stack.sendEcho(
             to: address,
@@ -174,11 +162,9 @@ extension ProcessContext {
                 guard let kernel, let process else { return }
                 guard !completed else { return }
                 completed = true
-                if let cancellationID {
-                    process.removeWaitCancellation(cancellationID)
-                }
+                process.disarmWaitCancellation(waitID)
                 kernel.runStep(process) {
-                    process.blockedOn -= 1
+                    process.endWait(waitID)
                     resume(from, replyTTL, kernel.loop.now - sentAt)
                 }
             },
@@ -186,11 +172,9 @@ extension ProcessContext {
                 guard let kernel, let process else { return }
                 guard !completed else { return }
                 completed = true
-                if let cancellationID {
-                    process.removeWaitCancellation(cancellationID)
-                }
+                process.disarmWaitCancellation(waitID)
                 kernel.runStep(process) {
-                    process.blockedOn -= 1
+                    process.endWait(waitID)
                     resume(nil, 0, kernel.loop.now - sentAt)
                 }
             })
@@ -225,29 +209,22 @@ extension ProcessContext {
     public func tcpAccept(_ fd: Int, resume: @escaping (_ acceptedFD: Int) -> Void) {
         guard let socket = process.fileDescriptors.object(fd) as? TCPSocket,
               let listener = socket.listener else { return }
-        process.blockedOn += 1
         let kernel = self.kernel
         let process = self.process
         var completed = false
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak process, weak listener] in
+        let waitID = process.beginWait(.tcpAccept(fd: fd)) { [weak listener] in
             guard !completed else { return }
             completed = true
             listener?.onAccept = nil
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
         }
         let deliver: () -> Void = { [weak kernel, weak process, weak listener] in
             guard let kernel, let process, let listener, let connection = listener.dequeue() else { return }
             guard !completed else { return }
             completed = true
             listener.onAccept = nil
-            if let cancellationID {
-                process.removeWaitCancellation(cancellationID)
-            }
+            process.disarmWaitCancellation(waitID)
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 let accepted = TCPSocket(stack: kernel.netns.stack)
                 accepted.connection = connection
                 resume(process.fileDescriptors.allocate(accepted))
@@ -260,32 +237,25 @@ extension ProcessContext {
     /// Active open: block until the connection is established.
     public func tcpConnect(_ fd: Int, to address: IPv4Address, port: UInt16, resume: @escaping () -> Void) {
         guard let socket = process.fileDescriptors.object(fd) as? TCPSocket else { return }
-        process.blockedOn += 1
         let kernel = self.kernel
         let process = self.process
         let localPort = kernel.netns.stack.allocateEphemeralPort()
         let connection = kernel.netns.stack.connect(localPort: localPort, to: address, remotePort: port)
         socket.connection = connection
         var completed = false
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak process, weak connection] in
+        let waitID = process.beginWait(.tcpConnect(fd: fd)) { [weak connection] in
             guard !completed else { return }
             completed = true
             connection?.onEstablished = nil
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
         }
         connection.onEstablished = { [weak kernel, weak process, weak connection] in
             guard let kernel, let process, let connection else { return }
             guard !completed else { return }
             completed = true
             connection.onEstablished = nil
-            if let cancellationID {
-                process.removeWaitCancellation(cancellationID)
-            }
+            process.disarmWaitCancellation(waitID)
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume()
             }
         }
@@ -319,34 +289,30 @@ extension ProcessContext {
         // consumed before the app ever calls recv — resume immediately with an
         // empty read so the caller observes EOF instead of blocking forever).
         if connection.hasBufferedData || connection.eofReceived {
-            process.blockedOn += 1
+            let waitID = process.beginWait(.tcpReceive(fd: fd))
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(connection.read(max: limit))
             }
             return
         }
-        process.blockedOn += 1
         var completed = false
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak process, weak connection] in
+        var subscription: ReadinessSubscription?
+        let waitID = process.beginWait(.tcpReceive(fd: fd)) {
             guard !completed else { return }
             completed = true
-            connection?.onReadable = nil
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
+            subscription?.cancel()
+            subscription = nil
         }
-        connection.onReadable = { [weak kernel, weak process, weak connection] in
+        subscription = connection.addReadWaiter { [weak kernel, weak process, weak connection] in
             guard let kernel, let process, let connection else { return }
             guard !completed else { return }
             completed = true
-            connection.onReadable = nil
-            if let cancellationID {
-                process.removeWaitCancellation(cancellationID)
-            }
+            subscription?.cancel()
+            subscription = nil
+            process.disarmWaitCancellation(waitID)
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(connection.read(max: limit))
             }
         }

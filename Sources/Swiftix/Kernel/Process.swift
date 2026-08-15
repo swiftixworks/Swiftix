@@ -7,18 +7,38 @@ public typealias PID = Int
 /// file descriptors. Hundreds of these share one scheduler, so an instance stays
 /// cheap.
 final class Process {
-    enum State {
+    /// Scheduling state for a process that is still executable. Exit is tracked
+    /// independently in `lifecycle`, matching the separation between runnability
+    /// and exit state in Linux and preventing a stopped process from becoming an
+    /// invalid "stopped zombie".
+    enum RunState: Equatable {
         case runnable
         case running
-        case blocked
+        case waiting
         case stopped
-        case zombie(status: ProcessWaitStatus)
+    }
+
+    enum Lifecycle: Equatable {
+        case live
+        case exiting(ProcessExitStatus)
+        case zombie(ProcessExitStatus)
     }
 
     let pid: PID
-    let ppid: PID
+    var ppid: PID
     let name: String
-    var state: State = .runnable
+    var runState: RunState = .runnable
+    var lifecycle: Lifecycle = .live
+
+    /// Runnable steps currently owned by this process's event-loop scope. This
+    /// lets observability report R as soon as a wakeup is queued, instead of
+    /// leaving the process in S until the callback actually starts executing.
+    var queuedSteps = 0
+
+    /// Every callback created by process/runtime code belongs to this scope.
+    /// Logical exit cancels it physically while the lightweight process identity
+    /// remains in the table as a zombie.
+    let workScope: EventLoop.CancellationScope
 
     /// Minimal POSIX-style job-control identity. Top-level processes start their
     /// own session and process group; children inherit until a shell places a job
@@ -26,9 +46,16 @@ final class Process {
     var processGroupID: PID
     var sessionID: PID
 
-    /// Number of outstanding blocking operations (parked, or scheduled to
-    /// resume). The scheduler keeps the process alive while this is > 0.
-    var blockedOn = 0
+    /// Structured ownership for outstanding blocking operations. The scheduler
+    /// derives `waiting` from this registry, while diagnostics retain the exact
+    /// reasons instead of exposing only an opaque counter.
+    private let waits = ProcessWaitRegistry()
+    var blockedOn: Int { waits.count }
+    var waitReasons: [ProcessWaitReason] { waits.reasons }
+
+    /// Lifetime hold used by an async command body. Async syscalls register
+    /// their own, more specific waits in addition to this outer hold.
+    var asyncBodyWaitID: Int?
 
     /// A deterministic CPU-activity proxy: the number of times the scheduler has
     /// run this process (a fresh body or a resumed step). Wall-clock CPU time has
@@ -38,16 +65,9 @@ final class Process {
     /// column in `/proc/processes` and consumed by `ps`/`top`.
     var scheduleTicks = 0
 
-    /// Job-control stop (SIGTSTP). While stopped, scheduling steps are held in
-    /// `pendingSteps` and replayed on SIGCONT.
-    var isStopped = false
+    /// Job-control stop (SIGSTOP/SIGTSTP). While stopped, scheduling steps are
+    /// held in `pendingSteps` and replayed on SIGCONT.
     var pendingSteps: [() -> Void] = []
-
-    /// Cancellation hooks for currently parked wait operations. Termination
-    /// drains these before reaping the process so checked async continuations do
-    /// not get stranded behind a process-table guard.
-    private var nextWaitCancellationID = 1
-    private var waitCancellations: [Int: () -> Void] = [:]
 
     var cwd = "/"
     var environment: [String: String] = [:]
@@ -64,7 +84,7 @@ final class Process {
     /// is inherited by children in the same terminal session.
     weak var controllingTerminal: TerminalControl?
 
-    /// One-shot observers invoked after this process has left the process table.
+    /// One-shot observers invoked at logical exit, before the zombie is reaped.
     /// They run on the Kernel's serial executor and are intentionally non-Sendable.
     var exitObservers: [(ProcessWaitStatus) -> Void] = []
 
@@ -72,15 +92,18 @@ final class Process {
     /// disposition, applied by the kernel.
     var signalHandlers: [Int32: () -> Void] = [:]
 
-    /// Blocked signals and pending deliveries. SIGKILL is never maskable; SIGCONT
-    /// still resumes job-control stops immediately.
+    /// Blocked signals and pending deliveries. SIGKILL and SIGSTOP are never
+    /// maskable; SIGCONT still resumes job-control stops immediately.
     var signalMask: Set<Int32> = []
     var pendingSignals: [Int32] = []
 
-    /// Process credentials (permissive-first: stored for observability, not yet
-    /// enforced for permission checks). Default 0 = root.
+    /// Compact effective-credential model used by the VFS DAC checks. Swiftix
+    /// intentionally does not model real/saved IDs or Linux capabilities, but
+    /// these values and supplementary groups are inherited across spawn.
+    /// Default 0 = root.
     var uid: UInt32 = 0
     var gid: UInt32 = 0
+    var supplementaryGroups: Set<UInt32> = []
 
     /// The UTS namespace this process belongs to (hostname/domainname). Shared by
     /// reference with the parent on spawn, so a `hostname` change is visible
@@ -106,29 +129,58 @@ final class Process {
     /// `inherit`; `nil` only before that (never observed by a body).
     var mountNamespace: MountNamespace!
 
-    init(pid: PID, ppid: PID, name: String) {
+    init(pid: PID, ppid: PID, name: String, workScope: EventLoop.CancellationScope) {
         self.pid = pid
         self.ppid = ppid
         self.name = name
+        self.workScope = workScope
         self.processGroupID = pid
         self.sessionID = pid
     }
 
+    var isLive: Bool {
+        if case .live = lifecycle { return true }
+        return false
+    }
+
+    var isStopped: Bool {
+        isLive && runState == .stopped
+    }
+
+    var terminalStatus: ProcessExitStatus? {
+        switch lifecycle {
+        case .live: return nil
+        case .exiting(let status), .zombie(let status): return status
+        }
+    }
+
     @discardableResult
-    func addWaitCancellation(_ action: @escaping () -> Void) -> Int {
-        let id = nextWaitCancellationID
-        nextWaitCancellationID += 1
-        waitCancellations[id] = action
-        return id
+    func beginExit(_ status: ProcessExitStatus) -> Bool {
+        guard isLive else { return false }
+        lifecycle = .exiting(status)
+        return true
     }
 
-    func removeWaitCancellation(_ id: Int) {
-        waitCancellations[id] = nil
+    func becomeZombie() {
+        guard case .exiting(let status) = lifecycle else { return }
+        lifecycle = .zombie(status)
     }
 
-    func cancelWaits() {
-        let actions = Array(waitCancellations.values)
-        waitCancellations.removeAll()
-        for action in actions { action() }
+    func beginWait(_ reason: ProcessWaitReason,
+                   cancellation: (() -> Void)? = nil) -> Int {
+        guard isLive else { return 0 }
+        return waits.begin(reason, cancellation: cancellation)
     }
+
+    func setWaitCancellation(_ action: @escaping () -> Void, for id: Int) {
+        waits.setCancellation(action, for: id)
+    }
+
+    func disarmWaitCancellation(_ id: Int) {
+        waits.disarmCancellation(for: id)
+    }
+
+    func endWait(_ id: Int) { waits.end(id) }
+
+    func cancelWaits() { waits.cancelAll() }
 }

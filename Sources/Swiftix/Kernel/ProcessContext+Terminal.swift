@@ -95,42 +95,38 @@ extension ProcessContext {
         // lets a program read stdin uniformly whether it is a pipe, a tty, or a
         // redirected file (`cat < file`).
         guard let stream = object as? ReadableStream else {
-            process.blockedOn += 1
+            let waitID = process.beginWait(.descriptor(fd: fd, operation: "read"))
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(object.read(max: limit))
             }
             return
         }
         if stream.hasBytesAvailable {
-            process.blockedOn += 1
+            let waitID = process.beginWait(.descriptor(fd: fd, operation: "read"))
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(stream.read(max: limit))
             }
             return
         }
-        process.blockedOn += 1
         var completed = false
-        var cancellationID: Int?
-        cancellationID = process.addWaitCancellation { [weak process] in
+        var subscription: ReadinessSubscription?
+        let waitID = process.beginWait(.descriptor(fd: fd, operation: "read")) {
             guard !completed else { return }
             completed = true
-            stream.onReadable = nil
-            if let process, process.blockedOn > 0 {
-                process.blockedOn -= 1
-            }
+            subscription?.cancel()
+            subscription = nil
         }
-        stream.onReadable = { [weak kernel, weak process] in
+        subscription = stream.addReadWaiter { [weak kernel, weak process] in
             guard let kernel, let process else { return }
             guard !completed else { return }
             completed = true
-            stream.onReadable = nil
-            if let cancellationID {
-                process.removeWaitCancellation(cancellationID)
-            }
+            subscription?.cancel()
+            subscription = nil
+            process.disarmWaitCancellation(waitID)
             kernel.runStep(process) {
-                process.blockedOn -= 1
+                process.endWait(waitID)
                 resume(stream.read(max: limit))
             }
         }
