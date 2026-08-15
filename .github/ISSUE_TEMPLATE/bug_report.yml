@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible Swiftix correctness or compatibility issue
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Follow SECURITY.md instead.
+  - type: input
+    id: swiftix_version
+    attributes:
+      label: Swiftix version or commit
+      placeholder: 0.9.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Swift version, OS version, platform and architecture
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Core / EventLoop
+        - Process / VFS / PTY
+        - Network stack
+        - Swiftix Go
+        - Root filesystem image
+        - Package manager
+        - Host toolchain
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Include the smallest source, packet bytes or artifact that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and diagnostics
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: This report does not contain a security vulnerability.
+          required: true

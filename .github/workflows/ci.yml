@@ -1,0 +1,280 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: swift:6.3.3-noble
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Trust checkout directory in container
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Install coverage tooling
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends python3
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Build with warnings as errors
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Run tests with coverage and warnings as errors
+        run: |
+          swift test --enable-code-coverage -Xswiftc -warnings-as-errors
+          coverage_path="$(swift test --show-codecov-path)"
+          python3 Scripts/check-coverage.py "${coverage_path}" 80
+
+      - name: Run tests serially
+        run: swift test --no-parallel
+
+      - name: Build release with warnings as errors
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      - name: Build as an external public-API consumer
+        run: swift build --package-path Example/PublicAPISmoke -Xswiftc -warnings-as-errors
+
+      - name: Check whitespace
+        run: git diff --check
+
+  api-compatibility:
+    runs-on: ubuntu-latest
+    container: swift:6.3.3-noble
+    steps:
+      - name: Check out repository with release tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Trust checkout directory in container
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Check public API compatibility
+        run: Scripts/check-api-breakage.sh
+
+  ios-build:
+    name: iOS 17 package build
+    runs-on: macos-26
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build Swiftix for iOS
+        run: |
+          xcodebuild \
+            -scheme Swiftix \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  host-go-tools:
+    name: Host Go tools (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Swift 6.3.3
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes libcurl4-openssl-dev gpg
+          swiftly_archive="${RUNNER_TEMP}/swiftly-$(uname -m).tar.gz"
+          swiftly_bootstrap="${RUNNER_TEMP}/swiftly-bootstrap"
+          swiftly_post_install="${RUNNER_TEMP}/swiftly-post-install.sh"
+          mkdir -p "${swiftly_bootstrap}"
+          curl --fail --location --silent --show-error \
+            "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz" \
+            --output "${swiftly_archive}"
+          tar --extract --gzip --file "${swiftly_archive}" --directory "${swiftly_bootstrap}"
+          export SWIFTLY_HOME_DIR="${RUNNER_TEMP}/swiftly-home"
+          export SWIFTLY_BIN_DIR="${RUNNER_TEMP}/swiftly-bin"
+          "${swiftly_bootstrap}/swiftly" init \
+            --skip-install \
+            --quiet-shell-followup \
+            --assume-yes \
+            --no-modify-profile
+          export PATH="${SWIFTLY_BIN_DIR}:${PATH}"
+          swiftly install 6.3.3 \
+            --use \
+            --assume-yes \
+            --post-install-file "${swiftly_post_install}"
+          if [[ -f "${swiftly_post_install}" ]]; then
+            bash "${swiftly_post_install}"
+          fi
+          swift_location="$(swiftly use --print-location)"
+          printf 'SWIFTLY_HOME_DIR=%s\nSWIFTLY_BIN_DIR=%s\n' \
+            "${SWIFTLY_HOME_DIR}" "${SWIFTLY_BIN_DIR}" >> "${GITHUB_ENV}"
+          printf '%s\n' "${SWIFTLY_BIN_DIR}" "${swift_location}" >> "${GITHUB_PATH}"
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Build host tools
+        run: swift build --product swiftix-go -Xswiftc -warnings-as-errors
+
+      - name: Test host tools and cross-platform images
+        run: swift test --filter HostGoToolTests -Xswiftc -warnings-as-errors
+
+      - name: Run complete core tests on macOS
+        if: runner.os == 'macOS'
+        run: swift test -Xswiftc -warnings-as-errors
+
+      - name: Verify host and target identities
+        run: |
+          .build/debug/swiftix-go env GOHOSTOS GOHOSTARCH GOOS GOARCH
+          test "$(.build/debug/swiftix-go env GOOS)" = swiftix
+          test "$(.build/debug/swiftix-go env GOARCH)" = svm64
+
+      - name: Build SwiftPM example
+        if: runner.os == 'macOS'
+        run: swift build --package-path Example -Xswiftc -warnings-as-errors
+
+  package-host-toolchain:
+    name: Package host toolchain (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Swift 6.3.3
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes libcurl4-openssl-dev gpg
+          swiftly_archive="${RUNNER_TEMP}/swiftly-$(uname -m).tar.gz"
+          swiftly_bootstrap="${RUNNER_TEMP}/swiftly-bootstrap"
+          swiftly_post_install="${RUNNER_TEMP}/swiftly-post-install.sh"
+          mkdir -p "${swiftly_bootstrap}"
+          curl --fail --location --silent --show-error \
+            "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz" \
+            --output "${swiftly_archive}"
+          tar --extract --gzip --file "${swiftly_archive}" --directory "${swiftly_bootstrap}"
+          export SWIFTLY_HOME_DIR="${RUNNER_TEMP}/swiftly-home"
+          export SWIFTLY_BIN_DIR="${RUNNER_TEMP}/swiftly-bin"
+          "${swiftly_bootstrap}/swiftly" init \
+            --skip-install \
+            --quiet-shell-followup \
+            --assume-yes \
+            --no-modify-profile
+          export PATH="${SWIFTLY_BIN_DIR}:${PATH}"
+          swiftly install 6.3.3 \
+            --use \
+            --assume-yes \
+            --post-install-file "${swiftly_post_install}"
+          if [[ -f "${swiftly_post_install}" ]]; then
+            bash "${swiftly_post_install}"
+          fi
+          swift_location="$(swiftly use --print-location)"
+          printf 'SWIFTLY_HOME_DIR=%s\nSWIFTLY_BIN_DIR=%s\n' \
+            "${SWIFTLY_HOME_DIR}" "${SWIFTLY_BIN_DIR}" >> "${GITHUB_ENV}"
+          printf '%s\n' "${SWIFTLY_BIN_DIR}" "${swift_location}" >> "${GITHUB_PATH}"
+
+      - name: Resolve release identity
+        id: release
+        shell: bash
+        run: |
+          version="$(sed -n 's/.*public static let version = "\([^"]*\)".*/\1/p' Sources/Swiftix/Swiftix.swift)"
+          Scripts/validate-semver.py "${version}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Swiftix.version ${version}" >&2
+            exit 1
+          fi
+          case "$(uname -m)" in
+            arm64|aarch64) architecture=arm64 ;;
+            x86_64|amd64) architecture=amd64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          if [[ "$(uname -s)" == Darwin ]]; then platform=macos; else platform=linux; fi
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+          echo "platform=${platform}" >>"${GITHUB_OUTPUT}"
+          echo "architecture=${architecture}" >>"${GITHUB_OUTPUT}"
+
+      - name: Configure macOS release signing
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          CERTIFICATE_P12: ${{ secrets.SWIFTIX_MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.SWIFTIX_MACOS_CERTIFICATE_PASSWORD }}
+          APPLICATION_IDENTITY: ${{ secrets.SWIFTIX_MACOS_APPLICATION_IDENTITY }}
+          INSTALLER_IDENTITY: ${{ secrets.SWIFTIX_MACOS_INSTALLER_IDENTITY }}
+          NOTARY_PRIVATE_KEY: ${{ secrets.SWIFTIX_NOTARY_PRIVATE_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.SWIFTIX_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.SWIFTIX_NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          test -n "${CERTIFICATE_P12}"
+          test -n "${CERTIFICATE_PASSWORD}"
+          test -n "${APPLICATION_IDENTITY}"
+          test -n "${INSTALLER_IDENTITY}"
+          test -n "${NOTARY_PRIVATE_KEY}"
+          test -n "${NOTARY_KEY_ID}"
+          test -n "${NOTARY_ISSUER_ID}"
+          keychain_password="$(uuidgen)"
+          keychain_path="${RUNNER_TEMP}/swiftix-signing.keychain-db"
+          certificate_path="${RUNNER_TEMP}/swiftix-signing.p12"
+          notary_key_path="${RUNNER_TEMP}/AuthKey_${NOTARY_KEY_ID}.p8"
+          printf '%s' "${CERTIFICATE_P12}" | base64 -D >"${certificate_path}"
+          printf '%s' "${NOTARY_PRIVATE_KEY}" >"${notary_key_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" \
+            -k "${keychain_path}" \
+            -P "${CERTIFICATE_PASSWORD}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/productsign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "${keychain_password}" \
+            "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          echo "SWIFTIX_APPLICATION_SIGN_IDENTITY=${APPLICATION_IDENTITY}" >>"${GITHUB_ENV}"
+          echo "SWIFTIX_INSTALLER_SIGN_IDENTITY=${INSTALLER_IDENTITY}" >>"${GITHUB_ENV}"
+          echo "SWIFTIX_NOTARY_KEY_FILE=${notary_key_path}" >>"${GITHUB_ENV}"
+          echo "SWIFTIX_NOTARY_KEY_ID=${NOTARY_KEY_ID}" >>"${GITHUB_ENV}"
+          echo "SWIFTIX_NOTARY_ISSUER_ID=${NOTARY_ISSUER_ID}" >>"${GITHUB_ENV}"
+
+      - name: Build installers
+        run: |
+          Packaging/build-toolchain.sh \
+            --version "${{ steps.release.outputs.version }}" \
+            --source-commit "${GITHUB_SHA}" \
+            --output-dir toolchain-artifacts
+
+      - name: Install, execute, and uninstall host package
+        run: |
+          Packaging/smoke-test-toolchain.sh \
+            toolchain-artifacts \
+            "${{ steps.release.outputs.version }}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: swiftix-toolchain-${{ steps.release.outputs.platform }}-${{ steps.release.outputs.architecture }}
+          path: toolchain-artifacts/*
+          if-no-files-found: error
