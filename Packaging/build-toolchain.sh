@@ -173,6 +173,7 @@ install -m 0755 "${binary_dir}/swiftix-go" "${payload_root}/bin/swiftix-go"
 install -m 0644 "${repository_root}/LICENSE" "${payload_root}/share/doc/swiftix-toolchain/LICENSE"
 
 if [[ "${platform}" == "macos" && -n "${SWIFTIX_APPLICATION_SIGN_IDENTITY:-}" ]]; then
+    printf 'Signing swiftix-go with Developer ID Application\n'
     codesign --force --options runtime --timestamp --sign "${SWIFTIX_APPLICATION_SIGN_IDENTITY}" "${payload_root}/bin/swiftix-go"
 fi
 
@@ -212,12 +213,14 @@ if [[ ",${formats}," == *,pkg,* ]]; then
     if [[ -n "${SWIFTIX_INSTALLER_SIGN_IDENTITY:-}" ]]; then
         pkgbuild_arguments+=(--sign "${SWIFTIX_INSTALLER_SIGN_IDENTITY}")
     fi
+    printf 'Building macOS installer package\n'
     pkgbuild "${pkgbuild_arguments[@]}" "${package_path}"
     if [[ -n "${SWIFTIX_NOTARY_KEY_FILE:-}" ]]; then
         if [[ -z "${SWIFTIX_NOTARY_KEY_ID:-}" || -z "${SWIFTIX_NOTARY_ISSUER_ID:-}" ]]; then
             echo "SWIFTIX_NOTARY_KEY_ID and SWIFTIX_NOTARY_ISSUER_ID are required with SWIFTIX_NOTARY_KEY_FILE" >&2
             exit 1
         fi
+        printf 'Submitting macOS installer package for notarization\n'
         xcrun notarytool submit "${package_path}" \
             --key "${SWIFTIX_NOTARY_KEY_FILE}" \
             --key-id "${SWIFTIX_NOTARY_KEY_ID}" \
