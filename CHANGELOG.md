@@ -3,7 +3,9 @@
 Swiftix follows [Semantic Versioning](https://semver.org/). User-visible API,
 format, behavior and platform changes are recorded here.
 
-## Unreleased — 0.10.0
+## Unreleased
+
+## 0.10.0 — 2026-08-15
 
 This pre-1.0 minor intentionally changes the public kernel API described in the
 0.9-to-0.10 migration notes.
