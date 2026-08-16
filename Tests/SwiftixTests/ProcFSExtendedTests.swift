@@ -37,6 +37,15 @@ struct ProcFSExtendedTests {
         #expect(readFile("/proc/version").contains("Swiftix version"))
     }
 
+    @Test func swiftixContractVersionsTeachingSchemas() {
+        let text = readFile("/proc/swiftix")
+        #expect(text.contains("Version:\t\(Swiftix.version)"))
+        #expect(text.contains("ProcSchema:\t\(Swiftix.teachingProcfsSchemaVersion)"))
+        #expect(text.contains("MemoryModel:\tmanaged-runtime"))
+        #expect(text.contains("SyscallModel:\tswift-native-completed"))
+        #expect(text.contains("SyscallHistory:\t128"))
+    }
+
     // MARK: - Per-process directories
 
     @Test func perProcessStatusAndCmdline() {
@@ -68,7 +77,107 @@ struct ProcFSExtendedTests {
         #expect(box.status.contains("Name:\tworker"))
         #expect(box.status.contains("Pid:\t\(box.pid)"))
         #expect(box.status.contains("State:\tS"))       // parked → sleeping
+        #expect(box.status.contains("RuntimeMemory:\t0 bytes"))
         #expect(box.cmdline == "worker alpha beta")
+    }
+
+    @Test func perProcessFdinfoDescribesFilesPipesAndSockets() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        final class Box { var pid: PID = 0; var fdinfo = "" }
+        let box = Box()
+
+        kernel.spawn("worker") { ctx in
+            box.pid = ctx.getpid()
+            let file = ctx.open("/data", create: true)!
+            _ = ctx.write(file, Array("hi".utf8))
+            _ = ctx.pipe()
+            let udp = ctx.socket()!
+            _ = ctx.bind(udp, address: nil, port: 9_999)
+            ctx.sleep(10) { ctx.exit(0) }
+        }
+        loop.advance(by: 0)
+
+        kernel.spawn("reader") { ctx in
+            if let fd = ctx.open("/proc/\(box.pid)/fdinfo") {
+                box.fdinfo = String(decoding: ctx.read(fd, max: 65_535), as: UTF8.self)
+                ctx.close(fd)
+            }
+            ctx.exit(0)
+        }
+        loop.advance(by: 0)
+
+        #expect(box.fdinfo.contains("FD TYPE ACCESS FLAGS OFFSET SIZE DETAIL"))
+        #expect(box.fdinfo.contains("0 file read-write - 2 2 -"))
+        #expect(box.fdinfo.contains("1 pipe read - - - read-end"))
+        #expect(box.fdinfo.contains("2 pipe write - - - write-end"))
+        #expect(box.fdinfo.contains("3 udp read-write - - - local=:9999"))
+    }
+
+    @Test func perProcessSyscallsExposeCompletedSwiftixCalls() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        final class Box { var pid: PID = 0; var syscalls = "" }
+        let box = Box()
+
+        kernel.spawn("worker") { ctx in
+            box.pid = ctx.getpid()
+            let file = ctx.open("/file with space", create: true)!
+            _ = ctx.write(file, Array("hi".utf8))
+            _ = ctx.seek(file, to: 0, whence: 0)
+            _ = ctx.read(file, max: 2)
+            let udp = ctx.socket()!
+            _ = ctx.bind(udp, address: nil, port: 8_080)
+            ctx.sleep(10) { ctx.exit(0) }
+        }
+        loop.advance(by: 0)
+
+        kernel.spawn("reader") { ctx in
+            if let fd = ctx.open("/proc/\(box.pid)/syscalls") {
+                box.syscalls = String(decoding: ctx.read(fd, max: 65_535), as: UTF8.self)
+                ctx.close(fd)
+            }
+            ctx.exit(0)
+        }
+        loop.advance(by: 0)
+
+        #expect(box.syscalls.contains("SEQ TICKS SYSCALL RESULT DETAIL"))
+        #expect(box.syscalls.contains(" open 0 path=/file%20with%20space"))
+        #expect(box.syscalls.contains(" write 2 fd=0,count=2"))
+        #expect(box.syscalls.contains(" seek 0 fd=0,offset=0,whence=0"))
+        #expect(box.syscalls.contains(" read 2 fd=0,max=2"))
+        #expect(box.syscalls.contains(" socket 1 type=udp"))
+        #expect(box.syscalls.contains(" bind 0 fd=1,port=8080"))
+    }
+
+    @Test func perProcessSyscallHistoryIsBounded() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        final class Box { var pid: PID = 0; var syscalls = "" }
+        let box = Box()
+
+        kernel.spawn("worker") { ctx in
+            box.pid = ctx.getpid()
+            for index in 0..<140 {
+                _ = ctx.stat("/missing-\(index)")
+            }
+            ctx.sleep(10) { ctx.exit(0) }
+        }
+        loop.advance(by: 0)
+
+        kernel.spawn("reader") { ctx in
+            if let fd = ctx.open("/proc/\(box.pid)/syscalls") {
+                box.syscalls = String(decoding: ctx.read(fd, max: 65_535), as: UTF8.self)
+                ctx.close(fd)
+            }
+            ctx.exit(0)
+        }
+        loop.advance(by: 0)
+
+        let lines = box.syscalls.split(separator: "\n")
+        #expect(lines.count == Process.syscallTraceCapacity + 1)
+        #expect(lines[1].hasPrefix("13 "))
+        #expect(lines.last?.hasPrefix("140 ") == true)
     }
 
     @Test func procDirectoryListsLivePids() {

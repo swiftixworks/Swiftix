@@ -1,6 +1,17 @@
 /// A process identifier.
 public typealias PID = Int
 
+/// One completed Swift-native syscall observation. Swiftix deliberately records
+/// names instead of Linux syscall numbers because guest programs do not execute
+/// a Linux binary ABI.
+struct SyscallTraceEntry: Equatable {
+    let sequence: Int
+    let ticks: Int
+    let name: String
+    let result: String
+    let detail: String
+}
+
 /// A "process" — a cooperative task scheduled on the kernel's event loop, **not**
 /// an OS process (iOS forbids `fork`/`exec`). It carries the per-process state a
 /// Linux process has: identity, working directory, environment, and its open
@@ -65,6 +76,13 @@ final class Process {
     /// column in `/proc/processes` and consumed by `ps`/`top`.
     var scheduleTicks = 0
 
+    /// Recent completed calls through the `ProcessContext` syscall boundary.
+    /// The history is intentionally small and per-process: diagnostics remain
+    /// useful without allowing an active program to grow Kernel memory forever.
+    private(set) var syscallTrace: [SyscallTraceEntry] = []
+    private var syscallTraceSequence = 0
+    static let syscallTraceCapacity = 128
+
     /// Job-control stop (SIGSTOP/SIGTSTP). While stopped, scheduling steps are
     /// held in `pendingSteps` and replayed on SIGCONT.
     var pendingSteps: [() -> Void] = []
@@ -96,6 +114,15 @@ final class Process {
     /// maskable; SIGCONT still resumes job-control stops immediately.
     var signalMask: Set<Int32> = []
     var pendingSignals: [Int32] = []
+
+    /// Memory owned by a managed runtime executing inside this process. Swiftix
+    /// does not invent an address space or RSS value: first-party runtimes report
+    /// the bytes they actually own, and the Kernel applies one aggregate budget
+    /// across all live processes. Native Swift command bodies normally report 0.
+    var runtimeMemoryBytes = 0
+    var runtimeMemoryLimitBytes = 0
+    var runtimeHeapCells = 0
+    var runtimeGarbageCollections = 0
 
     /// Compact effective-credential model used by the VFS DAC checks. Swiftix
     /// intentionally does not model real/saved IDs or Linux capabilities, but
@@ -136,6 +163,21 @@ final class Process {
         self.workScope = workScope
         self.processGroupID = pid
         self.sessionID = pid
+    }
+
+    func recordSyscall(name: String, result: String, detail: String) {
+        syscallTraceSequence = syscallTraceSequence == Int.max
+            ? 1
+            : syscallTraceSequence + 1
+        syscallTrace.append(SyscallTraceEntry(
+            sequence: syscallTraceSequence,
+            ticks: scheduleTicks,
+            name: name,
+            result: result,
+            detail: detail))
+        if syscallTrace.count > Self.syscallTraceCapacity {
+            syscallTrace.removeFirst(syscallTrace.count - Self.syscallTraceCapacity)
+        }
     }
 
     var isLive: Bool {

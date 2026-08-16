@@ -8,9 +8,17 @@ struct ProcessSnapshotRow {
     let state: String
     /// Deterministic CPU-activity proxy: scheduler steps run for this process.
     let ticks: Int
-    /// Open file-descriptor count: a resource/"footprint" proxy (there is no
-    /// per-process address space, so no true RSS to report).
+    /// Open file-descriptor count.
     let fds: Int
+    /// Exact bytes currently reported by a managed runtime. This is intentionally
+    /// named MEM rather than RSS because Swiftix has no process address space.
+    let memoryBytes: Int
+    let memoryLimitBytes: Int
+    let heapCells: Int
+    let garbageCollections: Int
+    let descriptors: [FileDescriptorTable.DiagnosticSnapshot]
+    /// Bounded completed-call history for `/proc/<pid>/syscalls`.
+    let syscalls: [SyscallTraceEntry]
     /// The process's command line (argv joined by spaces, or its name when it was
     /// spawned without arguments). Surfaced by `/proc/<pid>/cmdline`.
     let command: String
@@ -65,6 +73,12 @@ final class ProcessIntrospection {
             state: stateName(process),
             ticks: process.scheduleTicks,
             fds: process.fileDescriptors.openDescriptors.count,
+            memoryBytes: process.runtimeMemoryBytes,
+            memoryLimitBytes: process.runtimeMemoryLimitBytes,
+            heapCells: process.runtimeHeapCells,
+            garbageCollections: process.runtimeGarbageCollections,
+            descriptors: process.fileDescriptors.diagnosticSnapshots,
+            syscalls: process.syscallTrace,
             command: process.args.isEmpty ? process.name : process.args.joined(separator: " "))
     }
 

@@ -12,14 +12,15 @@ enum ProcfsSchema {
 
     enum Processes {
         static let path = "/proc/processes"
-        // TICKS (scheduler steps ≈ CPU activity) and FDS (open descriptors ≈
-        // footprint) sit before NAME so NAME stays the final, space-tolerant column.
-        static let fields = ["PID", "PPID", "PGID", "SID", "STATE", "TICKS", "FDS", "NAME"]
+        // TICKS (scheduler steps ≈ CPU activity), FDS, and exact managed-runtime
+        // memory sit before NAME so NAME stays the final, space-tolerant column.
+        static let fields = ["PID", "PPID", "PGID", "SID", "STATE", "TICKS", "FDS", "MEM", "NAME"]
         static let header = fields.joined(separator: " ")
 
         static func line(pid: PID, ppid: PID, pgid: PID, sid: PID,
-                         state: String, ticks: Int, fds: Int, name: String) -> String {
-            "\(pid) \(ppid) \(pgid) \(sid) \(state) \(ticks) \(fds) \(name)"
+                         state: String, ticks: Int, fds: Int,
+                         memoryBytes: Int, name: String) -> String {
+            "\(pid) \(ppid) \(pgid) \(sid) \(state) \(ticks) \(fds) \(memoryBytes) \(name)"
         }
     }
 

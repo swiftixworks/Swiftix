@@ -28,6 +28,9 @@ jobs:
       - name: Show Swift toolchain
         run: swift --version
 
+      - name: Check release metadata
+        run: python3 Scripts/check-release-metadata.py
+
       - name: Build with warnings as errors
         run: swift build -Xswiftc -warnings-as-errors
 

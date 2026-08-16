@@ -3,6 +3,11 @@
 /// process table, and uses the shared `EventLoop` as its scheduler — processes
 /// are cooperative tasks, never one OS thread per process.
 public final class Kernel {
+    /// Default aggregate budget for memory explicitly reported by managed guest
+    /// runtimes. This is not host RSS and does not include the VFS or Swift object
+    /// overhead; those are exposed separately by resource snapshots/procfs.
+    public static let defaultRuntimeMemoryLimitBytes = 128 * 1_024 * 1_024
+
     let vfs = VirtualFileSystem()
     let blockDevices = BlockDeviceTable()
 
@@ -30,6 +35,11 @@ public final class Kernel {
 
     /// The scheduler/clock — shared across instances in a running simulation.
     public let loop: EventLoop
+
+    /// Aggregate admission limit for memory reported by managed runtimes in this
+    /// Kernel. A report that would move the live total above this value is
+    /// rejected before it becomes observable.
+    public let runtimeMemoryLimitBytes: Int
 
     /// Every timer and process step owned by this kernel is tagged with this
     /// scope. The shared loop can then freeze or physically remove one VM's work
@@ -97,10 +107,14 @@ public final class Kernel {
             self?.kill(pid, signal: signal)
         })
 
-    public init(loop: EventLoop) {
+    public init(
+        loop: EventLoop,
+        runtimeMemoryLimitBytes: Int = Kernel.defaultRuntimeMemoryLimitBytes
+    ) {
         let workOwner = loop.makeWorkOwner()
         self.loop = loop
         self.workOwner = workOwner
+        self.runtimeMemoryLimitBytes = max(0, runtimeMemoryLimitBytes)
         self.netns = NetworkNamespace(loop: loop, workOwner: workOwner)
         vfs.clock = { [weak loop] in loop?.now ?? 0 }
         childWaitQueue.onExitConsumed = { [weak self] parent, child in
@@ -300,6 +314,13 @@ public final class Kernel {
         public let tcpConnections: Int
         public let networkInterfaces: Int
         public let vfsNodeCount: Int
+        /// Bytes in real, non-synthetic VFS files. This is storage content, not
+        /// process memory, and is deliberately separate from managed runtime use.
+        public let vfsFileBytes: Int
+        /// Sum of memory explicitly reported by live managed guest runtimes.
+        public let runtimeMemoryBytes: Int
+        /// Kernel-wide admission budget for `runtimeMemoryBytes`.
+        public let runtimeMemoryLimitBytes: Int
     }
 
     /// Snapshot current resource usage across the kernel.
@@ -310,6 +331,10 @@ public final class Kernel {
         let tcpCount = netns.stack.tcpConnectionCount
         let ifCount = netns.stack.interfaceCount
         let nodeCount = vfs.nodeCount
+        let vfsBytes = vfs.totalFileBytes
+        let runtimeBytes = processTable.all.reduce(0) {
+            $0 + ($1.isLive ? $1.runtimeMemoryBytes : 0)
+        }
         return ResourceSnapshot(
             processes: processTable.count,
             liveProcesses: liveCount,
@@ -317,7 +342,10 @@ public final class Kernel {
             openFileDescriptors: fdCount,
             tcpConnections: tcpCount,
             networkInterfaces: ifCount,
-            vfsNodeCount: nodeCount
+            vfsNodeCount: nodeCount,
+            vfsFileBytes: vfsBytes,
+            runtimeMemoryBytes: runtimeBytes,
+            runtimeMemoryLimitBytes: runtimeMemoryLimitBytes
         )
     }
 
@@ -347,6 +375,12 @@ public final class Kernel {
         public let scheduleTicks: Int
         public let openFileDescriptors: Int
         public let pendingSignals: [Int32]
+        /// Managed-runtime bytes reported for this process. This is an exact
+        /// runtime-owned count, not a fabricated RSS estimate.
+        public let runtimeMemoryBytes: Int
+        public let runtimeMemoryLimitBytes: Int
+        public let runtimeHeapCells: Int
+        public let runtimeGarbageCollections: Int
     }
 
     /// Snapshot every retained process, including waitable zombies, ordered by
@@ -372,7 +406,11 @@ public final class Kernel {
                 queuedSteps: process.queuedSteps,
                 scheduleTicks: process.scheduleTicks,
                 openFileDescriptors: process.fileDescriptors.openDescriptors.count,
-                pendingSignals: process.pendingSignals)
+                pendingSignals: process.pendingSignals,
+                runtimeMemoryBytes: process.runtimeMemoryBytes,
+                runtimeMemoryLimitBytes: process.runtimeMemoryLimitBytes,
+                runtimeHeapCells: process.runtimeHeapCells,
+                runtimeGarbageCollections: process.runtimeGarbageCollections)
         }
         .sorted { $0.pid < $1.pid }
     }
@@ -608,12 +646,46 @@ public final class Kernel {
     }
 
     private func processDidExit(_ process: Process) {
+        process.runtimeMemoryBytes = 0
+        process.runtimeMemoryLimitBytes = 0
+        process.runtimeHeapCells = 0
+        process.runtimeGarbageCollections = 0
         if let continuation = pausedAsyncContinuations.removeValue(forKey: process.pid) {
             continuation.resume(returning: false)
         }
         if let task = asyncTasks.removeValue(forKey: process.pid) {
             task.cancel()
         }
+    }
+
+    /// Update one live process's managed-runtime memory report. The update is
+    /// atomic: invalid fields or an aggregate-budget overflow leave the previous
+    /// report unchanged. Called through the trusted runtime integration seam on
+    /// `ProcessContext`, never by the VFS or network stack.
+    func reportRuntimeMemory(
+        for process: Process,
+        bytes: Int,
+        limitBytes: Int,
+        heapCells: Int,
+        garbageCollections: Int
+    ) -> Bool {
+        guard processTable.contains(process.pid), process.isLive,
+              bytes >= 0, limitBytes >= 0, bytes <= limitBytes,
+              heapCells >= 0, garbageCollections >= 0 else { return false }
+        var otherBytes = 0
+        for candidate in processTable.all where candidate.isLive && candidate !== process {
+            guard candidate.runtimeMemoryBytes <= runtimeMemoryLimitBytes - otherBytes else {
+                return false
+            }
+            otherBytes += candidate.runtimeMemoryBytes
+        }
+        guard otherBytes <= runtimeMemoryLimitBytes,
+              bytes <= runtimeMemoryLimitBytes - otherBytes else { return false }
+        process.runtimeMemoryBytes = bytes
+        process.runtimeMemoryLimitBytes = limitBytes
+        process.runtimeHeapCells = heapCells
+        process.runtimeGarbageCollections = garbageCollections
+        return true
     }
 
     /// Release the lifetime hold taken by async `spawn` when the body returns.
@@ -816,7 +888,9 @@ public final class Kernel {
             let text = "processes=\(snap.processes) fds=\(snap.openFileDescriptors)"
                 + " live=\(snap.liveProcesses) zombies=\(snap.zombieProcesses)"
                 + " tcp=\(snap.tcpConnections) interfaces=\(snap.networkInterfaces)"
-                + " vnodes=\(snap.vfsNodeCount)\n"
+                + " vnodes=\(snap.vfsNodeCount) vfs_bytes=\(snap.vfsFileBytes)"
+                + " runtime_memory=\(snap.runtimeMemoryBytes)"
+                + " runtime_memory_limit=\(snap.runtimeMemoryLimitBytes)\n"
             return Array(text.utf8)
         }
         // /proc/devices: block device inventory.
@@ -828,16 +902,21 @@ public final class Kernel {
             let text = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
             return Array(text.utf8)
         }
-        // /proc/meminfo: synthetic memory report. There is no separate memory
-        // model — the in-memory tmpfs *is* the memory — so "used" is the live sum
-        // of real file bytes against a synthetic 128 MiB total, matching `free`.
+        // /proc/meminfo reports the managed-runtime budget and actual live heap
+        // reports. It is deliberately not host physical memory or RSS. VFS file
+        // bytes are listed separately and never passed off as process memory.
         vfs.createSyntheticFile("/proc/meminfo") { [weak self] in
-            let totalKB = 131_072                                   // 128 MiB
-            let usedKB = min((self?.vfs.totalFileBytes ?? 0) / 1024, totalKB)
+            guard let self else { return [] }
+            let snap = self.snapshotResources()
+            let totalKB = snap.runtimeMemoryLimitBytes / 1024
+            let usedKB = min(snap.runtimeMemoryBytes / 1024, totalKB)
             let freeKB = totalKB - usedKB
             let text = "MemTotal:       \(totalKB) kB\n"
                 + "MemFree:        \(freeKB) kB\n"
                 + "MemAvailable:   \(freeKB) kB\n"
+                + "RuntimeHeap:    \(usedKB) kB\n"
+                + "VFSFileBytes:   \(snap.vfsFileBytes) B\n"
+                + "MemModel:       managed-runtime\n"
             return Array(text.utf8)
         }
         // /proc/cpuinfo: a single synthetic processor (there is one cooperative
@@ -863,6 +942,17 @@ public final class Kernel {
         // /proc/version: kernel identity string.
         vfs.createSyntheticFile("/proc/version") {
             Array("Swiftix version \(Swiftix.version) (Swift) #1\n".utf8)
+        }
+        // Versioned teaching-observability contract consumed by independently
+        // packaged guest tools. A breaking field/schema change must advance the
+        // schema in docs/compatibility.md and rebuild those packages.
+        vfs.createSyntheticFile("/proc/swiftix") {
+            let text = "Version:\t\(Swiftix.version)\n"
+                + "ProcSchema:\t\(Swiftix.teachingProcfsSchemaVersion)\n"
+                + "MemoryModel:\tmanaged-runtime\n"
+                + "SyscallModel:\tswift-native-completed\n"
+                + "SyscallHistory:\t\(Process.syscallTraceCapacity)\n"
+            return Array(text.utf8)
         }
         // Per-process directories (/proc/<pid>/status, /proc/<pid>/cmdline),
         // resolved live from the process table (see ProcfsProvider).

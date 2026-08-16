@@ -29,6 +29,7 @@ struct ProcessIntrospectionTests {
         // CPU-activity proxy and the descriptor count start at zero.
         #expect(rows[0].ticks == 0)
         #expect(rows[0].fds == 0)
+        #expect(rows[0].memoryBytes == 0)
         #expect(rows[1].ticks == 0)
         #expect(rows[1].fds == 0)
     }
@@ -56,11 +57,12 @@ struct ProcessIntrospectionTests {
         }
         loop.advance(by: 0)
 
-        // Columns: PID PPID PGID SID STATE TICKS FDS NAME
+        // Columns: PID PPID PGID SID STATE TICKS FDS MEM NAME
         let cols = box.line.split(separator: " ").map(String.init)
-        #expect(cols.count == 8)
+        #expect(cols.count == 9)
         #expect((Int(cols[5]) ?? 0) >= 1)   // TICKS: worker ran at least its body step
         #expect((Int(cols[6]) ?? 0) >= 1)   // FDS: the descriptor it left open
+        #expect(Int(cols[7]) == 0)          // MEM: no managed runtime in this process
     }
 
     @Test func stateNamesMatchLinuxProcConventions() {

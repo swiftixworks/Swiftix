@@ -39,10 +39,17 @@ extension ProcessContext {
     public func mkdir(_ path: String) -> Bool {
         let resolved = absolute(path)
         let existing = kernel.vfs.lookup(resolved, follow: false, mounts: mountNS)
-        guard existing != nil || canMutateParent(of: resolved) else { return false }
-        guard let node = kernel.vfs.createDirectory(resolved, mounts: mountNS) else { return false }
-        if existing == nil { applyCreationOwnership(to: node) }
-        return true
+        let result: Bool
+        if existing == nil, !canMutateParent(of: resolved) {
+            result = false
+        } else if let node = kernel.vfs.createDirectory(resolved, mounts: mountNS) {
+            if existing == nil { applyCreationOwnership(to: node) }
+            result = true
+        } else {
+            result = false
+        }
+        recordSyscall("mkdir", result: result ? "0" : "-1", detail: "path=\(resolved)")
+        return result
     }
 
     /// Remove a file or empty directory at `path` (POSIX `unlink`/`rmdir`).
@@ -52,21 +59,27 @@ extension ProcessContext {
     @discardableResult
     public func remove(_ path: String) -> Bool {
         let resolved = absolute(path)
-        guard canMutateParent(of: resolved) else { return false }
-        return kernel.vfs.remove(resolved, mounts: mountNS)
+        let result = canMutateParent(of: resolved)
+            && kernel.vfs.remove(resolved, mounts: mountNS)
+        recordSyscall("remove", result: result ? "0" : "-1", detail: "path=\(resolved)")
+        return result
     }
 
     /// Metadata for the node at `path`, or `nil` if it does not exist. Symbolic
     /// links are followed (like POSIX `stat`); a dangling link resolves to `nil`.
     public func stat(_ path: String) -> FileStat? {
-        guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return nil }
-        return FileStat(node)
+        let resolved = absolute(path)
+        let result = kernel.vfs.lookup(resolved, mounts: mountNS).map(FileStat.init)
+        recordSyscall("stat", result: result == nil ? "-1" : "0", detail: "path=\(resolved)")
+        return result
     }
 
     /// Metadata for the node at `path` without following a final symbolic link.
     public func lstat(_ path: String) -> FileStat? {
-        guard let node = kernel.vfs.lookup(absolute(path), follow: false, mounts: mountNS) else { return nil }
-        return FileStat(node)
+        let resolved = absolute(path)
+        let result = kernel.vfs.lookup(resolved, follow: false, mounts: mountNS).map(FileStat.init)
+        recordSyscall("lstat", result: result == nil ? "-1" : "0", detail: "path=\(resolved)")
+        return result
     }
 
     /// Create a symbolic link at `path` pointing at `target` (POSIX `symlink`).
@@ -169,7 +182,10 @@ extension ProcessContext {
     /// 1 (CUR), or 2 (END). Returns the new absolute offset, or `nil` if `fd` is
     /// not a seekable descriptor or the resulting offset is negative.
     public func seek(_ fd: Int, to offset: Int, whence: Int) -> Int? {
-        guard let seekable = process.fileDescriptors.object(fd) as? Seekable else { return nil }
+        guard let seekable = process.fileDescriptors.object(fd) as? Seekable else {
+            recordSyscall("seek", result: "-1", detail: "fd=\(fd),offset=\(offset),whence=\(whence)")
+            return nil
+        }
         let base: Int
         switch whence {
         case 1: base = seekable.seekOffset
@@ -177,26 +193,41 @@ extension ProcessContext {
         default: base = 0
         }
         let (target, overflow) = base.addingReportingOverflow(offset)
-        guard !overflow, target >= 0 else { return nil }
+        guard !overflow, target >= 0 else {
+            recordSyscall("seek", result: "-1", detail: "fd=\(fd),offset=\(offset),whence=\(whence)")
+            return nil
+        }
         seekable.seekOffset = target
+        recordSyscall("seek", result: String(target), detail: "fd=\(fd),offset=\(offset),whence=\(whence)")
         return target
     }
 
     public func read(_ fd: Int, max: Int) -> [UInt8] {
-        guard process.fileDescriptors.access(fd)?.canRead == true else { return [] }
-        return process.fileDescriptors.object(fd)?.read(max: max) ?? []
+        guard process.fileDescriptors.access(fd)?.canRead == true else {
+            recordSyscall("read", result: "-1", detail: "fd=\(fd),max=\(max)")
+            return []
+        }
+        let bytes = process.fileDescriptors.object(fd)?.read(max: max) ?? []
+        recordSyscall("read", result: String(bytes.count), detail: "fd=\(fd),max=\(max)")
+        return bytes
     }
 
     @discardableResult
     public func write(_ fd: Int, _ bytes: [UInt8]) -> Int {
         guard process.fileDescriptors.access(fd)?.canWrite == true,
-              let object = process.fileDescriptors.object(fd) else { return 0 }
+              let object = process.fileDescriptors.object(fd) else {
+            recordSyscall("write", result: "-1", detail: "fd=\(fd),count=\(bytes.count)")
+            return 0
+        }
         if !bytes.isEmpty,
            (object as? BrokenPipeDetecting)?.hasBrokenPipe == true {
             kernel.kill(process.pid, signal: Signal.sigpipe.rawValue)
+            recordSyscall("write", result: "-32", detail: "fd=\(fd),count=\(bytes.count)")
             return 0
         }
-        return object.write(bytes)
+        let count = object.write(bytes)
+        recordSyscall("write", result: String(count), detail: "fd=\(fd),count=\(bytes.count)")
+        return count
     }
 
     /// Current file-status flags for an open descriptor, or `nil` if it is not open.
@@ -346,7 +377,9 @@ extension ProcessContext {
     }
 
     public func close(_ fd: Int) {
+        let wasOpen = process.fileDescriptors.object(fd) != nil
         process.fileDescriptors.close(fd)
+        recordSyscall("close", result: wasOpen ? "0" : "-1", detail: "fd=\(fd)")
     }
 
     // MARK: - select (POSIX-style multi-fd readiness)
@@ -429,9 +462,13 @@ extension ProcessContext {
     /// or `nil` when `path` does not resolve to a directory. Used by the shell
     /// `ls` built-in; procfs directories (e.g. `/proc/net`) list too.
     public func listDirectory(_ path: String) -> [String]? {
-        guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS),
+        let resolved = absolute(path)
+        guard let node = kernel.vfs.lookup(resolved, mounts: mountNS),
               node.kind == .directory,
-              permits(node, .read), permits(node, .execute) else { return nil }
+              permits(node, .read), permits(node, .execute) else {
+            recordSyscall("readdir", result: "-1", detail: "path=\(resolved)")
+            return nil
+        }
         var entries = node.children.map { name, child in
             child.kind == .directory ? name + "/" : name
         }
@@ -440,7 +477,9 @@ extension ProcessContext {
         if let dynamic = node.dynamicChildNames?() {
             entries += dynamic.map { $0 + "/" }
         }
-        return entries.sorted()
+        let result = entries.sorted()
+        recordSyscall("readdir", result: String(result.count), detail: "path=\(resolved)")
+        return result
     }
 
     // MARK: - File I/O (throwing frontend)
@@ -481,12 +520,21 @@ extension ProcessContext {
         let resolved = absolute(path)
         let existing = kernel.vfs.lookup(resolved, mounts: mountNS)
         if existing == nil, flags.contains(.create), !canMutateParent(of: resolved) {
+            recordSyscall("open", error: .permissionDenied, detail: "path=\(resolved)")
             throw SyscallError.permissionDenied
         }
-        return try openFileNode(existing: existing,
-                                create: { kernel.vfs.createFile(resolved, mounts: mountNS) },
-                                flags: flags,
-                                access: access)
+        do {
+            let descriptor = try openFileNode(
+                existing: existing,
+                create: { kernel.vfs.createFile(resolved, mounts: mountNS) },
+                flags: flags,
+                access: access)
+            recordSyscall("open", result: String(descriptor), detail: "path=\(resolved)")
+            return descriptor
+        } catch let error as SyscallError {
+            recordSyscall("open", error: error, detail: "path=\(resolved)")
+            throw error
+        }
     }
 
     /// Open a path relative to a filesystem capability. Absolute paths and
@@ -767,14 +815,18 @@ extension ProcessContext {
     public func readFile(_ fd: Int, max: Int) throws -> [UInt8] {
         guard let object = process.fileDescriptors.object(fd),
               process.fileDescriptors.access(fd)?.canRead == true else {
+            recordSyscall("read", error: .badFileDescriptor, detail: "fd=\(fd),max=\(max)")
             throw SyscallError.badFileDescriptor
         }
         if fileStatusFlags(fd)?.contains(.nonBlocking) == true,
            let stream = object as? ReadableStream,
            !stream.hasBytesAvailable {
+            recordSyscall("read", error: .wouldBlock, detail: "fd=\(fd),max=\(max)")
             throw SyscallError.wouldBlock
         }
-        return object.read(max: max)
+        let bytes = object.read(max: max)
+        recordSyscall("read", result: String(bytes.count), detail: "fd=\(fd),max=\(max)")
+        return bytes
     }
 
     /// Write `bytes` to a descriptor and return the number of bytes accepted.
@@ -785,11 +837,13 @@ extension ProcessContext {
     public func writeFile(_ fd: Int, _ bytes: [UInt8]) throws -> Int {
         guard let object = process.fileDescriptors.object(fd),
               process.fileDescriptors.access(fd)?.canWrite == true else {
+            recordSyscall("write", error: .badFileDescriptor, detail: "fd=\(fd),count=\(bytes.count)")
             throw SyscallError.badFileDescriptor
         }
         if !bytes.isEmpty,
            (object as? BrokenPipeDetecting)?.hasBrokenPipe == true {
             kernel.kill(process.pid, signal: Signal.sigpipe.rawValue)
+            recordSyscall("write", error: .brokenPipe, detail: "fd=\(fd),count=\(bytes.count)")
             throw SyscallError.brokenPipe
         }
         let readiness = object.readiness
@@ -797,9 +851,12 @@ extension ProcessContext {
            fileStatusFlags(fd)?.contains(.nonBlocking) == true,
            !readiness.contains(.writable),
            !readiness.contains(.hangup) {
+            recordSyscall("write", error: .wouldBlock, detail: "fd=\(fd),count=\(bytes.count)")
             throw SyscallError.wouldBlock
         }
-        return object.write(bytes)
+        let count = object.write(bytes)
+        recordSyscall("write", result: String(count), detail: "fd=\(fd),count=\(bytes.count)")
+        return count
     }
 
     /// Read up to `max` bytes at an explicit position without changing the
@@ -833,9 +890,11 @@ extension ProcessContext {
     ///   calling process (R5.3).
     public func closeFile(_ fd: Int) throws {
         guard process.fileDescriptors.object(fd) != nil else {
+            recordSyscall("close", error: .badFileDescriptor, detail: "fd=\(fd)")
             throw SyscallError.badFileDescriptor
         }
         process.fileDescriptors.close(fd)
+        recordSyscall("close", result: "0", detail: "fd=\(fd)")
     }
 
     /// Create a pipe; returns the (read, write) descriptors.
@@ -845,6 +904,7 @@ extension ProcessContext {
                                                     access: .readOnly)
         let write = process.fileDescriptors.allocate(PipeEndpoint(buffer: shared, isWriteEnd: true),
                                                      access: .writeOnly)
+        recordSyscall("pipe", result: "0", detail: "read=\(read),write=\(write)")
         return (read, write)
     }
 
@@ -852,7 +912,9 @@ extension ProcessContext {
     /// same open-file description. Returns the new descriptor, or `nil` if `fd`
     /// is not open.
     public func dup(_ fd: Int) -> Int? {
-        process.fileDescriptors.duplicate(fd)
+        let result = process.fileDescriptors.duplicate(fd)
+        recordSyscall("dup", result: result.map(String.init) ?? "-1", detail: "fd=\(fd)")
+        return result
     }
 
     /// Duplicate `fd` onto `target` (POSIX `dup2`): after the call `target` refers
@@ -863,7 +925,9 @@ extension ProcessContext {
     /// - Returns: `true` on success, `false` if `fd` is not open.
     @discardableResult
     public func dup2(_ fd: Int, onto target: Int) -> Bool {
-        process.fileDescriptors.duplicate(fd, onto: target)
+        let result = process.fileDescriptors.duplicate(fd, onto: target)
+        recordSyscall("dup2", result: result ? String(target) : "-1", detail: "fd=\(fd),target=\(target)")
+        return result
     }
 
     /// Convenience: write a UTF-8 string to stdout (fd 1).

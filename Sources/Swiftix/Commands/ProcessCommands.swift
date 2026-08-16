@@ -12,15 +12,15 @@ extension BuiltinCommands {
             // column-aligned like Linux ps(1): PID, PPID, STAT, CMD.
             Command(name: "ps", summary: "list processes", category: .process) { ctx, _ in
                 let text = String(decoding: ctx.namespaceProcessListing(), as: UTF8.self)
-                // Parse the raw listing (columns: PID PPID PGID SID STATE TICKS FDS NAME).
+                // Parse the raw listing (columns: PID PPID PGID SID STATE TICKS FDS MEM NAME).
                 struct Row { let pid: String; let ppid: String; let state: String; let name: String }
                 var rows: [Row] = []
                 var maxPid = 3, maxPpid = 4, maxName = 7  // min header widths
                 for (index, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
                     if index == 0 { continue }   // skip raw header
                     let cols = rawLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-                    guard cols.count >= 8 else { continue }
-                    let name = cols[7...].joined(separator: " ")
+                    guard cols.count >= 9 else { continue }
+                    let name = cols[8...].joined(separator: " ")
                     rows.append(Row(pid: cols[0], ppid: cols[1], state: cols[4], name: name))
                     maxPid = max(maxPid, cols[0].count)
                     maxPpid = max(maxPpid, cols[1].count)

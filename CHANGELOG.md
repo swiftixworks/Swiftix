@@ -5,6 +5,35 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.11.0 — 2026-08-16
+
+This release establishes the versioned teaching-observability surface used by
+independently packaged system diagnostic commands.
+
+### Added
+
+- Kernel-wide managed-runtime memory admission with configurable limits, exact
+  Swiftix Go heap reporting, per-process heap/GC diagnostics, and separate VFS
+  byte accounting.
+- `/proc/<pid>/fdinfo` descriptor diagnostics for files, pipes, FIFOs, PTYs,
+  UDP sockets, TCP sockets, and devices.
+- A versioned teaching-observability contract in `/proc/swiftix`, plus the last
+  128 completed Swift-native calls per process in `/proc/<pid>/syscalls`.
+
+### Changed
+
+- `/proc/meminfo` and `free` now report actual managed-runtime heap usage instead
+  of treating VFS file bytes as synthetic physical memory. Output explicitly
+  distinguishes the managed-runtime model from host memory and VFS storage.
+- `/proc/processes` adds a `MEM` field containing exact runtime-reported bytes;
+  `top` displays the same value without labeling it RSS.
+
+### Fixed
+
+- Release validation now rejects a tag that disagrees with `Swiftix.version` or
+  lacks a matching changelog entry. The historical `v0.10.1` tag contained the
+  `0.10.0` runtime version string; 0.11 establishes the corrected baseline.
+
 ## 0.10.0 — 2026-08-15
 
 This pre-1.0 minor intentionally changes the public kernel API described in the

@@ -1,7 +1,7 @@
 # Swiftix Product Roadmap
 
 > Status: direction draft
-> Updated: 2026-08-15
+> Updated: 2026-08-16
 > Versions define capability boundaries, not release dates.
 
 ## Positioning and Version Rules
@@ -37,6 +37,26 @@ pre-1.0 API break; further breaking work requires another minor version.
 **Exit criterion:** the migration notes enumerate every 0.9 API break, the API
 gate accepts the 0.10 series transition and rejects unversioned breaks within
 0.10.x, and full public-consumer, serial, and platform CI remains green.
+
+## 0.11 — Teaching Observability Foundation
+
+Make the existing process, VFS, runtime, and network mechanisms observable from
+guest tools without inventing Linux state that Swiftix does not model.
+
+- Replace synthetic memory claims with exact managed-runtime heap reporting,
+  aggregate admission, per-process visibility, and separately labeled VFS use.
+- Expose immutable descriptor and bounded syscall-event diagnostics through
+  procfs contracts suitable for independently packaged teaching tools.
+- Keep host RSS, virtual address spaces, page faults, swap, and OOM simulation
+  explicitly outside the claimed model until those mechanisms really exist.
+- Validate the seams with an external command-package consumer before release.
+- Enforce version, tag, changelog, API, and procfs-schema agreement in CI.
+
+**Exit criterion:** independently packaged resource/descriptor/trace tools run
+through the public guest surface; every displayed value has a tested source of
+truth; aggregate runtime-memory overflow fails deterministically; the 0.11 API,
+procfs schemas, documentation, and release metadata pass all compatibility and
+platform gates.
 
 ## 1.0 — Stable Foundation
 

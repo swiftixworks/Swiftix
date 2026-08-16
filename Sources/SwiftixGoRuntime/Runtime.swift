@@ -495,17 +495,23 @@ public struct GoRuntimeStatistics: Sendable, Equatable {
     public let garbageCollections: Int
     public let reclaimedHeapCells: Int
     public let liveHeapCells: Int
+    public let liveHeapBytes: Int
+    public let maximumHeapBytes: Int
 
     public init(
         heapAllocations: Int,
         garbageCollections: Int,
         reclaimedHeapCells: Int,
-        liveHeapCells: Int
+        liveHeapCells: Int,
+        liveHeapBytes: Int = 0,
+        maximumHeapBytes: Int = 0
     ) {
         self.heapAllocations = heapAllocations
         self.garbageCollections = garbageCollections
         self.reclaimedHeapCells = reclaimedHeapCells
         self.liveHeapCells = liveHeapCells
+        self.liveHeapBytes = liveHeapBytes
+        self.maximumHeapBytes = maximumHeapBytes
     }
 }
 
@@ -723,6 +729,39 @@ public struct GoVirtualMachine: Sendable {
         var httpHandlers: [String: String] = [:]
         var programExitCode: Int32 = 0
         defer { executionIsActive = false }
+
+        var lastRuntimeMemoryReport: (bytes: Int, cells: Int, collections: Int)?
+        func reportRuntimeMemoryIfChanged() throws {
+            guard let processContext else { return }
+            let statistics = heap.statistics
+            let current = (
+                bytes: statistics.liveHeapBytes,
+                cells: statistics.liveHeapCells,
+                collections: statistics.garbageCollections)
+            if let previous = lastRuntimeMemoryReport,
+               previous.bytes == current.bytes,
+               previous.cells == current.cells,
+               previous.collections == current.collections { return }
+            guard processContext.reportRuntimeMemory(
+                bytes: current.bytes,
+                limitBytes: statistics.maximumHeapBytes,
+                heapCells: current.cells,
+                garbageCollections: current.collections)
+            else {
+                throw GoRuntimeError.resourceLimitExceeded("kernel runtime memory")
+            }
+            lastRuntimeMemoryReport = current
+        }
+        defer {
+            if let processContext {
+                _ = processContext.reportRuntimeMemory(
+                    bytes: 0,
+                    limitBytes: 0,
+                    heapCells: 0,
+                    garbageCollections: 0)
+            }
+        }
+        try reportRuntimeMemoryIfChanged()
 
         func requireCollectionCount(_ count: Int, resource: String) throws {
             guard count >= 0 else {
@@ -3392,6 +3431,7 @@ public struct GoVirtualMachine: Sendable {
             {
                 performGarbageCollection()
             }
+            try reportRuntimeMemoryIfChanged()
             try scheduleNext(requeueCurrent: !currentBlocked)
         }
         if testFailureCount > 0 { throw GoRuntimeError.testFailure }
@@ -3720,7 +3760,9 @@ private struct ManagedHeap {
             reclaimedHeapCells: reclaimedCount,
             liveHeapCells: cells.reduce(into: 0) { count, cell in
                 if cell != nil { count += 1 }
-            })
+            },
+            liveHeapBytes: liveBytes,
+            maximumHeapBytes: maximumBytes)
     }
 
     func contains(_ index: Int) -> Bool {

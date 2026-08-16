@@ -53,6 +53,36 @@ public final class ProcessContext {
         }
         return "/" + stack.joined(separator: "/")
     }
+
+    /// Record one completed Swiftix syscall using a whitespace-free detail token
+    /// so `/proc/<pid>/syscalls` remains line-oriented and mechanically parsable.
+    func recordSyscall(_ name: String, result: String, detail: String = "-") {
+        process.recordSyscall(
+            name: name,
+            result: result,
+            detail: Self.syscallTraceToken(detail))
+    }
+
+    func recordSyscall(_ name: String, error: SyscallError, detail: String = "-") {
+        recordSyscall(name, result: "-\(error.code)", detail: detail)
+    }
+
+    private static func syscallTraceToken(_ value: String) -> String {
+        guard !value.isEmpty else { return "-" }
+        var encoded = ""
+        encoded.reserveCapacity(value.utf8.count)
+        let digits = Array("0123456789ABCDEF".utf8)
+        for byte in value.utf8 {
+            if byte > 0x20, byte < 0x7f, byte != 0x25 {
+                encoded.append(Character(UnicodeScalar(byte)))
+            } else {
+                encoded.append("%")
+                encoded.append(Character(UnicodeScalar(digits[Int(byte >> 4)])))
+                encoded.append(Character(UnicodeScalar(digits[Int(byte & 0x0f)])))
+            }
+        }
+        return encoded
+    }
 }
 
 /// The size of a terminal window in character cells — the moral equivalent of

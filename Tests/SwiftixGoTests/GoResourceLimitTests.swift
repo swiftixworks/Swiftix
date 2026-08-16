@@ -165,6 +165,96 @@ struct GoResourceLimitTests: GoTestHarness {
         }
     }
 
+    @Test func managedHeapReportsBytesToKernelAndHonorsAggregateBudget() throws {
+        let allocation = GoExecutable(
+            entryPoint: "main",
+            functions: [
+                GoBytecodeFunction(
+                    name: "main",
+                    localCount: 0,
+                    instructions: [
+                        .push(.int(0)),
+                        .push(.int(64)),
+                        .push(.int(64)),
+                        .allocateSlice,
+                        .return,
+                    ])
+            ])
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop, runtimeMemoryLimitBytes: 1_024 * 1_024)
+        final class Capture {
+            var duringBytes = 0
+            var duringCells = 0
+            var afterBytes = -1
+        }
+        let capture = Capture()
+
+        kernel.spawn("go-memory") { context in
+            _ = try? GoVirtualMachine(instructionQuantum: 4).run(
+                allocation,
+                eventLoop: loop,
+                processContext: context
+            ) { _ in }
+            capture.afterBytes = kernel.snapshotResources().runtimeMemoryBytes
+            context.exit(0)
+        }
+        loop.post {
+            capture.duringBytes = kernel.snapshotResources().runtimeMemoryBytes
+            capture.duringCells = kernel.snapshotProcesses()
+                .first(where: { $0.name == "go-memory" })?.runtimeHeapCells ?? 0
+        }
+        loop.runUntilIdle()
+
+        #expect(capture.duringBytes > 0)
+        #expect(capture.duringCells > 0)
+        #expect(capture.afterBytes == 0)
+
+        let constrainedLoop = EventLoop()
+        let constrainedKernel = Kernel(loop: constrainedLoop, runtimeMemoryLimitBytes: 31)
+        var runtimeError: GoRuntimeError?
+        constrainedKernel.spawn("go-over-limit") { context in
+            do {
+                _ = try GoVirtualMachine().run(
+                    allocation,
+                    eventLoop: constrainedLoop,
+                    processContext: context
+                ) { _ in }
+            } catch let error as GoRuntimeError {
+                runtimeError = error
+            } catch {
+                Issue.record("unexpected error: \(error)")
+            }
+            context.exit(0)
+        }
+        constrainedLoop.runUntilIdle()
+
+        #expect(runtimeError == .resourceLimitExceeded("kernel runtime memory"))
+        #expect(constrainedKernel.snapshotResources().runtimeMemoryBytes == 0)
+    }
+
+    @Test func runtimeStatisticsExposeLiveAndMaximumHeapBytes() throws {
+        let executable = GoExecutable(
+            entryPoint: "main",
+            functions: [
+                GoBytecodeFunction(
+                    name: "main",
+                    localCount: 0,
+                    instructions: [
+                        .push(.int(0)),
+                        .push(.int(4)),
+                        .push(.int(4)),
+                        .allocateSlice,
+                        .return,
+                    ])
+            ])
+        let statistics = try GoVirtualMachine(
+            resourceLimits: GoRuntimeResourceLimits(maximumHeapBytes: 4_096)
+        ).runWithStatistics(executable) { _ in }
+
+        #expect(statistics.liveHeapBytes > 0)
+        #expect(statistics.maximumHeapBytes == 4_096)
+    }
+
     @Test func pointerDepthAndDeferredCallBudgetsAreEnforced() {
         let deepPointer = GoExecutable(
             entryPoint: "main",

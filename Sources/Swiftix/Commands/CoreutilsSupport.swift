@@ -112,19 +112,19 @@ extension BuiltinCommands {
         // inside an `unshare -p` namespace shows only the contained processes.
         let text = String(decoding: ctx.namespaceProcessListing(), as: UTF8.self)
 
-        // Columns: PID PPID PGID SID STATE TICKS FDS NAME (NAME is the space-
-        // tolerant tail). TICKS is a deterministic CPU-activity proxy (scheduler
-        // steps) and FDS the open-descriptor count — there is no wall-clock CPU%
-        // or per-process RSS under the logical clock / shared address space.
-        var rows: [(pid: String, ppid: String, state: String, ticks: String, fds: String, name: String)] = []
+        // Columns: PID PPID PGID SID STATE TICKS FDS MEM NAME (NAME is the
+        // space-tolerant tail). MEM is exact managed-runtime memory, not RSS.
+        var rows: [(pid: String, ppid: String, state: String, ticks: String,
+                   fds: String, memory: String, name: String)] = []
         var counts: [String: Int] = [:]
         for (lineIndex, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
             if lineIndex == 0 { continue }   // skip the header row
             let cols = rawLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-            guard cols.count >= 8 else { continue }
+            guard cols.count >= 9 else { continue }
             let state = cols[4]
             rows.append((pid: cols[0], ppid: cols[1], state: state,
-                         ticks: cols[5], fds: cols[6], name: cols[7...].joined(separator: " ")))
+                         ticks: cols[5], fds: cols[6], memory: cols[7],
+                         name: cols[8...].joined(separator: " ")))
             counts[state, default: 0] += 1
         }
 
@@ -135,10 +135,12 @@ extension BuiltinCommands {
              + "\(counts["S"] ?? 0) sleeping, "
              + "\(counts["T"] ?? 0) stopped, "
              + "\(counts["Z"] ?? 0) zombie\n\n"
-        out += "\(topPad("PID", 5)) \(topPad("PPID", 5)) S \(topPad("TICKS", 6)) \(topPad("FDS", 4)) NAME\n"
+        out += "\(topPad("PID", 5)) \(topPad("PPID", 5)) S \(topPad("TICKS", 6)) "
+            + "\(topPad("FDS", 4)) \(topPad("MEM", 8)) NAME\n"
         for row in rows {
             out += "\(topPad(row.pid, 5)) \(topPad(row.ppid, 5)) \(row.state) "
-                 + "\(topPad(row.ticks, 6)) \(topPad(row.fds, 4)) \(row.name)\n"
+                 + "\(topPad(row.ticks, 6)) \(topPad(row.fds, 4)) "
+                 + "\(topPad(row.memory, 8)) \(row.name)\n"
         }
         return out
     }

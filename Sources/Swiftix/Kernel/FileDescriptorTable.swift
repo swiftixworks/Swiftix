@@ -1,6 +1,15 @@
 /// A process's open file descriptors: small non-negative integers mapping to
 /// open file objects. By convention fd 0/1/2 are stdin/stdout/stderr.
 final class FileDescriptorTable {
+    struct DiagnosticSnapshot: Equatable {
+        let descriptor: Int
+        let type: String
+        let access: String
+        let flags: String
+        let offset: Int?
+        let size: Int?
+        let detail: String
+    }
     /// One system-wide open-file description. Multiple descriptors created by
     /// `dup` or inherited by `spawn` share this object, and therefore share the
     /// file offset held by `object`, the access mode, and file-status flags.
@@ -146,4 +155,70 @@ final class FileDescriptorTable {
     }
 
     var openDescriptors: [Int] { table.keys.sorted() }
+
+    /// Immutable descriptor diagnostics for procfs/teaching tools. The snapshot
+    /// intentionally exposes object kinds and state, not mutable file objects.
+    /// A regular file has no canonical path because hard links give one inode
+    /// multiple equally valid names.
+    var diagnosticSnapshots: [DiagnosticSnapshot] {
+        table.keys.sorted().compactMap { descriptor in
+            guard let description = table[descriptor]?.description else { return nil }
+            let object = description.object
+            let type: String
+            let detail: String
+            switch object {
+            case let endpoint as PipeEndpoint:
+                type = "pipe"
+                detail = endpoint.isWriteEnd ? "write-end" : "read-end"
+            case let endpoint as FifoEndpoint:
+                type = "fifo"
+                detail = endpoint.isWriteEnd ? "write-end" : "read-end"
+            case is RegularFileHandle:
+                type = "file"
+                detail = "-"
+            case is PseudoTerminal.Slave:
+                type = "tty"
+                detail = "pty-slave"
+            case let socket as UDPSocket:
+                type = "udp"
+                detail = socket.localPort == 0 ? "unbound" : "local=:\(socket.localPort)"
+            case let socket as TCPSocket:
+                type = "tcp"
+                if let listener = socket.listener {
+                    detail = "listen=:\(listener.port)"
+                } else if let connection = socket.connection {
+                    let snapshot = connection.snapshot
+                    detail = "local=:\(snapshot.localPort),remote=\(snapshot.remoteIP):\(snapshot.remotePort),state=\(snapshot.state)"
+                } else if let port = socket.boundPort {
+                    detail = "bound=:\(port)"
+                } else {
+                    detail = "unbound"
+                }
+            case is NullDeviceHandle:
+                type = "device"
+                detail = "null"
+            default:
+                type = "other"
+                detail = "-"
+            }
+            let access: String
+            switch description.access {
+            case .none: access = "none"
+            case .readOnly: access = "read"
+            case .writeOnly: access = "write"
+            case .readWrite: access = "read-write"
+            }
+            let flags = description.statusFlags.contains(.nonBlocking)
+                ? "nonblock" : "-"
+            let seekable = object as? Seekable
+            return DiagnosticSnapshot(
+                descriptor: descriptor,
+                type: type,
+                access: access,
+                flags: flags,
+                offset: seekable?.seekOffset,
+                size: seekable?.byteSize,
+                detail: detail)
+        }
+    }
 }

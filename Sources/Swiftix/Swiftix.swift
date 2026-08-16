@@ -54,5 +54,9 @@
 
 public enum Swiftix: Sendable {
     /// Semantic version of the core.
-    public static let version = "0.10.0"
+    public static let version = "0.11.0"
+
+    /// Exact schema used by the teaching-oriented procfs files consumed by
+    /// independently packaged diagnostic commands.
+    public static let teachingProcfsSchemaVersion = 1
 }

@@ -9,8 +9,13 @@ extension ProcessContext {
     @discardableResult
     public func spawn(_ name: String, args: [String] = [],
                       _ body: @escaping (ProcessContext) -> Void) -> PID {
-        guard process.isLive else { return 0 }
-        return kernel.spawn(name, args: args, parent: process.pid, body)
+        guard process.isLive else {
+            recordSyscall("spawn", result: "-1", detail: "name=\(name)")
+            return 0
+        }
+        let child = kernel.spawn(name, args: args, parent: process.pid, body)
+        recordSyscall("spawn", result: child == 0 ? "-1" : String(child), detail: "name=\(name)")
+        return child
     }
 
     /// Spawn a child whose body is an `async` function (uses the loop-bound
@@ -19,8 +24,13 @@ extension ProcessContext {
     @discardableResult
     public func spawn(_ name: String, args: [String] = [],
                       _ body: @escaping (ProcessContext) async -> Void) -> PID {
-        guard process.isLive else { return 0 }
-        return kernel.spawn(name, args: args, parent: process.pid, body)
+        guard process.isLive else {
+            recordSyscall("spawn", result: "-1", detail: "name=\(name)")
+            return 0
+        }
+        let child = kernel.spawn(name, args: args, parent: process.pid, body)
+        recordSyscall("spawn", result: child == 0 ? "-1" : String(child), detail: "name=\(name)")
+        return child
     }
 
     /// This process's argument vector (POSIX `argv`); `arguments[0]` is the
@@ -70,8 +80,12 @@ extension ProcessContext {
         let resolved = absolute(path)
         guard let node = kernel.vfs.lookup(resolved, mounts: mountNS),
               node.kind == .directory,
-              permits(node, .execute) else { return false }
+              permits(node, .execute) else {
+            recordSyscall("chdir", result: "-1", detail: "path=\(resolved)")
+            return false
+        }
         process.cwd = resolved
+        recordSyscall("chdir", result: "0", detail: "path=\(resolved)")
         return true
     }
 
@@ -79,6 +93,7 @@ extension ProcessContext {
     /// body after this call; process-owned scheduling, waits, descriptors, and
     /// child creation are disabled as soon as it returns.
     public func exit(_ code: Int32 = 0) {
+        recordSyscall("exit", result: String(code), detail: "-")
         kernel.exit(process, code: code)
     }
 
@@ -148,6 +163,26 @@ extension ProcessContext {
     /// than the namespace-local `getpid()`, which can repeat across namespaces.
     public var globalPID: PID { process.pid }
 
+    /// Publish memory owned by a managed guest runtime for this process. Swiftix
+    /// Go uses this trusted integration seam to make real heap usage observable
+    /// and to participate in the Kernel-wide runtime-memory budget. It returns
+    /// `false` without changing the previous report when the new value is invalid
+    /// or would exceed that aggregate budget.
+    @discardableResult
+    public func reportRuntimeMemory(
+        bytes: Int,
+        limitBytes: Int,
+        heapCells: Int,
+        garbageCollections: Int
+    ) -> Bool {
+        kernel.reportRuntimeMemory(
+            for: process,
+            bytes: bytes,
+            limitBytes: limitBytes,
+            heapCells: heapCells,
+            garbageCollections: garbageCollections)
+    }
+
     /// A `/proc/processes`-format listing of the processes visible in this
     /// process's PID namespace (itself + descendants), with pids translated to the
     /// namespace's local numbering. In the root namespace this equals the global
@@ -157,7 +192,8 @@ extension ProcessContext {
         let rows = kernel.processRows(visibleTo: process.pid)
         let lines = rows.map {
             ProcfsSchema.Processes.line(pid: $0.pid, ppid: $0.ppid, pgid: $0.pgid, sid: $0.sid,
-                                        state: $0.state, ticks: $0.ticks, fds: $0.fds, name: $0.command)
+                                        state: $0.state, ticks: $0.ticks, fds: $0.fds,
+                                        memoryBytes: $0.memoryBytes, name: $0.command)
         }
         return ProcfsSchema.render(lines, header: ProcfsSchema.Processes.header)
     }

@@ -62,6 +62,7 @@ enum ProcfsProvider {
                                             state: entry.state,
                                             ticks: entry.ticks,
                                             fds: entry.fds,
+                                            memoryBytes: entry.memoryBytes,
                                             name: entry.name)
             }
             return ProcfsSchema.render(lines, header: ProcfsSchema.Processes.header)
@@ -85,8 +86,9 @@ enum ProcfsProvider {
     }
 
     /// Build a transient `/proc/<pid>` directory holding this process's synthetic
-    /// `status` and `cmdline` files. Rebuilt on each lookup — procfs content is
-    /// always computed, never persisted.
+    /// status, command line, descriptor diagnostics, and bounded completed-call
+    /// history. Rebuilt on each lookup — procfs content is always computed, never
+    /// persisted.
     private static func makePidDirectory(_ row: ProcessSnapshotRow) -> VNode {
         let directory = VNode(directory: String(row.pid))
 
@@ -98,7 +100,45 @@ enum ProcfsProvider {
         cmdline.provider = { Array(row.command.utf8) }
         directory.addChild(name: "cmdline", node: cmdline)
 
+        let fdinfo = VNode(file: "fdinfo")
+        fdinfo.provider = { Array(descriptorText(row).utf8) }
+        directory.addChild(name: "fdinfo", node: fdinfo)
+
+        let syscalls = VNode(file: "syscalls")
+        syscalls.provider = { Array(syscallText(row).utf8) }
+        directory.addChild(name: "syscalls", node: syscalls)
+
         return directory
+    }
+
+    private static func descriptorText(_ row: ProcessSnapshotRow) -> String {
+        var lines = ["FD TYPE ACCESS FLAGS OFFSET SIZE DETAIL"]
+        for descriptor in row.descriptors {
+            lines.append([
+                String(descriptor.descriptor),
+                descriptor.type,
+                descriptor.access,
+                descriptor.flags,
+                descriptor.offset.map(String.init) ?? "-",
+                descriptor.size.map(String.init) ?? "-",
+                descriptor.detail,
+            ].joined(separator: " "))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func syscallText(_ row: ProcessSnapshotRow) -> String {
+        var lines = ["SEQ TICKS SYSCALL RESULT DETAIL"]
+        for entry in row.syscalls {
+            lines.append([
+                String(entry.sequence),
+                String(entry.ticks),
+                entry.name,
+                entry.result,
+                entry.detail,
+            ].joined(separator: " "))
+        }
+        return lines.joined(separator: "\n") + "\n"
     }
 
     /// The `/proc/<pid>/status` body — a small, Linux-flavored subset.
@@ -110,6 +150,10 @@ enum ProcfsProvider {
             + "PGid:\t\(row.pgid)\n"
             + "Sid:\t\(row.sid)\n"
             + "FDSize:\t\(row.fds)\n"
+            + "RuntimeMemory:\t\(row.memoryBytes) bytes\n"
+            + "RuntimeMemoryLimit:\t\(row.memoryLimitBytes) bytes\n"
+            + "RuntimeHeapCells:\t\(row.heapCells)\n"
+            + "RuntimeGCs:\t\(row.garbageCollections)\n"
     }
 
     private static func stateDescription(_ state: String) -> String {

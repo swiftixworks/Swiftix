@@ -22,11 +22,14 @@ The core has no Foundation, UI, or third-party dependencies. See [Core Architect
 - Swift 6.3+
 - macOS 14 or iOS 17
 
-There is no stable tag before 1.0, so development consumers temporarily depend on `main`:
+Pre-1.0 consumers should pin the intended minor compatibility series:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/swiftixworks/Swiftix.git", branch: "main"),
+    .package(
+        url: "https://github.com/swiftixworks/Swiftix.git",
+        .upToNextMinor(from: "0.11.0")
+    ),
 ],
 targets: [
     .target(
@@ -36,7 +39,8 @@ targets: [
 ]
 ```
 
-Remote consumers should move to a SemVer range after the 0.9/1.0 release.
+Patch releases preserve the 0.11 public API; a later pre-1.0 minor may make a
+documented breaking correction.
 
 ## Minimal Example
 

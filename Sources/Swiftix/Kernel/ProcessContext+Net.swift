@@ -45,22 +45,27 @@ extension ProcessContext {
     /// Create a UDP socket and return its descriptor.
     public func socket() -> Int? {
         let socket = kernel.netns.stack.openUDPSocket()
-        return process.fileDescriptors.allocate(socket)
+        let descriptor = process.fileDescriptors.allocate(socket)
+        recordSyscall("socket", result: String(descriptor), detail: "type=udp")
+        return descriptor
     }
 
     /// Bind a socket to a local address (nil = any) and port.
     @discardableResult
     public func bind(_ fd: Int, address: IPv4Address?, port: UInt16) -> Bool {
+        let result: Bool
         if let udp = process.fileDescriptors.object(fd) as? UDPSocket {
             // Propagate EADDRINUSE from the stack's explicit single-owner UDP
             // binding model; options never authorize silent table replacement.
-            return udp.bind(address: address, port: port)
-        }
-        if let tcp = process.fileDescriptors.object(fd) as? TCPSocket {
+            result = udp.bind(address: address, port: port)
+        } else if let tcp = process.fileDescriptors.object(fd) as? TCPSocket {
             tcp.boundPort = port
-            return true
+            result = true
+        } else {
+            result = false
         }
-        return false
+        recordSyscall("bind", result: result ? "0" : "-1", detail: "fd=\(fd),port=\(port)")
+        return result
     }
 
     /// Set a socket option on a UDP/TCP socket descriptor.
@@ -82,14 +87,24 @@ extension ProcessContext {
     /// Send a datagram from a socket to a destination address/port.
     @discardableResult
     public func sendto(_ fd: Int, _ bytes: [UInt8], to address: IPv4Address, port: UInt16) -> Bool {
-        guard let socket = process.fileDescriptors.object(fd) as? UDPSocket else { return false }
-        return socket.sendTo(bytes, address: address, port: port)
+        guard let socket = process.fileDescriptors.object(fd) as? UDPSocket else {
+            recordSyscall("sendto", result: "-1", detail: "fd=\(fd),count=\(bytes.count),port=\(port)")
+            return false
+        }
+        let result = socket.sendTo(bytes, address: address, port: port)
+        recordSyscall("sendto", result: result ? String(bytes.count) : "-1",
+                      detail: "fd=\(fd),count=\(bytes.count),port=\(port)")
+        return result
     }
 
     /// Non-blocking receive of the next datagram on a socket (nil if none).
     public func recvfrom(_ fd: Int) -> (bytes: [UInt8], address: IPv4Address, port: UInt16)? {
         guard let socket = process.fileDescriptors.object(fd) as? UDPSocket,
-              let datagram = socket.receive() else { return nil }
+              let datagram = socket.receive() else {
+            recordSyscall("recvfrom", result: "-1", detail: "fd=\(fd)")
+            return nil
+        }
+        recordSyscall("recvfrom", result: String(datagram.payload.count), detail: "fd=\(fd)")
         return (datagram.payload, datagram.sourceAddress, datagram.sourcePort)
     }
 
@@ -184,7 +199,9 @@ extension ProcessContext {
 
     /// Create a TCP socket and return its descriptor.
     public func tcpSocket() -> Int? {
-        process.fileDescriptors.allocate(TCPSocket(stack: kernel.netns.stack))
+        let descriptor = process.fileDescriptors.allocate(TCPSocket(stack: kernel.netns.stack))
+        recordSyscall("socket", result: String(descriptor), detail: "type=tcp")
+        return descriptor
     }
 
     /// Start listening on a local port (passive open). Returns `false` when the
@@ -194,13 +211,23 @@ extension ProcessContext {
     /// port fails rather than silently stealing the incumbent's connections.
     @discardableResult
     public func tcpListen(_ fd: Int, port: UInt16) -> Bool {
-        guard let socket = process.fileDescriptors.object(fd) as? TCPSocket else { return false }
+        guard let socket = process.fileDescriptors.object(fd) as? TCPSocket else {
+            recordSyscall("listen", result: "-1", detail: "fd=\(fd),port=\(port)")
+            return false
+        }
         // If port is 0 and the socket was previously bound, use the bound port.
         let listenPort = port != 0 ? port : (socket.boundPort ?? 0)
-        guard listenPort != 0 else { return false }
+        guard listenPort != 0 else {
+            recordSyscall("listen", result: "-1", detail: "fd=\(fd),port=\(port)")
+            return false
+        }
         // Reject a duplicate passive open: the port is already in use (EADDRINUSE).
-        guard !kernel.netns.stack.tcpListenerExists(port: listenPort) else { return false }
+        guard !kernel.netns.stack.tcpListenerExists(port: listenPort) else {
+            recordSyscall("listen", result: "-1", detail: "fd=\(fd),port=\(listenPort)")
+            return false
+        }
         socket.listener = kernel.netns.stack.listen(port: listenPort)
+        recordSyscall("listen", result: "0", detail: "fd=\(fd),port=\(listenPort)")
         return true
     }
 
@@ -265,8 +292,12 @@ extension ProcessContext {
     @discardableResult
     public func tcpSend(_ fd: Int, _ bytes: [UInt8]) -> Bool {
         guard let socket = process.fileDescriptors.object(fd) as? TCPSocket,
-              let connection = socket.connection else { return false }
+              let connection = socket.connection else {
+            recordSyscall("send", result: "-1", detail: "fd=\(fd),count=\(bytes.count)")
+            return false
+        }
         connection.send(bytes)
+        recordSyscall("send", result: String(bytes.count), detail: "fd=\(fd),count=\(bytes.count)")
         return true
     }
 
@@ -319,10 +350,12 @@ extension ProcessContext {
     }
 
     public func tcpClose(_ fd: Int) {
+        let wasOpen = process.fileDescriptors.object(fd) != nil
         if let socket = process.fileDescriptors.object(fd) as? TCPSocket {
             socket.connection?.close()
         }
         process.fileDescriptors.close(fd)
+        recordSyscall("close", result: wasOpen ? "0" : "-1", detail: "fd=\(fd)")
     }
 
 }

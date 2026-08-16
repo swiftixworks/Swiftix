@@ -14,19 +14,20 @@ struct ProcfsSchemaTests {
 
         let rows = lines(readProcFile(ProcfsSchema.Processes.path, kernel, loop: loop))
         #expect(rows.first == ProcfsSchema.Processes.header)
-        #expect(ProcfsSchema.Processes.fields == ["PID", "PPID", "PGID", "SID", "STATE", "TICKS", "FDS", "NAME"])
+        #expect(ProcfsSchema.Processes.fields == ["PID", "PPID", "PGID", "SID", "STATE", "TICKS", "FDS", "MEM", "NAME"])
 
         let processRows = rows.dropFirst().map { $0.split(separator: " ").map(String.init) }
         let pids = processRows.compactMap { Int($0[0]) }
         #expect(pids == pids.sorted())
         #expect(pids.starts(with: [first, second]))
-        #expect(processRows.map { $0[7] } == ["first", "second", "reader"])   // NAME is now column 7
+        #expect(processRows.map { $0[8] } == ["first", "second", "reader"])   // NAME is column 8
         for columns in processRows {
             #expect(columns.count == ProcfsSchema.Processes.fields.count)
             // TICKS (scheduler steps) and FDS (open descriptors) are non-negative.
             #expect((Int(columns[5]) ?? -1) >= 0)
             #expect((Int(columns[6]) ?? -1) >= 0)
-            if columns[7] != "reader" {
+            #expect((Int(columns[7]) ?? -1) >= 0)
+            if columns[8] != "reader" {
                 #expect(columns[1] == "0")
                 #expect(columns[2] == columns[0])
                 #expect(columns[3] == columns[0])

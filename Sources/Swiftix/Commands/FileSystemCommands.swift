@@ -243,21 +243,35 @@ extension BuiltinCommands {
                 ctx.exit(0)
             },
 
-            // free [-h] — report memory usage. There is no separate memory model;
-            // the filesystem is the in-memory store, so "used" is the live sum of
-            // file bytes against a synthetic 128 MiB total. Honest and synthetic,
-            // enough to teach the command. `-h` uses human units. Columns are
-            // right-aligned to match Linux free(1).
+            // free [-h] — report the Kernel's aggregate managed-runtime budget
+            // and actual runtime-reported heap bytes. This intentionally excludes
+            // host Swift/ARC overhead and VFS storage instead of presenting either
+            // as fabricated physical RAM. `-h` uses human units.
             Command(name: "free", summary: "report memory usage", category: .system) { ctx, argv in
                 let human = argv.dropFirst().contains("-h")
-                let totalBytes: Int64 = 128 * 1024 * 1024
-                let usedBytes = min(totalFileBytes(ctx, under: "/"), totalBytes)
-                let freeBytes = totalBytes - usedBytes
+                guard let fd = ctx.open("/proc/meminfo") else {
+                    ctx.fail("free: cannot read /proc/meminfo", code: 1); return
+                }
+                let text = String(decoding: readFully(ctx, fd), as: UTF8.self)
+                ctx.close(fd)
+                func kib(_ field: String) -> Int64? {
+                    guard let line = text.split(separator: "\n").first(where: {
+                        $0.hasPrefix(field + ":")
+                    }) else { return nil }
+                    return line.split(separator: " ").dropFirst().first.flatMap { Int64($0) }
+                }
+                guard let totalKB = kib("MemTotal"), let freeKB = kib("MemFree") else {
+                    ctx.fail("free: malformed /proc/meminfo", code: 1); return
+                }
+                let totalBytes = totalKB * 1024
+                let freeBytes = freeKB * 1024
+                let usedBytes = max(0, totalBytes - freeBytes)
                 func size(_ n: Int64) -> String { human ? humanBytes(n) : "\(n / 1024)" }
                 let sTotal = size(totalBytes), sUsed = size(usedBytes), sFree = size(freeBytes)
                 let w = max(sTotal.count, sFree.count, sUsed.count, 11)
                 ctx.print("              \(padLeft("total", w)) \(padLeft("used", w)) \(padLeft("free", w))\n")
                 ctx.print("Mem:          \(padLeft(sTotal, w)) \(padLeft(sUsed, w)) \(padLeft(sFree, w))\n")
+                ctx.print("Model: managed-runtime (excludes host memory and VFS storage)\n")
                 ctx.exit(0)
             },
 

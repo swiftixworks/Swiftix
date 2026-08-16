@@ -1,16 +1,17 @@
 # Compatibility and migration
 
-> Last release baseline: Swiftix 0.9.0; current development series: 0.10.x
+> Current release baseline: Swiftix 0.11.0
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Swiftix package | 0.10.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
+| Swiftix package | 0.11.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
+| Teaching procfs schema | 1 | Exact schema; independently packaged diagnostic tools must be rebuilt after a bump |
 | Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore |
 | Rootfs image | 1 | Exact format; digest, target and resource limits validated |
 | Swiftix Go image / ABI | 10 / 10 | Exact format and ABI required before VM allocation |
 | `.pkg` archive | 2 | v1 is rejected; v2 is deterministic and bounded |
 | Swiftix Minimal | 2.1.1 | Metadata declares its minimum Swiftix version |
-| SwiftixDistribution manifest | 1 | Builder validates schema and deterministic output |
+| SwiftixDistribution manifest | 2 | Builder validates package repository roots, schema, and deterministic output |
 
 ## Platform baseline
 
@@ -101,6 +102,9 @@ series accepts breaking changes only when the package version was advanced.
 - A minimum Swiftix version uses SemVer precedence, including prereleases.
 - Go image ABI is exact: rebuilding distribution commands is required after an
   ABI bump.
+- `/proc/swiftix` declares the exact teaching procfs schema and the memory and
+  syscall models. `/proc/<pid>/syscalls` contains completed Swift-native calls,
+  not Linux syscall numbers, entry/exit pairs, host calls, or an unbounded log.
 - SwiftixDistribution publishes a rootfs digest; consumers pin that digest, and an
   existing VM snapshot takes precedence over a new bundled image.
 - A format bump must update this table, tests, migration notes and all

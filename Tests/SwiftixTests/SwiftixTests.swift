@@ -4,8 +4,14 @@ import Testing
 @Suite("Network interface seam")
 struct InterfaceSeamTests {
 
-    @Test func versionIsSet() {
-        #expect(Swiftix.version == "0.10.0")
+    @Test func versionIsSemantic() {
+        let versionParts = Swiftix.version.split(
+            separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        let coreParts = versionParts[0].split(separator: ".")
+
+        #expect(coreParts.count == 3)
+        #expect(coreParts.allSatisfy { Int($0) != nil })
+        #expect(versionParts.count == 1 || !versionParts[1].isEmpty)
     }
 
     /// A UDP send from a socket is emitted as a frame through the interface's
