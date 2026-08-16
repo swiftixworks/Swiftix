@@ -15,7 +15,7 @@ struct GoToolCommandTests: GoTestHarness {
 
     @Test func goCommandRunsPackageAndExposesSwiftixTarget() {
         let output = runShell(
-            ["cd /work", "go version", "go env GOOS GOARCH", "go run ."],
+            ["cd /work", "go version", "go env GOOS GOARCH GOPROXY", "go run ."],
             seed: { context in
                 _ = context.mkdir("/work")
                 Self.write(context, path: "/work/go.mod", contents: "module example/hello\n\ngo 1.24\n")
@@ -39,7 +39,7 @@ struct GoToolCommandTests: GoTestHarness {
             })
 
         #expect(output.contains("go version go1.24-swiftix.0.3 swiftix/svm64"))
-        #expect(output.contains("swiftix\nsvm64"))
+        #expect(output.contains("swiftix\nsvm64\noff"))
         #expect(output.contains("hello from go"))
     }
 

@@ -1222,7 +1222,7 @@ public enum GoToolchain {
             "GOBIN": context.getenv("GOBIN") ?? join(goPath, "bin"),
             "GOCACHE": context.getenv("GOCACHE") ?? join(home, ".cache/go-build"),
             "GOMODCACHE": context.getenv("GOMODCACHE") ?? join(goPath, "pkg/mod"),
-            "GOPROXY": context.getenv("GOPROXY") ?? "https://proxy.golang.org,direct",
+            "GOPROXY": context.getenv("GOPROXY") ?? "off",
             "GONOSUMDB": context.getenv("GONOSUMDB") ?? "",
             "GOPRIVATE": context.getenv("GOPRIVATE") ?? "",
             "GOROOT": "/usr/local/go",
