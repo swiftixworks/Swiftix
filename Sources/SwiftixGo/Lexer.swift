@@ -116,8 +116,15 @@ private struct Scanner {
             let byte = bytes[index]
             if byte == 0x22 {
                 advance()
-                tokens.append(
-                    GoToken(kind: .string(String(decoding: value, as: UTF8.self)), position: start))
+                // Guest strings are Unicode text, so byte escapes must still
+                // form valid UTF-8 rather than decode to replacement characters.
+                let text = String(decoding: value, as: UTF8.self)
+                guard Array(text.utf8) == value else {
+                    throw GoDiagnostic(
+                        position: start,
+                        message: "string literal is not valid UTF-8")
+                }
+                tokens.append(GoToken(kind: .string(text), position: start))
                 return
             }
             if byte == 0x0A {
@@ -130,11 +137,39 @@ private struct Scanner {
                 }
                 let escaped = bytes[index]
                 switch escaped {
+                case 0x61: value.append(0x07)
+                case 0x62: value.append(0x08)
+                case 0x66: value.append(0x0C)
                 case 0x6E: value.append(0x0A)
                 case 0x72: value.append(0x0D)
                 case 0x74: value.append(0x09)
+                case 0x76: value.append(0x0B)
                 case 0x22: value.append(0x22)
                 case 0x5C: value.append(0x5C)
+                case 0x78:
+                    value.append(UInt8(try scanEscapeDigits(count: 2, radix: 16)))
+                    continue
+                case 0x30...0x37:
+                    let octal = try scanEscapeDigits(count: 3, radix: 8, skipIntroducer: false)
+                    guard octal <= 0xFF else {
+                        throw GoDiagnostic(
+                            position: position(),
+                            message: "octal escape value > 255")
+                    }
+                    value.append(UInt8(octal))
+                    continue
+                case 0x75, 0x55:
+                    let escapePosition = position()
+                    let scalarValue = try scanEscapeDigits(
+                        count: escaped == 0x75 ? 4 : 8,
+                        radix: 16)
+                    guard let scalar = Unicode.Scalar(scalarValue) else {
+                        throw GoDiagnostic(
+                            position: escapePosition,
+                            message: "escape is invalid Unicode code point")
+                    }
+                    value.append(contentsOf: Array(String(Character(scalar)).utf8))
+                    continue
                 default:
                     throw GoDiagnostic(
                         position: position(),
@@ -147,6 +182,40 @@ private struct Scanner {
             advance()
         }
         throw GoDiagnostic(position: start, message: "string not terminated")
+    }
+
+    /// Consume the fixed-width digits of a `\x`, `\u`, `\U`, or octal escape.
+    /// The index starts at the escape letter (or the first octal digit when
+    /// `skipIntroducer` is false) and ends after the last digit.
+    mutating func scanEscapeDigits(
+        count: Int,
+        radix: UInt32,
+        skipIntroducer: Bool = true
+    ) throws -> UInt32 {
+        if skipIntroducer { advance() }
+        var result: UInt32 = 0
+        for _ in 0..<count {
+            guard index < bytes.count,
+                let digit = escapeDigitValue(bytes[index]),
+                digit < radix
+            else {
+                throw GoDiagnostic(
+                    position: position(),
+                    message: "invalid character in escape sequence")
+            }
+            result = result * radix + digit
+            advance()
+        }
+        return result
+    }
+
+    func escapeDigitValue(_ byte: UInt8) -> UInt32? {
+        switch byte {
+        case 0x30...0x39: return UInt32(byte - 0x30)
+        case 0x41...0x46: return UInt32(byte - 0x41 + 10)
+        case 0x61...0x66: return UInt32(byte - 0x61 + 10)
+        default: return nil
+        }
     }
 
     mutating func scanPunctuation() throws {

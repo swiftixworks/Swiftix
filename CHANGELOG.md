@@ -15,6 +15,11 @@ format, behavior and platform changes are recorded here.
   goroutines wait on terminal input. `GoExecutableLoader` uses it, so
   file-backed interactive programs wait for keystrokes instead of reporting a
   deadlock. Its instruction and output budgets apply per uninterrupted slice.
+- Go interpreted string literals accept `\a`, `\b`, `\f`, `\v`, `\xHH`,
+  three-digit octal, `\uHHHH`, and `\UHHHHHHHH` escapes, so programs can
+  emit terminal control sequences such as `"\x1b[2J"`. Escapes must still
+  form valid UTF-8, and `gofmt -r` re-quotes control characters as `\x`
+  escapes.
 
 ### Fixed
 

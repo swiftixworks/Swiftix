@@ -520,14 +520,21 @@ public enum GoSourceRewriter {
 
     private static func quote(_ value: String) -> String {
         var result = "\""
-        for character in value {
-            switch character {
+        // Scalars rather than Characters, so "\r\n" is not one grapheme.
+        for scalar in value.unicodeScalars {
+            switch scalar {
             case "\n": result += "\\n"
             case "\r": result += "\\r"
             case "\t": result += "\\t"
             case "\"": result += "\\\""
             case "\\": result += "\\\\"
-            default: result.append(character)
+            default:
+                if scalar.value < 0x20 || scalar.value == 0x7F {
+                    let hex = String(scalar.value, radix: 16)
+                    result += "\\x" + (hex.count == 1 ? "0" + hex : hex)
+                } else {
+                    result.unicodeScalars.append(scalar)
+                }
             }
         }
         return result + "\""

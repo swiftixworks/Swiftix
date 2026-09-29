@@ -34,6 +34,7 @@ go build -o hello .
 | --- | --- |
 | Packages | Import graph, global/init order, and local cross-package calls |
 | Control flow | `if`, both `switch` forms, three-clause `for`, `range`, break, and continue |
+| Literals | Decimal integers and interpreted strings with Go escapes (`\x`, octal, `\u`, `\U`); strings must be valid UTF-8 |
 | Types | Primitive and named types, structs, pointers, arrays/slices/strings, maps, interfaces, and channels |
 | Functions | Multiple and named returns, closures, defer, panic/recover, and methods |
 | Concurrency | Goroutines, buffered/unbuffered channels, select, and minimal Mutex/WaitGroup |
