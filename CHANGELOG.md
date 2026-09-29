@@ -29,6 +29,8 @@ format, behavior and platform changes are recorded here.
   running.
 - A Swiftix Go run that fails with the terminal in raw mode restores cooked
   mode.
+- A `for` header no longer parses an identifier before `{` as a composite
+  literal, so `for i < limit {` and `for …; …; i = i + step {` compile.
 
 ## 0.11.2 — 2026-09-29
 

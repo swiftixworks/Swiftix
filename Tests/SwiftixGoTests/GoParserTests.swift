@@ -32,6 +32,37 @@ struct GoParserTests: GoTestHarness {
         #expect(file.functions.map(\.name) == ["main"])
     }
 
+    @Test func forHeaderIdentifierBeforeBraceOpensTheLoopBody() throws {
+        let executable = try GoCompiler.compile(sources: [
+            GoSourceFile(path: "main.go", text: """
+                package main
+                import "fmt"
+                type Limit struct { n int }
+                func main() {
+                    limit := 3
+                    step := 2
+                    i := 0
+                    for i < limit {
+                        i++
+                    }
+                    total := 0
+                    for j := 0; j < limit; j = j + step {
+                        total = total + j
+                    }
+                    for k := (Limit{n: 1}).n; k < limit; k++ {
+                        total = total + k
+                    }
+                    fmt.Println(i, total)
+                }
+                """)
+        ])
+        var output = ""
+
+        try GoVirtualMachine().run(executable) { output += $0 }
+
+        #expect(output == "3 5\n")
+    }
+
     @Test func parserReportsGoStyleSourcePosition() {
         let source = GoSourceFile(path: "broken.go", text: "package main\nfunc main( {\n")
         do {

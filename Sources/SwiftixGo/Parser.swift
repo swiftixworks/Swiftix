@@ -548,7 +548,7 @@ private struct Parser {
         if check(.semicolon) {
             advance()
         } else {
-            let first = try parseSimpleStatement()
+            let first = try parseSimpleStatement(allowCompositeLiteral: false)
             if check(.semicolon) {
                 initializer = first
                 advance()
@@ -567,7 +567,9 @@ private struct Parser {
 
         let condition = check(.semicolon) ? nil : try parseExpression(allowCompositeLiteral: false)
         try expect(.semicolon, message: "expected ';' in for clause")
-        let post = check(.leftBrace) ? nil : try parseSimpleStatement(allowShortDeclaration: false)
+        let post = check(.leftBrace)
+            ? nil
+            : try parseSimpleStatement(allowShortDeclaration: false, allowCompositeLiteral: false)
         return .forStatement(
             initializer: initializer,
             condition: condition,
@@ -672,15 +674,20 @@ private struct Parser {
         return .selectStatement(cases: cases, position: position)
     }
 
-    mutating func parseSimpleStatement(allowShortDeclaration: Bool = true) throws -> GoStatement {
+    /// `allowCompositeLiteral` is false in a `for` header, where `x {` opens
+    /// the loop body rather than a composite literal.
+    mutating func parseSimpleStatement(
+        allowShortDeclaration: Bool = true,
+        allowCompositeLiteral: Bool = true
+    ) throws -> GoStatement {
         let position = current.position
-        let target = try parseExpression()
+        let target = try parseExpression(allowCompositeLiteral: allowCompositeLiteral)
         if check(.comma) {
             // Could be multi-value declaration (a, b := f()) or assignment (a, b = f())
             var targets: [GoExpression] = [target]
             while check(.comma) {
                 advance()
-                targets.append(try parseExpression())
+                targets.append(try parseExpression(allowCompositeLiteral: allowCompositeLiteral))
             }
             if check(.declare) {
                 guard allowShortDeclaration else {
@@ -699,14 +706,14 @@ private struct Parser {
                 }
                 return .multiDeclaration(
                     names: names,
-                    expression: try parseExpression(),
+                    expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                     position: position)
             }
             if check(.assign) {
                 advance()
                 return .multiAssignment(
                     targets: targets,
-                    expression: try parseExpression(),
+                    expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                     position: position)
             }
             throw GoDiagnostic(
@@ -726,7 +733,7 @@ private struct Parser {
             return .declaration(
                 name: name,
                 explicitType: nil,
-                expression: try parseExpression(),
+                expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                 isConstant: false,
                 position: position)
         }
@@ -734,14 +741,14 @@ private struct Parser {
             advance()
             return .assignment(
                 target: target,
-                expression: try parseExpression(),
+                expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                 position: position)
         }
         if check(.arrow) {
             advance()
             return .sendStatement(
                 channel: target,
-                value: try parseExpression(),
+                value: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                 position: position)
         }
         if check(.increment) || check(.decrement) {
