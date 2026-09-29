@@ -31,6 +31,8 @@ format, behavior and platform changes are recorded here.
   mode.
 - A `for` header no longer parses an identifier before `{` as a composite
   literal, so `for i < limit {` and `for …; …; i = i + step {` compile.
+- Indexing, slicing, and ranging over a Go string no longer copy the whole
+  string on every operation, which made byte loops quadratic.
 
 ## 0.11.2 — 2026-09-29
 

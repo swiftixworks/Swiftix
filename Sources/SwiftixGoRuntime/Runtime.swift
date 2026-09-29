@@ -1956,9 +1956,13 @@ public struct GoVirtualMachine: Sendable {
                                 pointer: appending(index: absoluteIndex, to: slice.backing),
                                 heap: heap))
                     case .string(let string):
-                        let bytes = Array(string.utf8)
-                        guard bytes.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
-                        stack.append(.int(Int64(bytes[index])))
+                        // Offsetting a native string's UTF-8 view is O(1); copying
+                        // it into an array made byte loops quadratic.
+                        let utf8 = string.utf8
+                        guard index >= 0, index < utf8.count else {
+                            throw GoRuntimeError.indexOutOfRange
+                        }
+                        stack.append(.int(Int64(utf8[utf8.index(utf8.startIndex, offsetBy: index)])))
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -2012,11 +2016,13 @@ public struct GoVirtualMachine: Sendable {
                                     capacity: slice.capacity - low,
                                     zeroValue: slice.zeroValue)))
                     case .string(let string):
-                        let bytes = Array(string.utf8)
-                        guard low >= 0, low <= high, high <= bytes.count else {
+                        let utf8 = string.utf8
+                        guard low >= 0, low <= high, high <= utf8.count else {
                             throw GoRuntimeError.invalidSliceBounds
                         }
-                        stack.append(.string(String(decoding: bytes[low..<high], as: UTF8.self)))
+                        let lower = utf8.index(utf8.startIndex, offsetBy: low)
+                        let upper = utf8.index(lower, offsetBy: high - low)
+                        stack.append(.string(String(decoding: utf8[lower..<upper], as: UTF8.self)))
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -3416,17 +3422,12 @@ public struct GoVirtualMachine: Sendable {
                         guard let offset = Int(exactly: rawOffset) else {
                             throw GoRuntimeError.indexOutOfRange
                         }
-                        var byteOffset = 0
-                        var result: GoValue?
-                        for scalar in string.unicodeScalars {
-                            if byteOffset == offset {
-                                result = .int(Int64(scalar.value))
-                                break
-                            }
-                            byteOffset += scalar.utf8.count
-                        }
-                        guard let result else { throw GoRuntimeError.indexOutOfRange }
-                        stack.append(result)
+                        let utf8 = string.utf8
+                        guard offset >= 0, offset < utf8.count,
+                            let scalarIndex = utf8.index(utf8.startIndex, offsetBy: offset)
+                                .samePosition(in: string.unicodeScalars)
+                        else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(.int(Int64(string.unicodeScalars[scalarIndex].value)))
                     case (.map(let mapValue), _):
                         guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
                         else { throw GoRuntimeError.typeMismatch }
