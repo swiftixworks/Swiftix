@@ -19,7 +19,7 @@
 | --- | --- |
 | Swift toolchain | Swift 6.3 |
 | Swiftix core | macOS 14, iOS 17, Linux |
-| Host toolchain | macOS and Linux, arm64/amd64 as produced by CI |
+| Host toolchain | macOS and Linux, arm64/amd64 as produced by `Packaging/build-toolchain.sh` |
 
 ## Public API stability
 
@@ -85,7 +85,7 @@ The stable core seam is Kernel construction, rootfs restoration, volume/network
 attachment, process start/observation, and Kernel pause/resume/shutdown. Guest
 processes do not receive ambient authority to create or control sibling Kernels.
 
-CI compiles `Example/PublicAPISmoke` without `@testable import` and uses
+The release checks compile `Example/PublicAPISmoke` without `@testable import` and run
 `Scripts/check-api-breakage.sh` against the latest version tag in the same
 SemVer compatibility series. For `0.x`, the series is `0.minor`; for 1.0 and
 later, it is the major version. Before a new series has a release tag, its first
