@@ -5,6 +5,13 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Fixed
+
+- A process step that completes nested inside another step of the same
+  process (for example a read resumed while the Go VM drives the event loop)
+  no longer reaps the process with status 0 while the enclosing step is still
+  running.
+
 ## 0.11.2 — 2026-09-29
 
 This release republishes the host toolchain packages so that every

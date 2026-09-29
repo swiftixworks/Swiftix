@@ -208,4 +208,37 @@ struct ProcessLifecycleTests {
         #expect(captured.secondWaitError == .noChildProcess)
         #expect(kernel.snapshotProcesses().isEmpty)
     }
+
+    @Test func nestedStepDoesNotReapProcessWhoseEnclosingStepIsRunning() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+
+        final class Capture {
+            var childPID: PID = -1
+            var nestedStepRan = false
+            var liveAfterNestedStep = false
+            var reaped: ChildWaitEvent?
+        }
+        let captured = Capture()
+
+        kernel.spawn("parent") { parent in
+            captured.childPID = parent.spawn("child") { child in
+                let pipe = child.pipe()
+                child.write(pipe.write, [0x61])
+                // The read resumes as its own step, after which nothing is pending.
+                child.read(pipe.read, max: 1) { _ in captured.nestedStepRan = true }
+                // Drive the loop from inside this step, as the Swiftix Go VM does.
+                while !captured.nestedStepRan, loop.runNext() {}
+                captured.liveAfterNestedStep = kernel.snapshotProcesses()
+                    .first { $0.pid == captured.childPID }?.lifecycle == .live
+                child.exit(7)
+            }
+            parent.wait { result in captured.reaped = try? result.get() }
+        }
+        loop.runUntilIdle()
+
+        #expect(captured.nestedStepRan)
+        #expect(captured.liveAfterNestedStep)
+        #expect(captured.reaped?.status == .exited(7))
+    }
 }

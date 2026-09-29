@@ -33,8 +33,13 @@ final class ProcessScheduler {
             }
             process.runState = .running
             process.scheduleTicks += 1   // CPU-activity proxy: how often this process was run
+            process.activeStepDepth += 1
             work()
+            process.activeStepDepth -= 1
             guard self.processTable.contains(process.pid) else { return }
+            // A nested step must not reap a process whose enclosing step is still
+            // executing; that step finishes (and decides) once it returns.
+            guard process.activeStepDepth == 0 else { return }
             self.finishStep(process)
         }
     }

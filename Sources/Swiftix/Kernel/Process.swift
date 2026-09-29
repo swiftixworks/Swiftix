@@ -46,6 +46,11 @@ final class Process {
     /// leaving the process in S until the callback actually starts executing.
     var queuedSteps = 0
 
+    /// Steps of this process currently executing. A step can run nested inside
+    /// another when process code drives the event loop itself (the Swiftix Go
+    /// VM does); only the outermost step decides the process's fate.
+    var activeStepDepth = 0
+
     /// Every callback created by process/runtime code belongs to this scope.
     /// Logical exit cancels it physically while the lightweight process identity
     /// remains in the table as a zombie.
