@@ -439,6 +439,20 @@ public enum GoInstruction: Sendable, Equatable {
     /// With no paths, input is drained asynchronously from fd 0; otherwise the
     /// named VFS files are concatenated and missing files set status 1.
     case readInput
+    /// Push `(string, int)` — the next chunk of fd 0 (at most 4096 bytes, never
+    /// splitting a UTF-8 sequence) and status 0, or `""` and status 1 at end of
+    /// input. Only the calling goroutine waits; a resumable run suspends while
+    /// the host has not yet delivered input.
+    case readStdin
+    /// Pop a path and contents, create or truncate the VFS file, and push the
+    /// int status (0 on success, 1 on failure).
+    case writeFile
+    /// Pop a bool and switch the fd 0 terminal into or out of raw mode. Pushes
+    /// `false` when fd 0 is not a terminal.
+    case setTerminalRawMode
+    /// Push `(rows, columns)` of the terminal at fd 1 (or fd 0), or `(0, 0)`
+    /// when neither is a terminal.
+    case terminalWindowSize
 }
 
 public struct GoBytecodeFunction: Sendable, Equatable {
@@ -595,7 +609,35 @@ public enum GoRuntimeError: Error, Sendable, Equatable, CustomStringConvertible 
     }
 }
 
+/// Unwinds a resumable run whose goroutines are all waiting on host input.
+private struct GoExecutionSuspension: Error {}
+
 public struct GoVirtualMachine: Sendable {
+    /// Upper bound on the bytes one `userland.ReadStdin` call returns.
+    static let standardInputChunkBytes = 4_096
+
+    /// Length of the longest prefix of `bytes` that does not end inside a UTF-8
+    /// sequence. The remainder (at most three bytes) waits for the next read so
+    /// a multi-byte character split across reads decodes intact.
+    static func completeUTF8PrefixLength(_ bytes: [UInt8]) -> Int {
+        var index = bytes.count - 1
+        var continuationCount = 0
+        while index >= 0, continuationCount < 3, bytes[index] & 0xC0 == 0x80 {
+            index -= 1
+            continuationCount += 1
+        }
+        guard index >= 0 else { return bytes.count }
+        let expectedLength: Int
+        switch bytes[index] {
+        case 0xC0...0xDF: expectedLength = 2
+        case 0xE0...0xEF: expectedLength = 3
+        case 0xF0...0xF7: expectedLength = 4
+        default: expectedLength = 1
+        }
+        return expectedLength > continuationCount + 1 ? index : bytes.count
+    }
+
+
     public let maximumInstructions: Int
     public let instructionQuantum: Int
     public let maximumCallDepth: Int
@@ -649,6 +691,11 @@ public struct GoVirtualMachine: Sendable {
     }
 
     /// The full run: both the exit code and heap statistics.
+    ///
+    /// The run completes before this call returns, so a goroutine waiting on
+    /// input the host has not delivered yet is reported as a deadlock. Use
+    /// ``startProgram(_:eventLoop:processContext:arguments:write:completion:)``
+    /// for interactive programs.
     public func runProgram(
         _ executable: GoExecutable,
         eventLoop: EventLoop = EventLoop(),
@@ -656,6 +703,66 @@ public struct GoVirtualMachine: Sendable {
         arguments: [String] = [],
         write: (String) throws -> Void
     ) throws -> GoProcessResult {
+        // A non-resumable run never parks a continuation, so `write` cannot
+        // outlive this call.
+        try withoutActuallyEscaping(write) { write in
+            guard let result = try execute(
+                executable,
+                eventLoop: eventLoop,
+                processContext: processContext,
+                arguments: arguments,
+                write: write,
+                resumedCompletion: nil)
+            else {
+                preconditionFailure("a non-resumable Swiftix Go run suspended")
+            }
+            return result
+        }
+    }
+
+    /// Start a resumable run for an interactive process.
+    ///
+    /// When every goroutine is waiting and only `userland.ReadStdin` can make
+    /// progress, the run suspends and returns control to the event loop instead
+    /// of reporting a deadlock; the kernel resumes it when fd 0 delivers input.
+    /// The instruction and output budgets bound each uninterrupted slice between
+    /// suspensions rather than the whole session. `completion` runs exactly
+    /// once, possibly before this call returns.
+    public func startProgram(
+        _ executable: GoExecutable,
+        eventLoop: EventLoop = EventLoop(),
+        processContext: ProcessContext? = nil,
+        arguments: [String] = [],
+        write: @escaping (String) throws -> Void,
+        completion: @escaping (Result<GoProcessResult, any Error>) -> Void
+    ) {
+        do {
+            if let result = try execute(
+                executable,
+                eventLoop: eventLoop,
+                processContext: processContext,
+                arguments: arguments,
+                write: write,
+                resumedCompletion: completion)
+            {
+                completion(.success(result))
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    /// Run until the program finishes (returning its result) or suspends on
+    /// host input (returning `nil`). Only a non-nil `resumedCompletion` permits
+    /// suspension; it later receives the outcome of the resumed run.
+    private func execute(
+        _ executable: GoExecutable,
+        eventLoop: EventLoop,
+        processContext: ProcessContext?,
+        arguments: [String],
+        write: @escaping (String) throws -> Void,
+        resumedCompletion: ((Result<GoProcessResult, any Error>) -> Void)?
+    ) throws -> GoProcessResult? {
         do {
             try GoExecutableValidator.validate(executable, limits: resourceLimits)
         } catch let error as GoExecutableValidationError {
@@ -728,7 +835,31 @@ public struct GoVirtualMachine: Sendable {
         var executionIsActive = true
         var httpHandlers: [String: String] = [:]
         var programExitCode: Int32 = 0
-        defer { executionIsActive = false }
+        // Resumable-run state: a suspended run keeps every local alive through
+        // `resumeHook`, which the stdin continuation invokes.
+        var isSuspended = false
+        var resumeHook: (() -> Void)?
+        var pendingHostInputWaits = 0
+        var standardInputCarry: [UInt8] = []
+        var sliceStartInstruction = 0
+        var completedNormally = false
+        var programEnabledRawMode = false
+        func releaseExecution() {
+            executionIsActive = false
+            resumeHook = nil
+            guard let processContext else { return }
+            // A program that fails while its terminal is raw cannot restore it
+            // itself; a normal exit keeps whatever mode the program chose.
+            if !completedNormally, programEnabledRawMode {
+                processContext.setTerminalRawMode(0, false)
+            }
+            _ = processContext.reportRuntimeMemory(
+                bytes: 0,
+                limitBytes: 0,
+                heapCells: 0,
+                garbageCollections: 0)
+        }
+        defer { if !isSuspended { releaseExecution() } }
 
         var lastRuntimeMemoryReport: (bytes: Int, cells: Int, collections: Int)?
         func reportRuntimeMemoryIfChanged() throws {
@@ -751,15 +882,6 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.resourceLimitExceeded("kernel runtime memory")
             }
             lastRuntimeMemoryReport = current
-        }
-        defer {
-            if let processContext {
-                _ = processContext.reportRuntimeMemory(
-                    bytes: 0,
-                    limitBytes: 0,
-                    heapCells: 0,
-                    garbageCollections: 0)
-            }
         }
         try reportRuntimeMemoryIfChanged()
 
@@ -966,7 +1088,12 @@ public struct GoVirtualMachine: Sendable {
 
         func driveEventLoopUntilRunnable() throws {
             while !resumeNextGoroutine() {
-                guard eventLoop.runNext() else { throw GoRuntimeError.deadlock }
+                guard eventLoop.runNext() else {
+                    if resumedCompletion != nil, pendingHostInputWaits > 0 {
+                        throw GoExecutionSuspension()
+                    }
+                    throw GoRuntimeError.deadlock
+                }
                 if let asynchronousError { throw asynchronousError }
             }
         }
@@ -1018,6 +1145,50 @@ public struct GoVirtualMachine: Sendable {
             }
             goroutines[id] = context
             runQueue.append(id)
+        }
+
+        /// Park goroutine `id` until fd 0 yields a chunk that ends on a UTF-8
+        /// boundary (or reaches end of input), then wake it with `(data, status)`
+        /// and resume the run if it suspended meanwhile.
+        func readStandardInputChunk(for id: Int) {
+            guard let processContext else { return }
+            processContext.read(0, max: GoVirtualMachine.standardInputChunkBytes) { bytes in
+                guard executionIsActive, asynchronousError == nil else { return }
+                do {
+                    let pending = standardInputCarry + bytes
+                    if bytes.isEmpty {
+                        standardInputCarry = []
+                        pendingHostInputWaits -= 1
+                        try wakeGoroutine(
+                            id,
+                            values: pending.isEmpty
+                                ? [.string(""), .int(1)]
+                                : [.string(String(decoding: pending, as: UTF8.self)), .int(0)])
+                    } else {
+                        let boundary = GoVirtualMachine.completeUTF8PrefixLength(pending)
+                        standardInputCarry = Array(pending[boundary...])
+                        guard boundary > 0 else {
+                            readStandardInputChunk(for: id)
+                            return
+                        }
+                        pendingHostInputWaits -= 1
+                        try wakeGoroutine(
+                            id,
+                            values: [
+                                .string(String(decoding: pending[..<boundary], as: UTF8.self)),
+                                .int(0),
+                            ])
+                    }
+                } catch let error as GoRuntimeError {
+                    asynchronousError = error
+                } catch {
+                    asynchronousError = .typeMismatch
+                }
+                if let hook = resumeHook {
+                    resumeHook = nil
+                    hook()
+                }
+            }
         }
 
         func blockedReceiveCandidate(
@@ -1363,2027 +1534,2005 @@ public struct GoVirtualMachine: Sendable {
             heap.collect(rootCells: rootCells, rootValues: rootValues)
         }
 
-        executionLoop: while true {
-            if frames.isEmpty {
-                if currentGoroutineID != 0 {
-                    guard resumeNextGoroutine() else {
-                        throw GoRuntimeError.deadlock
-                    }
-                    continue
-                }
-                guard !startupFunctions.isEmpty else { break }
-                let name = startupFunctions.removeFirst()
-                guard let function = functions[name] else {
-                    throw GoRuntimeError.missingFunction(name)
-                }
-                frames.append(
-                    try makeFrame(function: function, stackBase: 0, arguments: [], heap: &heap))
-            }
-            if let pendingExit = frames[frames.count - 1].pendingExit {
-                let exitingIndex = frames.count - 1
-                if let deferred = frames[exitingIndex].deferredCalls.popLast() {
-                    activeDeferredCallCount -= 1
-                    if let function = functions[deferred.function]
-                        ?? builtinGoroutineFunction(
-                            named: deferred.function,
-                            argumentCount: deferred.arguments.count)
-                    {
-                        guard frames.count < maximumCallDepth else {
-                            throw GoRuntimeError.callStackLimitExceeded
+        /// Run guest code until the program finishes or suspends on host input.
+        func runSlice() throws {
+            executionLoop: while true {
+                if frames.isEmpty {
+                    if currentGoroutineID != 0 {
+                        guard resumeNextGoroutine() else {
+                            throw GoRuntimeError.deadlock
                         }
-                        frames.append(
-                            try makeFrame(
-                                function: function,
-                                stackBase: stack.count,
-                                arguments: deferred.arguments,
-                                heap: &heap,
-                                isDeferredCall: true))
-                    } else if deferred.function == "fmt.Println"
-                        || deferred.function == "fmt.Print"
-                    {
-                        let newline = deferred.function == "fmt.Println"
-                        let separator = newline ? " " : ""
-                        try emit(
-                            try formatOutput(
-                                deferred.arguments,
-                                separator: separator,
-                                suffix: newline ? "\n" : ""))
-                    } else {
-                        throw GoRuntimeError.missingFunction(deferred.function)
+                        continue
+                    }
+                    guard !startupFunctions.isEmpty else { break }
+                    let name = startupFunctions.removeFirst()
+                    guard let function = functions[name] else {
+                        throw GoRuntimeError.missingFunction(name)
+                    }
+                    frames.append(
+                        try makeFrame(function: function, stackBase: 0, arguments: [], heap: &heap))
+                }
+                if let pendingExit = frames[frames.count - 1].pendingExit {
+                    let exitingIndex = frames.count - 1
+                    if let deferred = frames[exitingIndex].deferredCalls.popLast() {
+                        activeDeferredCallCount -= 1
+                        if let function = functions[deferred.function]
+                            ?? builtinGoroutineFunction(
+                                named: deferred.function,
+                                argumentCount: deferred.arguments.count)
+                        {
+                            guard frames.count < maximumCallDepth else {
+                                throw GoRuntimeError.callStackLimitExceeded
+                            }
+                            frames.append(
+                                try makeFrame(
+                                    function: function,
+                                    stackBase: stack.count,
+                                    arguments: deferred.arguments,
+                                    heap: &heap,
+                                    isDeferredCall: true))
+                        } else if deferred.function == "fmt.Println"
+                            || deferred.function == "fmt.Print"
+                        {
+                            let newline = deferred.function == "fmt.Println"
+                            let separator = newline ? " " : ""
+                            try emit(
+                                try formatOutput(
+                                    deferred.arguments,
+                                    separator: separator,
+                                    suffix: newline ? "\n" : ""))
+                        } else {
+                            throw GoRuntimeError.missingFunction(deferred.function)
+                        }
+                        try scheduleNext(requeueCurrent: true)
+                        continue
+                    }
+
+                    let exiting = frames.removeLast()
+                    releaseFrame(exiting)
+                    guard stack.count >= exiting.stackBase else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    if stack.count > exiting.stackBase {
+                        stack.removeSubrange(exiting.stackBase...)
+                    }
+                    switch pendingExit {
+                    case .returning(let values):
+                        if exiting.function.returnCount > 0,
+                            values.count != exiting.function.returnCount
+                        {
+                            throw values.isEmpty
+                                ? GoRuntimeError.missingReturn(exiting.function.name)
+                                : GoRuntimeError.typeMismatch
+                        }
+                        if exiting.function.returnCount == 0, !values.isEmpty {
+                            throw GoRuntimeError.typeMismatch
+                        }
+                        if !exiting.isDeferredCall {
+                            stack.append(contentsOf: values)
+                        }
+                    case .panicking(let value):
+                        guard !frames.isEmpty else {
+                            throw GoRuntimeError.panicError(value.description)
+                        }
+                        frames[frames.count - 1].pendingExit = .panicking(value)
+                    case .testFatal:
+                        if !frames.isEmpty {
+                            frames[frames.count - 1].pendingExit = .testFatal
+                        }
+                    }
+                    if frames.isEmpty {
+                        if currentGoroutineID == 0, startupFunctions.isEmpty {
+                            break executionLoop
+                        }
+                        if currentGoroutineID != 0 {
+                            try resumeAfterGoroutineCompletion()
+                            continue
+                        }
                     }
                     try scheduleNext(requeueCurrent: true)
                     continue
                 }
-
-                let exiting = frames.removeLast()
-                releaseFrame(exiting)
-                guard stack.count >= exiting.stackBase else {
-                    throw GoRuntimeError.stackUnderflow
+                let frameIndex = frames.count - 1
+                if frames[frameIndex].programCounter >= frames[frameIndex].function.instructions.count {
+                    frames[frameIndex].pendingExit = .returning([])
+                    try scheduleNext(requeueCurrent: true)
+                    continue
                 }
-                if stack.count > exiting.stackBase {
-                    stack.removeSubrange(exiting.stackBase...)
+                let instruction =
+                    frames[frameIndex].function.instructions[frames[frameIndex].programCounter]
+                frames[frameIndex].programCounter += 1
+                currentBlocked = false
+                executed += 1
+                guard executed - sliceStartInstruction <= maximumInstructions else {
+                    throw GoRuntimeError.instructionLimitExceeded
                 }
-                switch pendingExit {
-                case .returning(let values):
-                    if exiting.function.returnCount > 0,
-                        values.count != exiting.function.returnCount
-                    {
-                        throw values.isEmpty
-                            ? GoRuntimeError.missingReturn(exiting.function.name)
-                            : GoRuntimeError.typeMismatch
+                switch instruction {
+                case .push(let value):
+                    stack.append(value)
+                case .load(let index):
+                    guard frames[frameIndex].locals.indices.contains(index),
+                        let cell = frames[frameIndex].locals[index],
+                        heap.contains(cell)
+                    else {
+                        throw GoRuntimeError.invalidLocal(index)
                     }
-                    if exiting.function.returnCount == 0, !values.isEmpty {
+                    stack.append(heap[cell])
+                case .store(let index):
+                    guard frames[frameIndex].locals.indices.contains(index) else {
+                        throw GoRuntimeError.invalidLocal(index)
+                    }
+                    let value = try pop(&stack)
+                    if let cell = frames[frameIndex].locals[index] {
+                        guard heap.contains(cell) else { throw GoRuntimeError.invalidPointer }
+                        try heap.replace(cell, with: value)
+                    } else {
+                        frames[frameIndex].locals[index] = try heap.allocate(value)
+                    }
+                case .negate:
+                    guard case .int(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
+                    stack.append(.int(0 &- value))
+                case .not:
+                    guard case .bool(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
+                    stack.append(.bool(!value))
+                case .add:
+                    let (left, right) = try popPair(&stack)
+                    switch (left, right) {
+                    case (.int(let lhs), .int(let rhs)): stack.append(.int(lhs &+ rhs))
+                    case (.string(let lhs), .string(let rhs)):
+                        let byteCount = try checkedAdd(
+                            lhs.utf8.count, rhs.utf8.count, resource: "string bytes")
+                        guard byteCount <= resourceLimits.maximumStringBytes else {
+                            throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                        }
+                        stack.append(.string(lhs + rhs))
+                    default: throw GoRuntimeError.typeMismatch
+                    }
+                case .subtract:
+                    try integerBinary(&stack) { $0 &- $1 }
+                case .multiply:
+                    try integerBinary(&stack) { $0 &* $1 }
+                case .divide:
+                    let (lhs, rhs) = try integerPair(&stack)
+                    guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
+                    if lhs == Int64.min, rhs == -1 {
+                        // Go defines signed integer division using two's-complement
+                        // arithmetic; this quotient wraps to the minimum value.
+                        stack.append(.int(Int64.min))
+                    } else {
+                        stack.append(.int(lhs / rhs))
+                    }
+                case .remainder:
+                    let (lhs, rhs) = try integerPair(&stack)
+                    guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
+                    stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
+                case .equal:
+                    let (left, right) = try popPair(&stack)
+                    stack.append(.bool(left == right))
+                case .notEqual:
+                    let (left, right) = try popPair(&stack)
+                    stack.append(.bool(left != right))
+                case .less:
+                    try orderedComparison(&stack, integer: <, string: <)
+                case .lessEqual:
+                    try orderedComparison(&stack, integer: <=, string: <=)
+                case .greater:
+                    try orderedComparison(&stack, integer: >, string: >)
+                case .greaterEqual:
+                    try orderedComparison(&stack, integer: >=, string: >=)
+                case .logicalAnd:
+                    try booleanBinary(&stack) { $0 && $1 }
+                case .logicalOr:
+                    try booleanBinary(&stack) { $0 || $1 }
+                case .print(let argumentCount, let newline):
+                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - argumentCount
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    let separator = newline ? " " : ""
+                    try emit(
+                        try formatOutput(
+                            values,
+                            separator: separator,
+                            suffix: newline ? "\n" : ""))
+                case .jump(let target):
+                    try jump(to: target, frame: &frames[frameIndex])
+                case .jumpIfFalse(let target):
+                    guard case .bool(let condition) = try pop(&stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    if !exiting.isDeferredCall {
-                        stack.append(contentsOf: values)
+                    if !condition { try jump(to: target, frame: &frames[frameIndex]) }
+                case .jumpIfTrue(let target):
+                    guard case .bool(let condition) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
                     }
-                case .panicking(let value):
-                    guard !frames.isEmpty else {
-                        throw GoRuntimeError.panicError(value.description)
+                    if condition { try jump(to: target, frame: &frames[frameIndex]) }
+                case .call(let name, let argumentCount):
+                    guard let function = functions[name] else {
+                        throw GoRuntimeError.missingFunction(name)
                     }
-                    frames[frames.count - 1].pendingExit = .panicking(value)
-                case .testFatal:
-                    if !frames.isEmpty {
-                        frames[frames.count - 1].pendingExit = .testFatal
+                    guard frames.count < maximumCallDepth else {
+                        throw GoRuntimeError.callStackLimitExceeded
                     }
-                }
-                if frames.isEmpty {
-                    if currentGoroutineID == 0, startupFunctions.isEmpty {
-                        break executionLoop
+                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                        throw GoRuntimeError.stackUnderflow
                     }
-                    if currentGoroutineID != 0 {
-                        try resumeAfterGoroutineCompletion()
-                        continue
+                    guard argumentCount == function.parameterCount else {
+                        throw GoRuntimeError.argumentCountMismatch(
+                            function: name,
+                            expected: function.parameterCount,
+                            actual: argumentCount)
                     }
-                }
-                try scheduleNext(requeueCurrent: true)
-                continue
-            }
-            let frameIndex = frames.count - 1
-            if frames[frameIndex].programCounter >= frames[frameIndex].function.instructions.count {
-                frames[frameIndex].pendingExit = .returning([])
-                try scheduleNext(requeueCurrent: true)
-                continue
-            }
-            let instruction =
-                frames[frameIndex].function.instructions[frames[frameIndex].programCounter]
-            frames[frameIndex].programCounter += 1
-            currentBlocked = false
-            executed += 1
-            guard executed <= maximumInstructions else {
-                throw GoRuntimeError.instructionLimitExceeded
-            }
-            switch instruction {
-            case .push(let value):
-                stack.append(value)
-            case .load(let index):
-                guard frames[frameIndex].locals.indices.contains(index),
-                    let cell = frames[frameIndex].locals[index],
-                    heap.contains(cell)
-                else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                stack.append(heap[cell])
-            case .store(let index):
-                guard frames[frameIndex].locals.indices.contains(index) else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                let value = try pop(&stack)
-                if let cell = frames[frameIndex].locals[index] {
-                    guard heap.contains(cell) else { throw GoRuntimeError.invalidPointer }
-                    try heap.replace(cell, with: value)
-                } else {
-                    frames[frameIndex].locals[index] = try heap.allocate(value)
-                }
-            case .negate:
-                guard case .int(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
-                stack.append(.int(0 &- value))
-            case .not:
-                guard case .bool(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
-                stack.append(.bool(!value))
-            case .add:
-                let (left, right) = try popPair(&stack)
-                switch (left, right) {
-                case (.int(let lhs), .int(let rhs)): stack.append(.int(lhs &+ rhs))
-                case (.string(let lhs), .string(let rhs)):
-                    let byteCount = try checkedAdd(
-                        lhs.utf8.count, rhs.utf8.count, resource: "string bytes")
-                    guard byteCount <= resourceLimits.maximumStringBytes else {
-                        throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                    let argumentStart = stack.count - argumentCount
+                    let arguments = Array(stack[argumentStart...])
+                    stack.removeSubrange(argumentStart...)
+                    frames.append(
+                        try makeFrame(
+                            function: function,
+                            stackBase: stack.count,
+                            arguments: arguments,
+                            heap: &heap))
+                case .spawn(let name, let argumentCount):
+                    guard let function = functions[name]
+                        ?? builtinGoroutineFunction(named: name, argumentCount: argumentCount)
+                    else {
+                        throw GoRuntimeError.missingFunction(name)
                     }
-                    stack.append(.string(lhs + rhs))
-                default: throw GoRuntimeError.typeMismatch
-                }
-            case .subtract:
-                try integerBinary(&stack) { $0 &- $1 }
-            case .multiply:
-                try integerBinary(&stack) { $0 &* $1 }
-            case .divide:
-                let (lhs, rhs) = try integerPair(&stack)
-                guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
-                if lhs == Int64.min, rhs == -1 {
-                    // Go defines signed integer division using two's-complement
-                    // arithmetic; this quotient wraps to the minimum value.
-                    stack.append(.int(Int64.min))
-                } else {
-                    stack.append(.int(lhs / rhs))
-                }
-            case .remainder:
-                let (lhs, rhs) = try integerPair(&stack)
-                guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
-                stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
-            case .equal:
-                let (left, right) = try popPair(&stack)
-                stack.append(.bool(left == right))
-            case .notEqual:
-                let (left, right) = try popPair(&stack)
-                stack.append(.bool(left != right))
-            case .less:
-                try orderedComparison(&stack, integer: <, string: <)
-            case .lessEqual:
-                try orderedComparison(&stack, integer: <=, string: <=)
-            case .greater:
-                try orderedComparison(&stack, integer: >, string: >)
-            case .greaterEqual:
-                try orderedComparison(&stack, integer: >=, string: >=)
-            case .logicalAnd:
-                try booleanBinary(&stack) { $0 && $1 }
-            case .logicalOr:
-                try booleanBinary(&stack) { $0 || $1 }
-            case .print(let argumentCount, let newline):
-                guard argumentCount >= 0, stack.count >= argumentCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - argumentCount
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                let separator = newline ? " " : ""
-                try emit(
-                    try formatOutput(
-                        values,
-                        separator: separator,
-                        suffix: newline ? "\n" : ""))
-            case .jump(let target):
-                try jump(to: target, frame: &frames[frameIndex])
-            case .jumpIfFalse(let target):
-                guard case .bool(let condition) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                if !condition { try jump(to: target, frame: &frames[frameIndex]) }
-            case .jumpIfTrue(let target):
-                guard case .bool(let condition) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                if condition { try jump(to: target, frame: &frames[frameIndex]) }
-            case .call(let name, let argumentCount):
-                guard let function = functions[name] else {
-                    throw GoRuntimeError.missingFunction(name)
-                }
-                guard frames.count < maximumCallDepth else {
-                    throw GoRuntimeError.callStackLimitExceeded
-                }
-                guard argumentCount >= 0, stack.count >= argumentCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                guard argumentCount == function.parameterCount else {
-                    throw GoRuntimeError.argumentCountMismatch(
-                        function: name,
-                        expected: function.parameterCount,
-                        actual: argumentCount)
-                }
-                let argumentStart = stack.count - argumentCount
-                let arguments = Array(stack[argumentStart...])
-                stack.removeSubrange(argumentStart...)
-                frames.append(
-                    try makeFrame(
-                        function: function,
-                        stackBase: stack.count,
-                        arguments: arguments,
-                        heap: &heap))
-            case .spawn(let name, let argumentCount):
-                guard let function = functions[name]
-                    ?? builtinGoroutineFunction(named: name, argumentCount: argumentCount)
-                else {
-                    throw GoRuntimeError.missingFunction(name)
-                }
-                guard argumentCount >= 0, stack.count >= argumentCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                guard argumentCount == function.parameterCount else {
-                    throw GoRuntimeError.argumentCountMismatch(
-                        function: name,
-                        expected: function.parameterCount,
-                        actual: argumentCount)
-                }
-                let argumentStart = stack.count - argumentCount
-                let arguments = Array(stack[argumentStart...])
-                stack.removeSubrange(argumentStart...)
-                guard resourceLimits.maximumGoroutines >= 2,
-                    goroutines.count <= resourceLimits.maximumGoroutines - 2
-                else {
-                    throw GoRuntimeError.resourceLimitExceeded("goroutines")
-                }
-                guard nextGoroutineID < Int.max else {
-                    throw GoRuntimeError.resourceLimitExceeded("goroutine identifiers")
-                }
-                let id = nextGoroutineID
-                nextGoroutineID += 1
-                goroutines[id] = GoroutineContext(
-                    frames: [try makeFrame(
-                        function: function,
-                        stackBase: 0,
-                        arguments: arguments,
-                        heap: &heap)],
-                    stack: [])
-                runQueue.append(id)
-            case .makeStruct(let typeName, let fieldNames):
-                guard stack.count >= fieldNames.count else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - fieldNames.count
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                stack.append(
-                    .structure(
-                        GoStructValue(
-                            typeName: typeName,
-                            fields: zip(fieldNames, values).map {
-                                GoStructFieldValue(name: $0.0, value: $0.1)
-                            })))
-            case .getField(let name):
-                guard case .structure(let structure) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard let field = structure.fields.first(where: { $0.name == name }) else {
-                    throw GoRuntimeError.unknownField(name)
-                }
-                stack.append(field.value)
-            case .setField(let name):
-                let value = try pop(&stack)
-                guard case .structure(var structure) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard let index = structure.fields.firstIndex(where: { $0.name == name }) else {
-                    throw GoRuntimeError.unknownField(name)
-                }
-                structure.fields[index].value = value
-                stack.append(.structure(structure))
-            case .addressLocal(let index, let fieldPath):
-                guard frames[frameIndex].locals.indices.contains(index),
-                    let cell = frames[frameIndex].locals[index]
-                else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                guard fieldPath.count <= resourceLimits.maximumPointerDepth else {
-                    throw GoRuntimeError.resourceLimitExceeded("pointer depth")
-                }
-                stack.append(
-                    .pointer(
-                        GoPointer(
-                            cell: cell,
-                            path: fieldPath.map(GoPointerComponent.field))))
-            case .fieldAddress(let name):
-                let pointerValue = try pop(&stack)
-                if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
-                guard case .pointer(let pointer) = pointerValue else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard pointer.path.count < resourceLimits.maximumPointerDepth else {
-                    throw GoRuntimeError.resourceLimitExceeded("pointer depth")
-                }
-                stack.append(
-                    .pointer(
-                        GoPointer(
-                            cell: pointer.cell,
-                            path: pointer.path + [.field(name)])))
-            case .dereference:
-                let pointerValue = try pop(&stack)
-                if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
-                guard case .pointer(let pointer) = pointerValue else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                stack.append(try read(pointer: pointer, heap: heap))
-            case .setPointer:
-                let value = try pop(&stack)
-                let pointerValue = try pop(&stack)
-                if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
-                guard case .pointer(let pointer) = pointerValue else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                try writePointer(value, through: pointer, heap: &heap)
-            case .makeArray(let elementCount):
-                guard elementCount >= 0, stack.count >= elementCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - elementCount
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                stack.append(.array(values))
-            case .makeSlice(let elementCount):
-                guard elementCount >= 0 else {
-                    throw GoRuntimeError.invalidExecutable("negative slice element count")
-                }
-                let requiredCount = try checkedAdd(
-                    elementCount, 1, resource: "operand stack")
-                guard stack.count >= requiredCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - elementCount
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                let zero = try pop(&stack)
-                let cell = try heap.allocate(.array(values))
-                stack.append(
-                    .slice(
-                        GoSliceValue(
-                            backing: GoPointer(cell: cell),
-                            start: 0,
-                            length: values.count,
-                            capacity: values.count,
-                            zeroValue: zero)))
-            case .allocateSlice:
-                guard case .int(let capacity) = try pop(&stack),
-                    case .int(let length) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                let zero = try pop(&stack)
-                guard length >= 0, capacity >= length,
-                    let exactLength = Int(exactly: length),
-                    let exactCapacity = Int(exactly: capacity)
-                else { throw GoRuntimeError.invalidSliceBounds }
-                try requireCollectionCount(exactCapacity, resource: "slice elements")
-                let cell = try heap.allocate(
-                    .array(Array(repeating: zero, count: exactCapacity)))
-                stack.append(
-                    .slice(
-                        GoSliceValue(
-                            backing: GoPointer(cell: cell),
-                            start: 0,
-                            length: exactLength,
-                            capacity: exactCapacity,
-                            zeroValue: zero)))
-            case .getIndex:
-                guard case .int(let rawIndex) = try pop(&stack),
-                    let index = Int(exactly: rawIndex)
-                else { throw GoRuntimeError.typeMismatch }
-                let base = try pop(&stack)
-                switch base {
-                case .array(let values):
-                    guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
-                    stack.append(values[index])
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    guard index >= 0, index < slice.length else {
-                        throw GoRuntimeError.indexOutOfRange
+                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                        throw GoRuntimeError.stackUnderflow
                     }
-                    let absoluteIndex = try checkedAdd(
-                        slice.start, index, resource: "slice index")
+                    guard argumentCount == function.parameterCount else {
+                        throw GoRuntimeError.argumentCountMismatch(
+                            function: name,
+                            expected: function.parameterCount,
+                            actual: argumentCount)
+                    }
+                    let argumentStart = stack.count - argumentCount
+                    let arguments = Array(stack[argumentStart...])
+                    stack.removeSubrange(argumentStart...)
+                    guard resourceLimits.maximumGoroutines >= 2,
+                        goroutines.count <= resourceLimits.maximumGoroutines - 2
+                    else {
+                        throw GoRuntimeError.resourceLimitExceeded("goroutines")
+                    }
+                    guard nextGoroutineID < Int.max else {
+                        throw GoRuntimeError.resourceLimitExceeded("goroutine identifiers")
+                    }
+                    let id = nextGoroutineID
+                    nextGoroutineID += 1
+                    goroutines[id] = GoroutineContext(
+                        frames: [try makeFrame(
+                            function: function,
+                            stackBase: 0,
+                            arguments: arguments,
+                            heap: &heap)],
+                        stack: [])
+                    runQueue.append(id)
+                case .makeStruct(let typeName, let fieldNames):
+                    guard stack.count >= fieldNames.count else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - fieldNames.count
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
                     stack.append(
-                        try read(
-                            pointer: appending(index: absoluteIndex, to: slice.backing),
-                            heap: heap))
-                case .string(let string):
-                    let bytes = Array(string.utf8)
-                    guard bytes.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
-                    stack.append(.int(Int64(bytes[index])))
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-            case .setIndex:
-                let value = try pop(&stack)
-                guard case .int(let rawIndex) = try pop(&stack),
-                    let index = Int(exactly: rawIndex)
-                else { throw GoRuntimeError.typeMismatch }
-                let base = try pop(&stack)
-                switch base {
-                case .array(var values):
-                    guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
-                    values[index] = value
-                    stack.append(.array(values))
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    guard index >= 0, index < slice.length else {
-                        throw GoRuntimeError.indexOutOfRange
+                        .structure(
+                            GoStructValue(
+                                typeName: typeName,
+                                fields: zip(fieldNames, values).map {
+                                    GoStructFieldValue(name: $0.0, value: $0.1)
+                                })))
+                case .getField(let name):
+                    guard case .structure(let structure) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
                     }
-                    let absoluteIndex = try checkedAdd(
-                        slice.start, index, resource: "slice index")
-                    try writePointer(
-                        value,
-                        through: appending(index: absoluteIndex, to: slice.backing),
-                        heap: &heap)
-                    stack.append(.slice(slice))
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-            case .slice:
-                guard case .int(let rawHigh) = try pop(&stack),
-                    case .int(let rawLow) = try pop(&stack),
-                    let low = Int(exactly: rawLow),
-                    let high = Int(exactly: rawHigh)
-                else { throw GoRuntimeError.typeMismatch }
-                let base = try pop(&stack)
-                switch base {
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    guard low >= 0, low <= high, high <= slice.capacity else {
-                        throw GoRuntimeError.invalidSliceBounds
+                    guard let field = structure.fields.first(where: { $0.name == name }) else {
+                        throw GoRuntimeError.unknownField(name)
                     }
-                    let newStart = try checkedAdd(
-                        slice.start, low, resource: "slice bounds")
+                    stack.append(field.value)
+                case .setField(let name):
+                    let value = try pop(&stack)
+                    guard case .structure(var structure) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard let index = structure.fields.firstIndex(where: { $0.name == name }) else {
+                        throw GoRuntimeError.unknownField(name)
+                    }
+                    structure.fields[index].value = value
+                    stack.append(.structure(structure))
+                case .addressLocal(let index, let fieldPath):
+                    guard frames[frameIndex].locals.indices.contains(index),
+                        let cell = frames[frameIndex].locals[index]
+                    else {
+                        throw GoRuntimeError.invalidLocal(index)
+                    }
+                    guard fieldPath.count <= resourceLimits.maximumPointerDepth else {
+                        throw GoRuntimeError.resourceLimitExceeded("pointer depth")
+                    }
                     stack.append(
-                        .slice(
-                            GoSliceValue(
-                                backing: slice.backing,
-                                start: newStart,
-                                length: high - low,
-                                capacity: slice.capacity - low,
-                                zeroValue: slice.zeroValue)))
-                case .string(let string):
-                    let bytes = Array(string.utf8)
-                    guard low >= 0, low <= high, high <= bytes.count else {
-                        throw GoRuntimeError.invalidSliceBounds
+                        .pointer(
+                            GoPointer(
+                                cell: cell,
+                                path: fieldPath.map(GoPointerComponent.field))))
+                case .fieldAddress(let name):
+                    let pointerValue = try pop(&stack)
+                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    guard case .pointer(let pointer) = pointerValue else {
+                        throw GoRuntimeError.typeMismatch
                     }
-                    stack.append(.string(String(decoding: bytes[low..<high], as: UTF8.self)))
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-            case .sliceArray:
-                let zero = try pop(&stack)
-                guard case .int(let rawHigh) = try pop(&stack),
-                    case .int(let rawLow) = try pop(&stack),
-                    let low = Int(exactly: rawLow),
-                    let high = Int(exactly: rawHigh),
-                    case .pointer(let pointer) = try pop(&stack),
-                    case .array(let values) = try read(pointer: pointer, heap: heap),
-                    low >= 0, low <= high, high <= values.count
-                else { throw GoRuntimeError.invalidSliceBounds }
-                stack.append(
-                    .slice(
-                        GoSliceValue(
-                            backing: pointer,
-                            start: low,
-                            length: high - low,
-                            capacity: values.count - low,
-                            zeroValue: zero)))
-            case .length:
-                let base = try pop(&stack)
-                switch base {
-                case .array(let values): stack.append(.int(Int64(values.count)))
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    stack.append(.int(Int64(slice.length)))
-                case .string(let string): stack.append(.int(Int64(string.utf8.count)))
-                case .map(let mapValue):
-                    guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.int(Int64(storage.entries.count)))
-                case .channel(let channel):
-                    guard case .channelStorage(let storage) = try read(
-                        pointer: channel.storage, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.int(Int64(storage.buffer.count)))
-                case .nilValue: stack.append(.int(0))
-                default: throw GoRuntimeError.typeMismatch
-                }
-            case .capacity:
-                let base = try pop(&stack)
-                switch base {
-                case .array(let values): stack.append(.int(Int64(values.count)))
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    stack.append(.int(Int64(slice.capacity)))
-                case .channel(let channel):
-                    guard case .channelStorage(let storage) = try read(
-                        pointer: channel.storage, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.int(Int64(storage.capacity)))
-                case .nilValue: stack.append(.int(0))
-                default: throw GoRuntimeError.typeMismatch
-                }
-            case .append:
-                let suppliedZero = try pop(&stack)
-                let value = try pop(&stack)
-                let base = try pop(&stack)
-                var slice: GoSliceValue
-                if case .slice(let existing) = base {
-                    slice = existing
-                } else if base == .nilValue {
-                    let cell = try heap.allocate(.array([]))
-                    slice = GoSliceValue(
-                        backing: GoPointer(cell: cell),
-                        start: 0,
-                        length: 0,
-                        capacity: 0,
-                        zeroValue: suppliedZero)
-                } else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                _ = try validatedSliceRange(slice)
-                let newLength = try checkedAdd(
-                    slice.length, 1, resource: "slice elements")
-                try requireCollectionCount(newLength, resource: "slice elements")
-                if slice.length < slice.capacity {
-                    let absoluteIndex = try checkedAdd(
-                        slice.start, slice.length, resource: "slice index")
-                    try writePointer(
-                        value,
-                        through: appending(index: absoluteIndex, to: slice.backing),
-                        heap: &heap)
-                    slice = GoSliceValue(
-                        backing: slice.backing,
-                        start: slice.start,
-                        length: newLength,
-                        capacity: slice.capacity,
-                        zeroValue: slice.zeroValue)
-                } else {
-                    var values: [GoValue] = []
-                    values.reserveCapacity(newLength)
-                    for index in 0..<slice.length {
-                        let absoluteIndex = try checkedAdd(
-                            slice.start, index, resource: "slice index")
-                        values.append(
-                            try read(
-                                pointer: appending(index: absoluteIndex, to: slice.backing),
-                                heap: heap))
-                    }
-                    values.append(value)
-                    let (doubledCapacity, overflow) = slice.capacity.multipliedReportingOverflow(by: 2)
-                    guard !overflow else {
-                        throw GoRuntimeError.resourceLimitExceeded("slice elements")
-                    }
-                    let newCapacity = max(1, max(doubledCapacity, newLength))
-                    try requireCollectionCount(newCapacity, resource: "slice elements")
-                    values.append(
-                        contentsOf: repeatElement(
-                            slice.zeroValue,
-                            count: newCapacity - values.count))
-                    let cell = try heap.allocate(.array(values))
-                    slice = GoSliceValue(
-                        backing: GoPointer(cell: cell),
-                        start: 0,
-                        length: newLength,
-                        capacity: newCapacity,
-                        zeroValue: slice.zeroValue)
-                }
-                stack.append(.slice(slice))
-            case .indexAddress:
-                guard case .int(let rawIndex) = try pop(&stack),
-                    let index = Int(exactly: rawIndex)
-                else { throw GoRuntimeError.typeMismatch }
-                let base = try pop(&stack)
-                switch base {
-                case .pointer(let pointer):
                     guard pointer.path.count < resourceLimits.maximumPointerDepth else {
                         throw GoRuntimeError.resourceLimitExceeded("pointer depth")
                     }
-                    guard case .array(let values) = try read(pointer: pointer, heap: heap),
-                        values.indices.contains(index)
-                    else { throw GoRuntimeError.indexOutOfRange }
-                    stack.append(.pointer(appending(index: index, to: pointer)))
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    guard index >= 0, index < slice.length else {
-                        throw GoRuntimeError.indexOutOfRange
-                    }
-                    let absoluteIndex = try checkedAdd(
-                        slice.start, index, resource: "slice index")
                     stack.append(
-                        .pointer(appending(index: absoluteIndex, to: slice.backing)))
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-            case .loadGlobal(let index):
-                guard index >= 0, index < executable.globalCount else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                stack.append(heap[index])
-            case .storeGlobal(let index):
-                guard index >= 0, index < executable.globalCount else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                try heap.replace(index, with: pop(&stack))
-            case .addressGlobal(let index):
-                guard index >= 0, index < executable.globalCount else {
-                    throw GoRuntimeError.invalidLocal(index)
-                }
-                stack.append(.pointer(GoPointer(cell: index)))
-            case .deferCall(let name, let argumentCount):
-                guard argumentCount >= 0, stack.count >= argumentCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - argumentCount
-                let arguments = Array(stack[start...])
-                stack.removeSubrange(start...)
-                guard activeDeferredCallCount < resourceLimits.maximumRuntimeHandles else {
-                    throw GoRuntimeError.resourceLimitExceeded("deferred calls")
-                }
-                frames[frameIndex].deferredCalls.append(
-                    DeferredCall(function: name, arguments: arguments))
-                activeDeferredCallCount += 1
-            case .panic:
-                let value = stack.popLast() ?? .string("nil")
-                frames[frameIndex].pendingExit = .panicking(value)
-            case .recover:
-                guard frames[frameIndex].isDeferredCall, frameIndex > 0,
-                    case .panicking(let value) = frames[frameIndex - 1].pendingExit
-                else {
-                    stack.append(.nilValue)
-                    break
-                }
-                let parent = frames[frameIndex - 1]
-                var resultValues: [GoValue] = []
-                let resultStart = parent.function.parameterCount
-                let resultEnd = try checkedAdd(
-                    resultStart,
-                    parent.function.returnCount,
-                    resource: "function result locals")
-                guard resultEnd <= parent.locals.count else {
-                    throw GoRuntimeError.invalidExecutable("invalid function result locals")
-                }
-                for localIndex in resultStart..<resultEnd {
-                    guard parent.locals.indices.contains(localIndex),
-                        let cell = parent.locals[localIndex], heap.contains(cell)
-                    else { throw GoRuntimeError.invalidLocal(localIndex) }
-                    resultValues.append(heap[cell])
-                }
-                frames[frameIndex - 1].pendingExit = .returning(resultValues)
-                stack.append(value)
-            case .makeMap(let entryCount):
-                guard entryCount >= 0 else {
-                    throw GoRuntimeError.invalidExecutable("negative map entry count")
-                }
-                guard entryCount <= resourceLimits.maximumMapEntries else {
-                    throw GoRuntimeError.resourceLimitExceeded("map entries")
-                }
-                let stackEntryCount = try checkedMultiply(
-                    entryCount, 2, resource: "map entries")
-                guard stack.count >= stackEntryCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                var storage = GoMapStorage()
-                storage.entries.reserveCapacity(entryCount)
-                let start = stack.count - stackEntryCount
-                for i in stride(from: start, to: stack.count, by: 2) {
-                    storage.set(stack[i], stack[i + 1])
-                }
-                stack.removeSubrange(start...)
-                let cell = try heap.allocate(.mapStorage(storage))
-                stack.append(.map(GoMapValue(storage: GoPointer(cell: cell))))
-            case .makeChannel:
-                guard case .int(let rawCapacity) = try pop(&stack),
-                    let capacity = Int(exactly: rawCapacity)
-                else { throw GoRuntimeError.typeMismatch }
-                let zero = try pop(&stack)
-                guard capacity >= 0 else {
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("makechan: size out of range"))
-                    break
-                }
-                guard capacity <= resourceLimits.maximumCollectionElements else {
-                    throw GoRuntimeError.resourceLimitExceeded("channel capacity")
-                }
-                let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: capacity)))
-                _ = zero
-                stack.append(.channel(GoChannelValue(storage: GoPointer(cell: cell))))
-            case .sendChannel:
-                let value = try pop(&stack)
-                let base = try pop(&stack)
-                switch try trySelectSend(value, to: base) {
-                case .sent:
-                    try wakeReadyBlockedSelects()
-                case .closed:
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("send on closed channel"))
-                case .blocked:
-                    if base == .nilValue {
-                        currentBlocked = true
+                        .pointer(
+                            GoPointer(
+                                cell: pointer.cell,
+                                path: pointer.path + [.field(name)])))
+                case .dereference:
+                    let pointerValue = try pop(&stack)
+                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    guard case .pointer(let pointer) = pointerValue else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    stack.append(try read(pointer: pointer, heap: heap))
+                case .setPointer:
+                    let value = try pop(&stack)
+                    let pointerValue = try pop(&stack)
+                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    guard case .pointer(let pointer) = pointerValue else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    try writePointer(value, through: pointer, heap: &heap)
+                case .makeArray(let elementCount):
+                    guard elementCount >= 0, stack.count >= elementCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - elementCount
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    stack.append(.array(values))
+                case .makeSlice(let elementCount):
+                    guard elementCount >= 0 else {
+                        throw GoRuntimeError.invalidExecutable("negative slice element count")
+                    }
+                    let requiredCount = try checkedAdd(
+                        elementCount, 1, resource: "operand stack")
+                    guard stack.count >= requiredCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - elementCount
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    let zero = try pop(&stack)
+                    let cell = try heap.allocate(.array(values))
+                    stack.append(
+                        .slice(
+                            GoSliceValue(
+                                backing: GoPointer(cell: cell),
+                                start: 0,
+                                length: values.count,
+                                capacity: values.count,
+                                zeroValue: zero)))
+                case .allocateSlice:
+                    guard case .int(let capacity) = try pop(&stack),
+                        case .int(let length) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let zero = try pop(&stack)
+                    guard length >= 0, capacity >= length,
+                        let exactLength = Int(exactly: length),
+                        let exactCapacity = Int(exactly: capacity)
+                    else { throw GoRuntimeError.invalidSliceBounds }
+                    try requireCollectionCount(exactCapacity, resource: "slice elements")
+                    let cell = try heap.allocate(
+                        .array(Array(repeating: zero, count: exactCapacity)))
+                    stack.append(
+                        .slice(
+                            GoSliceValue(
+                                backing: GoPointer(cell: cell),
+                                start: 0,
+                                length: exactLength,
+                                capacity: exactCapacity,
+                                zeroValue: zero)))
+                case .getIndex:
+                    guard case .int(let rawIndex) = try pop(&stack),
+                        let index = Int(exactly: rawIndex)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let base = try pop(&stack)
+                    switch base {
+                    case .array(let values):
+                        guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(values[index])
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        guard index >= 0, index < slice.length else {
+                            throw GoRuntimeError.indexOutOfRange
+                        }
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, index, resource: "slice index")
+                        stack.append(
+                            try read(
+                                pointer: appending(index: absoluteIndex, to: slice.backing),
+                                heap: heap))
+                    case .string(let string):
+                        let bytes = Array(string.utf8)
+                        guard bytes.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(.int(Int64(bytes[index])))
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                case .setIndex:
+                    let value = try pop(&stack)
+                    guard case .int(let rawIndex) = try pop(&stack),
+                        let index = Int(exactly: rawIndex)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let base = try pop(&stack)
+                    switch base {
+                    case .array(var values):
+                        guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
+                        values[index] = value
+                        stack.append(.array(values))
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        guard index >= 0, index < slice.length else {
+                            throw GoRuntimeError.indexOutOfRange
+                        }
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, index, resource: "slice index")
+                        try writePointer(
+                            value,
+                            through: appending(index: absoluteIndex, to: slice.backing),
+                            heap: &heap)
+                        stack.append(.slice(slice))
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                case .slice:
+                    guard case .int(let rawHigh) = try pop(&stack),
+                        case .int(let rawLow) = try pop(&stack),
+                        let low = Int(exactly: rawLow),
+                        let high = Int(exactly: rawHigh)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let base = try pop(&stack)
+                    switch base {
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        guard low >= 0, low <= high, high <= slice.capacity else {
+                            throw GoRuntimeError.invalidSliceBounds
+                        }
+                        let newStart = try checkedAdd(
+                            slice.start, low, resource: "slice bounds")
+                        stack.append(
+                            .slice(
+                                GoSliceValue(
+                                    backing: slice.backing,
+                                    start: newStart,
+                                    length: high - low,
+                                    capacity: slice.capacity - low,
+                                    zeroValue: slice.zeroValue)))
+                    case .string(let string):
+                        let bytes = Array(string.utf8)
+                        guard low >= 0, low <= high, high <= bytes.count else {
+                            throw GoRuntimeError.invalidSliceBounds
+                        }
+                        stack.append(.string(String(decoding: bytes[low..<high], as: UTF8.self)))
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                case .sliceArray:
+                    let zero = try pop(&stack)
+                    guard case .int(let rawHigh) = try pop(&stack),
+                        case .int(let rawLow) = try pop(&stack),
+                        let low = Int(exactly: rawLow),
+                        let high = Int(exactly: rawHigh),
+                        case .pointer(let pointer) = try pop(&stack),
+                        case .array(let values) = try read(pointer: pointer, heap: heap),
+                        low >= 0, low <= high, high <= values.count
+                    else { throw GoRuntimeError.invalidSliceBounds }
+                    stack.append(
+                        .slice(
+                            GoSliceValue(
+                                backing: pointer,
+                                start: low,
+                                length: high - low,
+                                capacity: values.count - low,
+                                zeroValue: zero)))
+                case .length:
+                    let base = try pop(&stack)
+                    switch base {
+                    case .array(let values): stack.append(.int(Int64(values.count)))
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        stack.append(.int(Int64(slice.length)))
+                    case .string(let string): stack.append(.int(Int64(string.utf8.count)))
+                    case .map(let mapValue):
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        stack.append(.int(Int64(storage.entries.count)))
+                    case .channel(let channel):
+                        guard case .channelStorage(let storage) = try read(
+                            pointer: channel.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        stack.append(.int(Int64(storage.buffer.count)))
+                    case .nilValue: stack.append(.int(0))
+                    default: throw GoRuntimeError.typeMismatch
+                    }
+                case .capacity:
+                    let base = try pop(&stack)
+                    switch base {
+                    case .array(let values): stack.append(.int(Int64(values.count)))
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        stack.append(.int(Int64(slice.capacity)))
+                    case .channel(let channel):
+                        guard case .channelStorage(let storage) = try read(
+                            pointer: channel.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        stack.append(.int(Int64(storage.capacity)))
+                    case .nilValue: stack.append(.int(0))
+                    default: throw GoRuntimeError.typeMismatch
+                    }
+                case .append:
+                    let suppliedZero = try pop(&stack)
+                    let value = try pop(&stack)
+                    let base = try pop(&stack)
+                    var slice: GoSliceValue
+                    if case .slice(let existing) = base {
+                        slice = existing
+                    } else if base == .nilValue {
+                        let cell = try heap.allocate(.array([]))
+                        slice = GoSliceValue(
+                            backing: GoPointer(cell: cell),
+                            start: 0,
+                            length: 0,
+                            capacity: 0,
+                            zeroValue: suppliedZero)
+                    } else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    _ = try validatedSliceRange(slice)
+                    let newLength = try checkedAdd(
+                        slice.length, 1, resource: "slice elements")
+                    try requireCollectionCount(newLength, resource: "slice elements")
+                    if slice.length < slice.capacity {
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, slice.length, resource: "slice index")
+                        try writePointer(
+                            value,
+                            through: appending(index: absoluteIndex, to: slice.backing),
+                            heap: &heap)
+                        slice = GoSliceValue(
+                            backing: slice.backing,
+                            start: slice.start,
+                            length: newLength,
+                            capacity: slice.capacity,
+                            zeroValue: slice.zeroValue)
+                    } else {
+                        var values: [GoValue] = []
+                        values.reserveCapacity(newLength)
+                        for index in 0..<slice.length {
+                            let absoluteIndex = try checkedAdd(
+                                slice.start, index, resource: "slice index")
+                            values.append(
+                                try read(
+                                    pointer: appending(index: absoluteIndex, to: slice.backing),
+                                    heap: heap))
+                        }
+                        values.append(value)
+                        let (doubledCapacity, overflow) = slice.capacity.multipliedReportingOverflow(by: 2)
+                        guard !overflow else {
+                            throw GoRuntimeError.resourceLimitExceeded("slice elements")
+                        }
+                        let newCapacity = max(1, max(doubledCapacity, newLength))
+                        try requireCollectionCount(newCapacity, resource: "slice elements")
+                        values.append(
+                            contentsOf: repeatElement(
+                                slice.zeroValue,
+                                count: newCapacity - values.count))
+                        let cell = try heap.allocate(.array(values))
+                        slice = GoSliceValue(
+                            backing: GoPointer(cell: cell),
+                            start: 0,
+                            length: newLength,
+                            capacity: newCapacity,
+                            zeroValue: slice.zeroValue)
+                    }
+                    stack.append(.slice(slice))
+                case .indexAddress:
+                    guard case .int(let rawIndex) = try pop(&stack),
+                        let index = Int(exactly: rawIndex)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let base = try pop(&stack)
+                    switch base {
+                    case .pointer(let pointer):
+                        guard pointer.path.count < resourceLimits.maximumPointerDepth else {
+                            throw GoRuntimeError.resourceLimitExceeded("pointer depth")
+                        }
+                        guard case .array(let values) = try read(pointer: pointer, heap: heap),
+                            values.indices.contains(index)
+                        else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(.pointer(appending(index: index, to: pointer)))
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        guard index >= 0, index < slice.length else {
+                            throw GoRuntimeError.indexOutOfRange
+                        }
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, index, resource: "slice index")
+                        stack.append(
+                            .pointer(appending(index: absoluteIndex, to: slice.backing)))
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                case .loadGlobal(let index):
+                    guard index >= 0, index < executable.globalCount else {
+                        throw GoRuntimeError.invalidLocal(index)
+                    }
+                    stack.append(heap[index])
+                case .storeGlobal(let index):
+                    guard index >= 0, index < executable.globalCount else {
+                        throw GoRuntimeError.invalidLocal(index)
+                    }
+                    try heap.replace(index, with: pop(&stack))
+                case .addressGlobal(let index):
+                    guard index >= 0, index < executable.globalCount else {
+                        throw GoRuntimeError.invalidLocal(index)
+                    }
+                    stack.append(.pointer(GoPointer(cell: index)))
+                case .deferCall(let name, let argumentCount):
+                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - argumentCount
+                    let arguments = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    guard activeDeferredCallCount < resourceLimits.maximumRuntimeHandles else {
+                        throw GoRuntimeError.resourceLimitExceeded("deferred calls")
+                    }
+                    frames[frameIndex].deferredCalls.append(
+                        DeferredCall(function: name, arguments: arguments))
+                    activeDeferredCallCount += 1
+                case .panic:
+                    let value = stack.popLast() ?? .string("nil")
+                    frames[frameIndex].pendingExit = .panicking(value)
+                case .recover:
+                    guard frames[frameIndex].isDeferredCall, frameIndex > 0,
+                        case .panicking(let value) = frames[frameIndex - 1].pendingExit
+                    else {
+                        stack.append(.nilValue)
                         break
                     }
-                    guard case .channel(let channel) = base,
-                        case .channelStorage(var storage) = try read(
-                            pointer: channel.storage, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    storage.sendWaiters.append(GoChannelSendWaiter(
-                        goroutineID: currentGoroutineID,
-                        value: value,
-                        waitSequence: allocateWaitSequence()))
-                    try writePointer(
-                        .channelStorage(storage),
-                        through: channel.storage,
-                        heap: &heap)
-                    currentBlocked = true
-                }
-            case .receiveChannel(let commaOK):
-                let zero = try pop(&stack)
-                let base = try pop(&stack)
-                switch try trySelectReceive(from: base, zero: zero) {
-                case .received(let value, let ok):
+                    let parent = frames[frameIndex - 1]
+                    var resultValues: [GoValue] = []
+                    let resultStart = parent.function.parameterCount
+                    let resultEnd = try checkedAdd(
+                        resultStart,
+                        parent.function.returnCount,
+                        resource: "function result locals")
+                    guard resultEnd <= parent.locals.count else {
+                        throw GoRuntimeError.invalidExecutable("invalid function result locals")
+                    }
+                    for localIndex in resultStart..<resultEnd {
+                        guard parent.locals.indices.contains(localIndex),
+                            let cell = parent.locals[localIndex], heap.contains(cell)
+                        else { throw GoRuntimeError.invalidLocal(localIndex) }
+                        resultValues.append(heap[cell])
+                    }
+                    frames[frameIndex - 1].pendingExit = .returning(resultValues)
                     stack.append(value)
-                    if commaOK { stack.append(.bool(ok)) }
-                    try wakeReadyBlockedSelects()
-                case .blocked:
-                    if base == .nilValue {
-                        currentBlocked = true
-                        break
+                case .makeMap(let entryCount):
+                    guard entryCount >= 0 else {
+                        throw GoRuntimeError.invalidExecutable("negative map entry count")
                     }
-                    guard case .channel(let channel) = base,
-                        case .channelStorage(var storage) = try read(
-                            pointer: channel.storage, heap: heap)
+                    guard entryCount <= resourceLimits.maximumMapEntries else {
+                        throw GoRuntimeError.resourceLimitExceeded("map entries")
+                    }
+                    let stackEntryCount = try checkedMultiply(
+                        entryCount, 2, resource: "map entries")
+                    guard stack.count >= stackEntryCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    var storage = GoMapStorage()
+                    storage.entries.reserveCapacity(entryCount)
+                    let start = stack.count - stackEntryCount
+                    for i in stride(from: start, to: stack.count, by: 2) {
+                        storage.set(stack[i], stack[i + 1])
+                    }
+                    stack.removeSubrange(start...)
+                    let cell = try heap.allocate(.mapStorage(storage))
+                    stack.append(.map(GoMapValue(storage: GoPointer(cell: cell))))
+                case .makeChannel:
+                    guard case .int(let rawCapacity) = try pop(&stack),
+                        let capacity = Int(exactly: rawCapacity)
                     else { throw GoRuntimeError.typeMismatch }
-                    storage.receiveWaiters.append(GoChannelReceiveWaiter(
-                        goroutineID: currentGoroutineID,
-                        commaOK: commaOK,
-                        zeroValue: zero,
-                        waitSequence: allocateWaitSequence()))
-                    try writePointer(
-                        .channelStorage(storage),
-                        through: channel.storage,
-                        heap: &heap)
-                    currentBlocked = true
-                }
-            case .closeChannel:
-                let base = try pop(&stack)
-                guard case .channel(let channel) = base else {
-                    if base == .nilValue {
+                    let zero = try pop(&stack)
+                    guard capacity >= 0 else {
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("close of nil channel"))
+                            .string("makechan: size out of range"))
                         break
                     }
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .channelStorage(var storage) = try read(
-                    pointer: channel.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                guard !storage.closed else {
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("close of closed channel"))
-                    break
-                }
-                storage.closed = true
-                let receivers = storage.receiveWaiters
-                let senders = storage.sendWaiters
-                storage.receiveWaiters.removeAll()
-                storage.sendWaiters.removeAll()
-                try writePointer(
-                    .channelStorage(storage),
-                    through: channel.storage,
-                    heap: &heap)
-                for receiver in receivers {
-                    var values = [receiver.zeroValue]
-                    if receiver.commaOK { values.append(.bool(false)) }
-                    try wakeGoroutine(receiver.goroutineID, values: values)
-                }
-                for sender in senders {
-                    try wakeGoroutine(
-                        sender.goroutineID,
-                        panicValue: .string("send on closed channel"))
-                }
-                try wakeReadyBlockedSelects()
-            case .select(let selectCases, let defaultTarget):
-                var evaluated: [EvaluatedSelectCase] = []
-                evaluated.reserveCapacity(selectCases.count)
-                for selectCase in selectCases {
-                    switch selectCase {
-                    case .send(let channelLocal, let valueLocal, let target):
-                        evaluated.append(.send(
-                            channel: try localValue(channelLocal, in: frames[frameIndex]),
-                            value: try localValue(valueLocal, in: frames[frameIndex]),
-                            target: target))
-                    case .receive(
-                        let channelLocal, let destinationLocal, let okLocal,
-                        let zeroLocal, let target):
-                        evaluated.append(.receive(
-                            channel: try localValue(channelLocal, in: frames[frameIndex]),
-                            destination: destinationLocal,
-                            okDestination: okLocal,
-                            zero: try localValue(zeroLocal, in: frames[frameIndex]),
-                            target: target))
+                    guard capacity <= resourceLimits.maximumCollectionElements else {
+                        throw GoRuntimeError.resourceLimitExceeded("channel capacity")
                     }
-                }
-                var readyIndices: [Int] = []
-                for index in evaluated.indices
-                where try selectCaseIsReady(evaluated[index]) {
-                    readyIndices.append(index)
-                }
-                if readyIndices.isEmpty, let defaultTarget {
-                    try jump(to: defaultTarget, frame: &frames[frameIndex])
-                    break
-                }
-                guard !readyIndices.isEmpty else {
-                    blockedSelects[currentGoroutineID] = BlockedSelect(
-                        cases: evaluated,
-                        waitSequence: allocateWaitSequence())
-                    currentBlocked = true
-                    break
-                }
-                let selected = evaluated[
-                    readyIndices[selectRandomIndex(count: readyIndices.count)]]
-                switch selected {
-                case .send(let channel, let value, let target):
-                    switch try trySelectSend(value, to: channel) {
+                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: capacity)))
+                    _ = zero
+                    stack.append(.channel(GoChannelValue(storage: GoPointer(cell: cell))))
+                case .sendChannel:
+                    let value = try pop(&stack)
+                    let base = try pop(&stack)
+                    switch try trySelectSend(value, to: base) {
                     case .sent:
-                        try jump(to: target, frame: &frames[frameIndex])
+                        try wakeReadyBlockedSelects()
                     case .closed:
                         frames[frameIndex].pendingExit = .panicking(
                             .string("send on closed channel"))
                     case .blocked:
-                        throw GoRuntimeError.typeMismatch
+                        if base == .nilValue {
+                            currentBlocked = true
+                            break
+                        }
+                        guard case .channel(let channel) = base,
+                            case .channelStorage(var storage) = try read(
+                                pointer: channel.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        storage.sendWaiters.append(GoChannelSendWaiter(
+                            goroutineID: currentGoroutineID,
+                            value: value,
+                            waitSequence: allocateWaitSequence()))
+                        try writePointer(
+                            .channelStorage(storage),
+                            through: channel.storage,
+                            heap: &heap)
+                        currentBlocked = true
                     }
-                case .receive(
-                    let channel, let destination, let okDestination, let zero, let target):
-                    switch try trySelectReceive(from: channel, zero: zero) {
+                case .receiveChannel(let commaOK):
+                    let zero = try pop(&stack)
+                    let base = try pop(&stack)
+                    switch try trySelectReceive(from: base, zero: zero) {
                     case .received(let value, let ok):
-                        if let destination {
-                            try storeLocal(value, at: destination, in: &frames[frameIndex])
-                        }
-                        if let okDestination {
-                            try storeLocal(.bool(ok), at: okDestination, in: &frames[frameIndex])
-                        }
-                        try jump(to: target, frame: &frames[frameIndex])
+                        stack.append(value)
+                        if commaOK { stack.append(.bool(ok)) }
+                        try wakeReadyBlockedSelects()
                     case .blocked:
+                        if base == .nilValue {
+                            currentBlocked = true
+                            break
+                        }
+                        guard case .channel(let channel) = base,
+                            case .channelStorage(var storage) = try read(
+                                pointer: channel.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        storage.receiveWaiters.append(GoChannelReceiveWaiter(
+                            goroutineID: currentGoroutineID,
+                            commaOK: commaOK,
+                            zeroValue: zero,
+                            waitSequence: allocateWaitSequence()))
+                        try writePointer(
+                            .channelStorage(storage),
+                            through: channel.storage,
+                            heap: &heap)
+                        currentBlocked = true
+                    }
+                case .closeChannel:
+                    let base = try pop(&stack)
+                    guard case .channel(let channel) = base else {
+                        if base == .nilValue {
+                            frames[frameIndex].pendingExit = .panicking(
+                                .string("close of nil channel"))
+                            break
+                        }
                         throw GoRuntimeError.typeMismatch
                     }
-                }
-                try wakeReadyBlockedSelects()
-            case .timeAfter:
-                guard case .int(let nanoseconds) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
-                let timerChannel = GoValue.channel(
-                    GoChannelValue(storage: GoPointer(cell: cell)))
-                stack.append(timerChannel)
-                try reserveTimer()
-                let runtimeHandleID: Int
-                do {
-                    runtimeHandleID = try retainRuntimeHandle(timerChannel)
-                } catch {
-                    finishTimer()
-                    throw error
-                }
-                let delay = max(0, Double(nanoseconds) / 1_000_000_000)
-                scheduleRuntimeWork(after: delay) {
-                    defer {
-                        runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
-                        finishTimer()
+                    guard case .channelStorage(var storage) = try read(
+                        pointer: channel.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    guard !storage.closed else {
+                        frames[frameIndex].pendingExit = .panicking(
+                            .string("close of closed channel"))
+                        break
                     }
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    do {
-                        let timestamp = GoValue.int(runtimeTimestamp())
-                        switch try trySelectSend(timestamp, to: timerChannel) {
+                    storage.closed = true
+                    let receivers = storage.receiveWaiters
+                    let senders = storage.sendWaiters
+                    storage.receiveWaiters.removeAll()
+                    storage.sendWaiters.removeAll()
+                    try writePointer(
+                        .channelStorage(storage),
+                        through: channel.storage,
+                        heap: &heap)
+                    for receiver in receivers {
+                        var values = [receiver.zeroValue]
+                        if receiver.commaOK { values.append(.bool(false)) }
+                        try wakeGoroutine(receiver.goroutineID, values: values)
+                    }
+                    for sender in senders {
+                        try wakeGoroutine(
+                            sender.goroutineID,
+                            panicValue: .string("send on closed channel"))
+                    }
+                    try wakeReadyBlockedSelects()
+                case .select(let selectCases, let defaultTarget):
+                    var evaluated: [EvaluatedSelectCase] = []
+                    evaluated.reserveCapacity(selectCases.count)
+                    for selectCase in selectCases {
+                        switch selectCase {
+                        case .send(let channelLocal, let valueLocal, let target):
+                            evaluated.append(.send(
+                                channel: try localValue(channelLocal, in: frames[frameIndex]),
+                                value: try localValue(valueLocal, in: frames[frameIndex]),
+                                target: target))
+                        case .receive(
+                            let channelLocal, let destinationLocal, let okLocal,
+                            let zeroLocal, let target):
+                            evaluated.append(.receive(
+                                channel: try localValue(channelLocal, in: frames[frameIndex]),
+                                destination: destinationLocal,
+                                okDestination: okLocal,
+                                zero: try localValue(zeroLocal, in: frames[frameIndex]),
+                                target: target))
+                        }
+                    }
+                    var readyIndices: [Int] = []
+                    for index in evaluated.indices
+                    where try selectCaseIsReady(evaluated[index]) {
+                        readyIndices.append(index)
+                    }
+                    if readyIndices.isEmpty, let defaultTarget {
+                        try jump(to: defaultTarget, frame: &frames[frameIndex])
+                        break
+                    }
+                    guard !readyIndices.isEmpty else {
+                        blockedSelects[currentGoroutineID] = BlockedSelect(
+                            cases: evaluated,
+                            waitSequence: allocateWaitSequence())
+                        currentBlocked = true
+                        break
+                    }
+                    let selected = evaluated[
+                        readyIndices[selectRandomIndex(count: readyIndices.count)]]
+                    switch selected {
+                    case .send(let channel, let value, let target):
+                        switch try trySelectSend(value, to: channel) {
                         case .sent:
-                            try wakeReadyBlockedSelects()
-                        case .blocked, .closed:
-                            asynchronousError = .typeMismatch
+                            try jump(to: target, frame: &frames[frameIndex])
+                        case .closed:
+                            frames[frameIndex].pendingExit = .panicking(
+                                .string("send on closed channel"))
+                        case .blocked:
+                            throw GoRuntimeError.typeMismatch
                         }
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
-                    } catch {
-                        asynchronousError = .typeMismatch
+                    case .receive(
+                        let channel, let destination, let okDestination, let zero, let target):
+                        switch try trySelectReceive(from: channel, zero: zero) {
+                        case .received(let value, let ok):
+                            if let destination {
+                                try storeLocal(value, at: destination, in: &frames[frameIndex])
+                            }
+                            if let okDestination {
+                                try storeLocal(.bool(ok), at: okDestination, in: &frames[frameIndex])
+                            }
+                            try jump(to: target, frame: &frames[frameIndex])
+                        case .blocked:
+                            throw GoRuntimeError.typeMismatch
+                        }
                     }
-                }
-            case .makeMutex:
-                let cell = try heap.allocate(.mutexStorage(GoMutexStorage()))
-                stack.append(.mutex(GoMutexValue(storage: GoPointer(cell: cell))))
-            case .timeSleep:
-                guard case .int(let nanoseconds) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                let delay = max(0, Double(nanoseconds) / 1_000_000_000)
-                let sleepingID = currentGoroutineID
-                try reserveTimer()
-                scheduleRuntimeWork(after: delay) {
-                    defer { finishTimer() }
-                    guard executionIsActive, asynchronousError == nil else { return }
+                    try wakeReadyBlockedSelects()
+                case .timeAfter:
+                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let timerChannel = GoValue.channel(
+                        GoChannelValue(storage: GoPointer(cell: cell)))
+                    stack.append(timerChannel)
+                    try reserveTimer()
+                    let runtimeHandleID: Int
                     do {
-                        try wakeGoroutine(sleepingID)
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
+                        runtimeHandleID = try retainRuntimeHandle(timerChannel)
                     } catch {
-                        asynchronousError = .typeMismatch
+                        finishTimer()
+                        throw error
                     }
-                }
-                currentBlocked = true
-            case .timeTick:
-                guard case .int(let nanoseconds) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard nanoseconds > 0 else {
-                    // time.Tick returns a nil channel for a non-positive duration.
-                    stack.append(.nilValue)
-                    break
-                }
-                let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
-                let tickChannel = GoValue.channel(
-                    GoChannelValue(storage: GoPointer(cell: cell)))
-                stack.append(tickChannel)
-                try reserveTimer()
-                let runtimeHandleID: Int
-                do {
-                    runtimeHandleID = try retainRuntimeHandle(tickChannel)
-                } catch {
-                    finishTimer()
-                    throw error
-                }
-                let interval = Double(nanoseconds) / 1_000_000_000
-                var tickIsActive = true
-                func finishTick() {
-                    guard tickIsActive else { return }
-                    tickIsActive = false
-                    runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
-                    finishTimer()
-                }
-                func scheduleTick() {
-                    scheduleRuntimeWork(after: interval) {
-                        guard executionIsActive, asynchronousError == nil else {
-                            finishTick()
-                            return
+                    let delay = max(0, Double(nanoseconds) / 1_000_000_000)
+                    scheduleRuntimeWork(after: delay) {
+                        defer {
+                            runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
+                            finishTimer()
                         }
+                        guard executionIsActive, asynchronousError == nil else { return }
                         do {
                             let timestamp = GoValue.int(runtimeTimestamp())
-                            switch try trySelectSend(timestamp, to: tickChannel) {
+                            switch try trySelectSend(timestamp, to: timerChannel) {
                             case .sent:
                                 try wakeReadyBlockedSelects()
                             case .blocked, .closed:
-                                break
+                                asynchronousError = .typeMismatch
                             }
                         } catch let error as GoRuntimeError {
                             asynchronousError = error
-                            finishTick()
-                            return
                         } catch {
                             asynchronousError = .typeMismatch
-                            finishTick()
-                            return
                         }
-                        scheduleTick()
                     }
-                }
-                scheduleTick()
-            case .contextBackground:
-                let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
-                let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
-                stack.append(.context(GoContextValue(storage: GoPointer(cell: ctxCell))))
-            case .contextWithCancel:
-                guard case .context(let parent) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
-                let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
-                let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
-                // Register child in parent for propagation
-                guard case .contextStorage(var parentStorage) = try read(
-                    pointer: parent.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                parentStorage.children.append(GoPointer(cell: ctxCell))
-                try writePointer(
-                    .contextStorage(parentStorage), through: parent.storage, heap: &heap)
-                // Push ctx then cancel (cancel is same context reference used to cancel)
-                stack.append(.context(childCtx))
-                stack.append(.context(childCtx))
-            case .contextWithTimeout:
-                guard case .int(let nanoseconds) = try pop(&stack),
-                    case .context(let parent) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
-                let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
-                let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
-                // Register child in parent
-                guard case .contextStorage(var parentStorage) = try read(
-                    pointer: parent.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                parentStorage.children.append(GoPointer(cell: ctxCell))
-                try writePointer(
-                    .contextStorage(parentStorage), through: parent.storage, heap: &heap)
-                // Schedule auto-cancel after timeout
-                try reserveTimer()
-                let runtimeHandleID: Int
-                do {
-                    runtimeHandleID = try retainRuntimeHandle(.context(childCtx))
-                } catch {
-                    finishTimer()
-                    throw error
-                }
-                let delay = max(0, Double(nanoseconds) / 1_000_000_000)
-                scheduleRuntimeWork(after: delay) {
-                    defer {
+                case .makeMutex:
+                    let cell = try heap.allocate(.mutexStorage(GoMutexStorage()))
+                    stack.append(.mutex(GoMutexValue(storage: GoPointer(cell: cell))))
+                case .timeSleep:
+                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    let delay = max(0, Double(nanoseconds) / 1_000_000_000)
+                    let sleepingID = currentGoroutineID
+                    try reserveTimer()
+                    scheduleRuntimeWork(after: delay) {
+                        defer { finishTimer() }
+                        guard executionIsActive, asynchronousError == nil else { return }
+                        do {
+                            try wakeGoroutine(sleepingID)
+                        } catch let error as GoRuntimeError {
+                            asynchronousError = error
+                        } catch {
+                            asynchronousError = .typeMismatch
+                        }
+                    }
+                    currentBlocked = true
+                case .timeTick:
+                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard nanoseconds > 0 else {
+                        // time.Tick returns a nil channel for a non-positive duration.
+                        stack.append(.nilValue)
+                        break
+                    }
+                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let tickChannel = GoValue.channel(
+                        GoChannelValue(storage: GoPointer(cell: cell)))
+                    stack.append(tickChannel)
+                    try reserveTimer()
+                    let runtimeHandleID: Int
+                    do {
+                        runtimeHandleID = try retainRuntimeHandle(tickChannel)
+                    } catch {
+                        finishTimer()
+                        throw error
+                    }
+                    let interval = Double(nanoseconds) / 1_000_000_000
+                    var tickIsActive = true
+                    func finishTick() {
+                        guard tickIsActive else { return }
+                        tickIsActive = false
                         runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
                         finishTimer()
                     }
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    do {
-                        try cancelContextTree(
-                            GoPointer(cell: ctxCell),
-                            message: "context deadline exceeded")
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
-                    } catch {
-                        asynchronousError = .typeMismatch
+                    func scheduleTick() {
+                        scheduleRuntimeWork(after: interval) {
+                            guard executionIsActive, asynchronousError == nil else {
+                                finishTick()
+                                return
+                            }
+                            do {
+                                let timestamp = GoValue.int(runtimeTimestamp())
+                                switch try trySelectSend(timestamp, to: tickChannel) {
+                                case .sent:
+                                    try wakeReadyBlockedSelects()
+                                case .blocked, .closed:
+                                    break
+                                }
+                            } catch let error as GoRuntimeError {
+                                asynchronousError = error
+                                finishTick()
+                                return
+                            } catch {
+                                asynchronousError = .typeMismatch
+                                finishTick()
+                                return
+                            }
+                            scheduleTick()
+                        }
                     }
-                }
-                stack.append(.context(childCtx))
-                stack.append(.context(childCtx))
-            case .contextDone:
-                guard case .context(let ctx) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .contextStorage(let ctxStorage) = try read(
-                    pointer: ctx.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                let doneChannel = GoValue.channel(
-                    GoChannelValue(storage: ctxStorage.doneChannel))
-                stack.append(doneChannel)
-            case .contextErr:
-                guard case .context(let ctx) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .contextStorage(let ctxStorage) = try read(
-                    pointer: ctx.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                if let message = ctxStorage.errorMessage {
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error", value: .string(message))))
-                } else {
-                    stack.append(.nilValue)
-                }
-            case .cancelContext:
-                guard case .context(let ctx) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                try cancelContextTree(ctx.storage, message: "context canceled")
-            case .netDial:
-                guard case .string(let address) = try pop(&stack),
-                    case .string(let network) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                guard let processContext else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                guard network == "tcp" else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: unsupported network \(network)"))))
-                    break
-                }
-                // Parse "host:port"
-                let parts = address.split(separator: ":", maxSplits: 1)
-                guard parts.count == 2,
-                    let port = UInt16(parts[1]),
-                    let ip = IPv4Address(String(parts[0]))
-                else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: invalid address \(address)"))))
-                    break
-                }
-                guard let fd = processContext.tcpSocket() else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: socket creation failed"))))
-                    break
-                }
-                let dialingID = currentGoroutineID
-                processContext.tcpConnect(fd, to: ip, port: port) {
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    do {
-                        try wakeGoroutine(
-                            dialingID,
-                            values: [
-                                .netConn(GoNetConnValue(
-                                    fd: fd, network: "tcp",
-                                    remoteAddr: address)),
-                                .nilValue,
-                            ])
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
-                    } catch {
-                        asynchronousError = .typeMismatch
+                    scheduleTick()
+                case .contextBackground:
+                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
+                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
+                    stack.append(.context(GoContextValue(storage: GoPointer(cell: ctxCell))))
+                case .contextWithCancel:
+                    guard case .context(let parent) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
                     }
-                }
-                currentBlocked = true
-            case .netListen:
-                guard case .string(let address) = try pop(&stack),
-                    case .string(let network) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                guard let processContext else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                guard network == "tcp" else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: unsupported network \(network)"))))
-                    break
-                }
-                // Parse ":port" or "host:port"
-                let parts = address.split(separator: ":", maxSplits: 1)
-                let port: UInt16
-                if parts.count == 2 {
-                    guard let p = UInt16(parts[1]) else {
+                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
+                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
+                    let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
+                    // Register child in parent for propagation
+                    guard case .contextStorage(var parentStorage) = try read(
+                        pointer: parent.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    parentStorage.children.append(GoPointer(cell: ctxCell))
+                    try writePointer(
+                        .contextStorage(parentStorage), through: parent.storage, heap: &heap)
+                    // Push ctx then cancel (cancel is same context reference used to cancel)
+                    stack.append(.context(childCtx))
+                    stack.append(.context(childCtx))
+                case .contextWithTimeout:
+                    guard case .int(let nanoseconds) = try pop(&stack),
+                        case .context(let parent) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
+                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
+                    let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
+                    // Register child in parent
+                    guard case .contextStorage(var parentStorage) = try read(
+                        pointer: parent.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    parentStorage.children.append(GoPointer(cell: ctxCell))
+                    try writePointer(
+                        .contextStorage(parentStorage), through: parent.storage, heap: &heap)
+                    // Schedule auto-cancel after timeout
+                    try reserveTimer()
+                    let runtimeHandleID: Int
+                    do {
+                        runtimeHandleID = try retainRuntimeHandle(.context(childCtx))
+                    } catch {
+                        finishTimer()
+                        throw error
+                    }
+                    let delay = max(0, Double(nanoseconds) / 1_000_000_000)
+                    scheduleRuntimeWork(after: delay) {
+                        defer {
+                            runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
+                            finishTimer()
+                        }
+                        guard executionIsActive, asynchronousError == nil else { return }
+                        do {
+                            try cancelContextTree(
+                                GoPointer(cell: ctxCell),
+                                message: "context deadline exceeded")
+                        } catch let error as GoRuntimeError {
+                            asynchronousError = error
+                        } catch {
+                            asynchronousError = .typeMismatch
+                        }
+                    }
+                    stack.append(.context(childCtx))
+                    stack.append(.context(childCtx))
+                case .contextDone:
+                    guard case .context(let ctx) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard case .contextStorage(let ctxStorage) = try read(
+                        pointer: ctx.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let doneChannel = GoValue.channel(
+                        GoChannelValue(storage: ctxStorage.doneChannel))
+                    stack.append(doneChannel)
+                case .contextErr:
+                    guard case .context(let ctx) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard case .contextStorage(let ctxStorage) = try read(
+                        pointer: ctx.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    if let message = ctxStorage.errorMessage {
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error", value: .string(message))))
+                    } else {
+                        stack.append(.nilValue)
+                    }
+                case .cancelContext:
+                    guard case .context(let ctx) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    try cancelContextTree(ctx.storage, message: "context canceled")
+                case .netDial:
+                    guard case .string(let address) = try pop(&stack),
+                        case .string(let network) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    guard let processContext else {
                         stack.append(.nilValue)
                         stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
-                            value: .string("net: invalid port in address \(address)"))))
+                            value: .string("net: network not available"))))
                         break
                     }
-                    port = p
-                } else if parts.count == 1, let p = UInt16(parts[0]) {
-                    port = p
-                } else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: invalid address \(address)"))))
-                    break
-                }
-                guard let fd = processContext.tcpSocket() else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: socket creation failed"))))
-                    break
-                }
-                processContext.bind(fd, address: nil, port: port)
-                guard processContext.tcpListen(fd, port: port) else {
-                    processContext.close(fd)
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: listen on \(address) failed"))))
-                    break
-                }
-                stack.append(.netListener(GoNetListenerValue(
-                    fd: fd, network: "tcp", localAddr: address)))
-                stack.append(.nilValue)
-            case .netAccept:
-                guard case .netListener(let listener) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard let processContext else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                let acceptingID = currentGoroutineID
-                processContext.tcpAccept(listener.fd) { acceptedFD in
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    do {
-                        try wakeGoroutine(
-                            acceptingID,
-                            values: [
-                                .netConn(GoNetConnValue(
-                                    fd: acceptedFD, network: "tcp",
-                                    remoteAddr: "")),
-                                .nilValue,
-                            ])
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
-                    } catch {
-                        asynchronousError = .typeMismatch
+                    guard network == "tcp" else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: unsupported network \(network)"))))
+                        break
                     }
-                }
-                currentBlocked = true
-            case .netRead:
-                guard case .slice(let buf) = try pop(&stack),
-                    case .netConn(let conn) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                _ = try validatedSliceRange(buf)
-                guard buf.length <= resourceLimits.maximumNetworkTransferBytes else {
-                    throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
-                }
-                guard let processContext else {
-                    stack.append(.int(0))
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                let readingID = currentGoroutineID
-                let maxBytes = buf.length
-                processContext.tcpRecv(conn.fd, max: maxBytes) { bytes in
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    do {
-                        guard bytes.count <= maxBytes,
-                            bytes.count <= resourceLimits.maximumNetworkTransferBytes
-                        else {
-                            throw GoRuntimeError.resourceLimitExceeded(
-                                "network transfer bytes")
-                        }
-                        if bytes.isEmpty {
-                            // EOF
+                    // Parse "host:port"
+                    let parts = address.split(separator: ":", maxSplits: 1)
+                    guard parts.count == 2,
+                        let port = UInt16(parts[1]),
+                        let ip = IPv4Address(String(parts[0]))
+                    else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: invalid address \(address)"))))
+                        break
+                    }
+                    guard let fd = processContext.tcpSocket() else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: socket creation failed"))))
+                        break
+                    }
+                    let dialingID = currentGoroutineID
+                    processContext.tcpConnect(fd, to: ip, port: port) {
+                        guard executionIsActive, asynchronousError == nil else { return }
+                        do {
                             try wakeGoroutine(
-                                readingID,
+                                dialingID,
                                 values: [
-                                    .int(0),
-                                    .interface(GoInterfaceValue(
-                                        typeName: "error", value: .string("EOF"))),
-                                ])
-                        } else {
-                            let range = try validatedSliceRange(buf)
-                            guard bytes.count <= range.count,
-                                case .array(var backing) = try read(
-                                    pointer: buf.backing, heap: heap)
-                            else {
-                                throw GoRuntimeError.invalidSliceBounds
-                            }
-                            for (offset, byte) in bytes.enumerated() {
-                                backing[range.lowerBound + offset] = .int(Int64(byte))
-                            }
-                            try writePointer(
-                                .array(backing), through: buf.backing, heap: &heap)
-                            try wakeGoroutine(
-                                readingID,
-                                values: [
-                                    .int(Int64(bytes.count)),
+                                    .netConn(GoNetConnValue(
+                                        fd: fd, network: "tcp",
+                                        remoteAddr: address)),
                                     .nilValue,
                                 ])
+                        } catch let error as GoRuntimeError {
+                            asynchronousError = error
+                        } catch {
+                            asynchronousError = .typeMismatch
                         }
-                    } catch let error as GoRuntimeError {
-                        asynchronousError = error
-                    } catch {
-                        asynchronousError = .typeMismatch
                     }
-                }
-                currentBlocked = true
-            case .netWrite:
-                guard case .slice(let buf) = try pop(&stack),
-                    case .netConn(let conn) = try pop(&stack)
-                else { throw GoRuntimeError.typeMismatch }
-                let range = try validatedSliceRange(buf)
-                guard range.count <= resourceLimits.maximumNetworkTransferBytes else {
-                    throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
-                }
-                guard let processContext else {
-                    stack.append(.int(0))
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                guard case .array(let backing) = try read(pointer: buf.backing, heap: heap)
-                else { throw GoRuntimeError.invalidSliceBounds }
-                var bytes: [UInt8] = []
-                bytes.reserveCapacity(range.count)
-                for index in range {
-                    guard case .int(let byte) = backing[index] else {
+                    currentBlocked = true
+                case .netListen:
+                    guard case .string(let address) = try pop(&stack),
+                        case .string(let network) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    guard let processContext else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: network not available"))))
+                        break
+                    }
+                    guard network == "tcp" else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: unsupported network \(network)"))))
+                        break
+                    }
+                    // Parse ":port" or "host:port"
+                    let parts = address.split(separator: ":", maxSplits: 1)
+                    let port: UInt16
+                    if parts.count == 2 {
+                        guard let p = UInt16(parts[1]) else {
+                            stack.append(.nilValue)
+                            stack.append(.interface(GoInterfaceValue(
+                                typeName: "error",
+                                value: .string("net: invalid port in address \(address)"))))
+                            break
+                        }
+                        port = p
+                    } else if parts.count == 1, let p = UInt16(parts[0]) {
+                        port = p
+                    } else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: invalid address \(address)"))))
+                        break
+                    }
+                    guard let fd = processContext.tcpSocket() else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: socket creation failed"))))
+                        break
+                    }
+                    processContext.bind(fd, address: nil, port: port)
+                    guard processContext.tcpListen(fd, port: port) else {
+                        processContext.close(fd)
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: listen on \(address) failed"))))
+                        break
+                    }
+                    stack.append(.netListener(GoNetListenerValue(
+                        fd: fd, network: "tcp", localAddr: address)))
+                    stack.append(.nilValue)
+                case .netAccept:
+                    guard case .netListener(let listener) = try pop(&stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    bytes.append(UInt8(truncatingIfNeeded: byte))
-                }
-                let sent = processContext.tcpSend(conn.fd, bytes)
-                stack.append(.int(sent ? Int64(bytes.count) : 0))
-                stack.append(sent ? .nilValue : .interface(GoInterfaceValue(
-                    typeName: "error", value: .string("net: write failed"))))
-            case .netClose:
-                let value = try pop(&stack)
-                let fd: Int
-                switch value {
-                case .netConn(let conn): fd = conn.fd
-                case .netListener(let ln): fd = ln.fd
-                default: throw GoRuntimeError.typeMismatch
-                }
-                if let processContext {
-                    processContext.close(fd)
-                }
-                stack.append(.nilValue)
-            case .netLookupHost:
-                guard case .string(let host) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard processContext != nil else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: network not available"))))
-                    break
-                }
-                // Synchronous lookup via /etc/hosts or DNS (uses EventLoop)
-                let runtimeHandleID = try retainRuntimeHandle(.string(host))
-                // Use a simple hosts-file lookup synchronously if possible;
-                // full async DNS would require ProcessContext.resolve which is async.
-                // For M5, resolve synchronously using the event loop.
-                if let ip = IPv4Address(host) {
-                    let addrStr = ip.description
-                    let backingCell = try heap.allocate(.array([.string(addrStr)]))
-                    let slice = GoSliceValue(
-                        backing: GoPointer(cell: backingCell),
-                        start: 0, length: 1, capacity: 1,
-                        zeroValue: .string(""))
-                    stack.append(.slice(slice))
-                    stack.append(.nilValue)
-                    runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
-                } else {
-                    // For non-literal hosts, return the host itself as an address
-                    // (full DNS requires async resolve which is beyond M5 minimal)
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net: lookup \(host): no such host"))))
-                    runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
-                }
-            case .httpHandleFunc(let handler):
-                guard case .string(let pattern) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                if httpHandlers[pattern] == nil,
-                    httpHandlers.count >= resourceLimits.maximumRuntimeHandles
-                {
-                    throw GoRuntimeError.resourceLimitExceeded("HTTP handlers")
-                }
-                httpHandlers[pattern] = handler
-            case .httpListenAndServe:
-                guard case .string(let addr) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard let processContext else {
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: network not available"))))
-                    break
-                }
-                // Parse ":port"
-                let parts = addr.split(separator: ":", maxSplits: 1)
-                let port: UInt16
-                if parts.count == 2, let p = UInt16(parts[1]) {
-                    port = p
-                } else if parts.count == 1, let p = UInt16(parts[0]) {
-                    port = p
-                } else {
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: invalid address \(addr)"))))
-                    break
-                }
-                guard let fd = processContext.tcpSocket() else {
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: socket creation failed"))))
-                    break
-                }
-                processContext.bind(fd, address: nil, port: port)
-                guard processContext.tcpListen(fd, port: port) else {
-                    processContext.close(fd)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: listen failed"))))
-                    break
-                }
-                // Spawn an internal accept loop using the event loop
-                let handlersCopy = httpHandlers
-                func acceptLoop() {
-                    processContext.tcpAccept(fd) { acceptedFD in
+                    guard let processContext else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: network not available"))))
+                        break
+                    }
+                    let acceptingID = currentGoroutineID
+                    processContext.tcpAccept(listener.fd) { acceptedFD in
                         guard executionIsActive, asynchronousError == nil else { return }
-                        // Read HTTP request
+                        do {
+                            try wakeGoroutine(
+                                acceptingID,
+                                values: [
+                                    .netConn(GoNetConnValue(
+                                        fd: acceptedFD, network: "tcp",
+                                        remoteAddr: "")),
+                                    .nilValue,
+                                ])
+                        } catch let error as GoRuntimeError {
+                            asynchronousError = error
+                        } catch {
+                            asynchronousError = .typeMismatch
+                        }
+                    }
+                    currentBlocked = true
+                case .netRead:
+                    guard case .slice(let buf) = try pop(&stack),
+                        case .netConn(let conn) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    _ = try validatedSliceRange(buf)
+                    guard buf.length <= resourceLimits.maximumNetworkTransferBytes else {
+                        throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
+                    }
+                    guard let processContext else {
+                        stack.append(.int(0))
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: network not available"))))
+                        break
+                    }
+                    let readingID = currentGoroutineID
+                    let maxBytes = buf.length
+                    processContext.tcpRecv(conn.fd, max: maxBytes) { bytes in
+                        guard executionIsActive, asynchronousError == nil else { return }
+                        do {
+                            guard bytes.count <= maxBytes,
+                                bytes.count <= resourceLimits.maximumNetworkTransferBytes
+                            else {
+                                throw GoRuntimeError.resourceLimitExceeded(
+                                    "network transfer bytes")
+                            }
+                            if bytes.isEmpty {
+                                // EOF
+                                try wakeGoroutine(
+                                    readingID,
+                                    values: [
+                                        .int(0),
+                                        .interface(GoInterfaceValue(
+                                            typeName: "error", value: .string("EOF"))),
+                                    ])
+                            } else {
+                                let range = try validatedSliceRange(buf)
+                                guard bytes.count <= range.count,
+                                    case .array(var backing) = try read(
+                                        pointer: buf.backing, heap: heap)
+                                else {
+                                    throw GoRuntimeError.invalidSliceBounds
+                                }
+                                for (offset, byte) in bytes.enumerated() {
+                                    backing[range.lowerBound + offset] = .int(Int64(byte))
+                                }
+                                try writePointer(
+                                    .array(backing), through: buf.backing, heap: &heap)
+                                try wakeGoroutine(
+                                    readingID,
+                                    values: [
+                                        .int(Int64(bytes.count)),
+                                        .nilValue,
+                                    ])
+                            }
+                        } catch let error as GoRuntimeError {
+                            asynchronousError = error
+                        } catch {
+                            asynchronousError = .typeMismatch
+                        }
+                    }
+                    currentBlocked = true
+                case .netWrite:
+                    guard case .slice(let buf) = try pop(&stack),
+                        case .netConn(let conn) = try pop(&stack)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let range = try validatedSliceRange(buf)
+                    guard range.count <= resourceLimits.maximumNetworkTransferBytes else {
+                        throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
+                    }
+                    guard let processContext else {
+                        stack.append(.int(0))
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: network not available"))))
+                        break
+                    }
+                    guard case .array(let backing) = try read(pointer: buf.backing, heap: heap)
+                    else { throw GoRuntimeError.invalidSliceBounds }
+                    var bytes: [UInt8] = []
+                    bytes.reserveCapacity(range.count)
+                    for index in range {
+                        guard case .int(let byte) = backing[index] else {
+                            throw GoRuntimeError.typeMismatch
+                        }
+                        bytes.append(UInt8(truncatingIfNeeded: byte))
+                    }
+                    let sent = processContext.tcpSend(conn.fd, bytes)
+                    stack.append(.int(sent ? Int64(bytes.count) : 0))
+                    stack.append(sent ? .nilValue : .interface(GoInterfaceValue(
+                        typeName: "error", value: .string("net: write failed"))))
+                case .netClose:
+                    let value = try pop(&stack)
+                    let fd: Int
+                    switch value {
+                    case .netConn(let conn): fd = conn.fd
+                    case .netListener(let ln): fd = ln.fd
+                    default: throw GoRuntimeError.typeMismatch
+                    }
+                    if let processContext {
+                        processContext.close(fd)
+                    }
+                    stack.append(.nilValue)
+                case .netLookupHost:
+                    guard case .string(let host) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard processContext != nil else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: network not available"))))
+                        break
+                    }
+                    // Synchronous lookup via /etc/hosts or DNS (uses EventLoop)
+                    let runtimeHandleID = try retainRuntimeHandle(.string(host))
+                    // Use a simple hosts-file lookup synchronously if possible;
+                    // full async DNS would require ProcessContext.resolve which is async.
+                    // For M5, resolve synchronously using the event loop.
+                    if let ip = IPv4Address(host) {
+                        let addrStr = ip.description
+                        let backingCell = try heap.allocate(.array([.string(addrStr)]))
+                        let slice = GoSliceValue(
+                            backing: GoPointer(cell: backingCell),
+                            start: 0, length: 1, capacity: 1,
+                            zeroValue: .string(""))
+                        stack.append(.slice(slice))
+                        stack.append(.nilValue)
+                        runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
+                    } else {
+                        // For non-literal hosts, return the host itself as an address
+                        // (full DNS requires async resolve which is beyond M5 minimal)
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net: lookup \(host): no such host"))))
+                        runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
+                    }
+                case .httpHandleFunc(let handler):
+                    guard case .string(let pattern) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    if httpHandlers[pattern] == nil,
+                        httpHandlers.count >= resourceLimits.maximumRuntimeHandles
+                    {
+                        throw GoRuntimeError.resourceLimitExceeded("HTTP handlers")
+                    }
+                    httpHandlers[pattern] = handler
+                case .httpListenAndServe:
+                    guard case .string(let addr) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard let processContext else {
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: network not available"))))
+                        break
+                    }
+                    // Parse ":port"
+                    let parts = addr.split(separator: ":", maxSplits: 1)
+                    let port: UInt16
+                    if parts.count == 2, let p = UInt16(parts[1]) {
+                        port = p
+                    } else if parts.count == 1, let p = UInt16(parts[0]) {
+                        port = p
+                    } else {
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: invalid address \(addr)"))))
+                        break
+                    }
+                    guard let fd = processContext.tcpSocket() else {
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: socket creation failed"))))
+                        break
+                    }
+                    processContext.bind(fd, address: nil, port: port)
+                    guard processContext.tcpListen(fd, port: port) else {
+                        processContext.close(fd)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: listen failed"))))
+                        break
+                    }
+                    // Spawn an internal accept loop using the event loop
+                    let handlersCopy = httpHandlers
+                    func acceptLoop() {
+                        processContext.tcpAccept(fd) { acceptedFD in
+                            guard executionIsActive, asynchronousError == nil else { return }
+                            // Read HTTP request
+                            processContext.tcpRecv(
+                                acceptedFD,
+                                max: resourceLimits.maximumNetworkTransferBytes
+                            ) { bytes in
+                                guard executionIsActive, asynchronousError == nil else { return }
+                                guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
+                                    asynchronousError = .resourceLimitExceeded(
+                                        "network transfer bytes")
+                                    processContext.close(acceptedFD)
+                                    return
+                                }
+                                let request = String(decoding: bytes, as: UTF8.self)
+                                // Parse request line: "GET /path HTTP/1.1\r\n..."
+                                let lines = request.split(
+                                    separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false)
+                                let requestLine = lines.first.map(String.init) ?? ""
+                                let requestParts = requestLine.split(separator: " ")
+                                let path = requestParts.count > 1
+                                    ? String(requestParts[1]) : "/"
+                                // Find handler and invoke it
+                                var responseBody = "404 page not found\n"
+                                var statusCode = 404
+                                if handlersCopy[path] != nil || handlersCopy["/"] != nil {
+                                    // For M5 minimal: call the handler function by spawning a goroutine
+                                    // that runs the handler and captures output
+                                    // The handler writes to a ResponseWriter which we simulate
+                                    // For simplicity: we use the registered handler name to call it
+                                    let handlerName = handlersCopy[path] ?? handlersCopy["/"]
+                                    if handlerName != nil {
+                                        statusCode = 200
+                                        responseBody = "OK\n"
+                                        // Call the handler as a goroutine with ResponseWriter/Request args
+                                        // For M5: the handler function gets called and its fmt output
+                                        // becomes the response body. We'll implement this by making the
+                                        // handler write to a captured buffer via a special mechanism.
+                                        // Minimal: just invoke the handler and capture its print output
+                                        do {
+                                            var handlerOutput = ""
+                                            if let function = functions[handlerName!] {
+                                                // Create a mini execution context for the handler
+                                                // For M5 minimal we just set statusCode=200
+                                                // and the response body is produced by the handler
+                                                let writerCell = try heap.allocate(.structure(GoStructValue(
+                                                    typeName: "http.ResponseWriter", fields: [])))
+                                                let reqCell = try heap.allocate(.structure(GoStructValue(
+                                                    typeName: "http.Request", fields: [
+                                                        GoStructFieldValue(name: "Path", value: .string(path)),
+                                                    ])))
+                                                // Store handler output channel for response
+                                                _ = function  // Acknowledge
+                                                _ = writerCell
+                                                _ = reqCell
+                                                _ = handlerOutput
+                                                handlerOutput = ""
+                                            }
+                                            _ = handlerOutput
+                                        } catch let error as GoRuntimeError {
+                                            asynchronousError = error
+                                            processContext.close(acceptedFD)
+                                            return
+                                        } catch {
+                                            asynchronousError = .typeMismatch
+                                            processContext.close(acceptedFD)
+                                            return
+                                        }
+                                    }
+                                }
+                                // Write HTTP response
+                                let response =
+                                    "HTTP/1.1 \(statusCode) \(statusCode == 200 ? "OK" : "Not Found")\r\n"
+                                    + "Content-Length: \(responseBody.utf8.count)\r\n"
+                                    + "Connection: close\r\n"
+                                    + "\r\n"
+                                    + responseBody
+                                _ = processContext.tcpSend(acceptedFD, Array(response.utf8))
+                                processContext.close(acceptedFD)
+                                // Continue accepting
+                                acceptLoop()
+                            }
+                        }
+                    }
+                    acceptLoop()
+                    // ListenAndServe blocks forever (parks the calling goroutine)
+                    currentBlocked = true
+                case .httpGet:
+                    guard case .string(let url) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard let processContext else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: network not available"))))
+                        break
+                    }
+                    // Parse URL: "http://host:port/path"
+                    var remaining = url
+                    if remaining.hasPrefix("http://") {
+                        remaining = String(remaining.dropFirst(7))
+                    }
+                    let slashIndex = remaining.firstIndex(of: "/") ?? remaining.endIndex
+                    let hostPort = String(remaining[remaining.startIndex..<slashIndex])
+                    let path = slashIndex < remaining.endIndex
+                        ? String(remaining[slashIndex...]) : "/"
+                    let hostParts = hostPort.split(separator: ":", maxSplits: 1)
+                    guard let ip = IPv4Address(String(hostParts[0])),
+                        hostParts.count == 2,
+                        let port = UInt16(hostParts[1])
+                    else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: invalid URL \(url)"))))
+                        break
+                    }
+                    guard let fd = processContext.tcpSocket() else {
+                        stack.append(.nilValue)
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string("net/http: socket creation failed"))))
+                        break
+                    }
+                    let gettingID = currentGoroutineID
+                    processContext.tcpConnect(fd, to: ip, port: port) {
+                        guard executionIsActive, asynchronousError == nil else { return }
+                        // Send HTTP request
+                        let request =
+                            "GET \(path) HTTP/1.1\r\n"
+                            + "Host: \(hostPort)\r\n"
+                            + "Connection: close\r\n"
+                            + "\r\n"
+                        guard request.utf8.count <= resourceLimits.maximumNetworkTransferBytes else {
+                            asynchronousError = .resourceLimitExceeded("network transfer bytes")
+                            processContext.close(fd)
+                            return
+                        }
+                        _ = processContext.tcpSend(fd, Array(request.utf8))
+                        // Read response
                         processContext.tcpRecv(
-                            acceptedFD,
+                            fd,
                             max: resourceLimits.maximumNetworkTransferBytes
                         ) { bytes in
                             guard executionIsActive, asynchronousError == nil else { return }
                             guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
                                 asynchronousError = .resourceLimitExceeded(
                                     "network transfer bytes")
-                                processContext.close(acceptedFD)
+                                processContext.close(fd)
                                 return
                             }
-                            let request = String(decoding: bytes, as: UTF8.self)
-                            // Parse request line: "GET /path HTTP/1.1\r\n..."
-                            let lines = request.split(
-                                separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false)
-                            let requestLine = lines.first.map(String.init) ?? ""
-                            let requestParts = requestLine.split(separator: " ")
-                            let path = requestParts.count > 1
-                                ? String(requestParts[1]) : "/"
-                            // Find handler and invoke it
-                            var responseBody = "404 page not found\n"
-                            var statusCode = 404
-                            if handlersCopy[path] != nil || handlersCopy["/"] != nil {
-                                // For M5 minimal: call the handler function by spawning a goroutine
-                                // that runs the handler and captures output
-                                // The handler writes to a ResponseWriter which we simulate
-                                // For simplicity: we use the registered handler name to call it
-                                let handlerName = handlersCopy[path] ?? handlersCopy["/"]
-                                if handlerName != nil {
-                                    statusCode = 200
-                                    responseBody = "OK\n"
-                                    // Call the handler as a goroutine with ResponseWriter/Request args
-                                    // For M5: the handler function gets called and its fmt output
-                                    // becomes the response body. We'll implement this by making the
-                                    // handler write to a captured buffer via a special mechanism.
-                                    // Minimal: just invoke the handler and capture its print output
-                                    do {
-                                        var handlerOutput = ""
-                                        if let function = functions[handlerName!] {
-                                            // Create a mini execution context for the handler
-                                            // For M5 minimal we just set statusCode=200
-                                            // and the response body is produced by the handler
-                                            let writerCell = try heap.allocate(.structure(GoStructValue(
-                                                typeName: "http.ResponseWriter", fields: [])))
-                                            let reqCell = try heap.allocate(.structure(GoStructValue(
-                                                typeName: "http.Request", fields: [
-                                                    GoStructFieldValue(name: "Path", value: .string(path)),
-                                                ])))
-                                            // Store handler output channel for response
-                                            _ = function  // Acknowledge
-                                            _ = writerCell
-                                            _ = reqCell
-                                            _ = handlerOutput
-                                            handlerOutput = ""
-                                        }
-                                        _ = handlerOutput
-                                    } catch let error as GoRuntimeError {
-                                        asynchronousError = error
-                                        processContext.close(acceptedFD)
-                                        return
-                                    } catch {
-                                        asynchronousError = .typeMismatch
-                                        processContext.close(acceptedFD)
-                                        return
+                            processContext.close(fd)
+                            let responseText = String(decoding: bytes, as: UTF8.self)
+                            // Parse status code from "HTTP/1.1 200 OK\r\n..."
+                            let statusCode: Int64
+                            let body: String
+                            // Find "\r\n\r\n" separator between headers and body
+                            let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+                            var headerEndIndex: String.Index?
+                            var bodyStartIndex: String.Index?
+                            let utf8 = Array(responseText.utf8)
+                            if utf8.count >= separator.count {
+                                for i in 0...(utf8.count - separator.count) {
+                                    if utf8[i] == separator[0] && utf8[i + 1] == separator[1]
+                                        && utf8[i + 2] == separator[2]
+                                        && utf8[i + 3] == separator[3]
+                                    {
+                                        headerEndIndex = responseText.utf8.index(
+                                            responseText.utf8.startIndex, offsetBy: i)
+                                        bodyStartIndex = responseText.utf8.index(
+                                            responseText.utf8.startIndex, offsetBy: i + 4)
+                                        break
                                     }
                                 }
                             }
-                            // Write HTTP response
-                            let response =
-                                "HTTP/1.1 \(statusCode) \(statusCode == 200 ? "OK" : "Not Found")\r\n"
-                                + "Content-Length: \(responseBody.utf8.count)\r\n"
-                                + "Connection: close\r\n"
-                                + "\r\n"
-                                + responseBody
-                            _ = processContext.tcpSend(acceptedFD, Array(response.utf8))
-                            processContext.close(acceptedFD)
-                            // Continue accepting
-                            acceptLoop()
-                        }
-                    }
-                }
-                acceptLoop()
-                // ListenAndServe blocks forever (parks the calling goroutine)
-                currentBlocked = true
-            case .httpGet:
-                guard case .string(let url) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard let processContext else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: network not available"))))
-                    break
-                }
-                // Parse URL: "http://host:port/path"
-                var remaining = url
-                if remaining.hasPrefix("http://") {
-                    remaining = String(remaining.dropFirst(7))
-                }
-                let slashIndex = remaining.firstIndex(of: "/") ?? remaining.endIndex
-                let hostPort = String(remaining[remaining.startIndex..<slashIndex])
-                let path = slashIndex < remaining.endIndex
-                    ? String(remaining[slashIndex...]) : "/"
-                let hostParts = hostPort.split(separator: ":", maxSplits: 1)
-                guard let ip = IPv4Address(String(hostParts[0])),
-                    hostParts.count == 2,
-                    let port = UInt16(hostParts[1])
-                else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: invalid URL \(url)"))))
-                    break
-                }
-                guard let fd = processContext.tcpSocket() else {
-                    stack.append(.nilValue)
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string("net/http: socket creation failed"))))
-                    break
-                }
-                let gettingID = currentGoroutineID
-                processContext.tcpConnect(fd, to: ip, port: port) {
-                    guard executionIsActive, asynchronousError == nil else { return }
-                    // Send HTTP request
-                    let request =
-                        "GET \(path) HTTP/1.1\r\n"
-                        + "Host: \(hostPort)\r\n"
-                        + "Connection: close\r\n"
-                        + "\r\n"
-                    guard request.utf8.count <= resourceLimits.maximumNetworkTransferBytes else {
-                        asynchronousError = .resourceLimitExceeded("network transfer bytes")
-                        processContext.close(fd)
-                        return
-                    }
-                    _ = processContext.tcpSend(fd, Array(request.utf8))
-                    // Read response
-                    processContext.tcpRecv(
-                        fd,
-                        max: resourceLimits.maximumNetworkTransferBytes
-                    ) { bytes in
-                        guard executionIsActive, asynchronousError == nil else { return }
-                        guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
-                            asynchronousError = .resourceLimitExceeded(
-                                "network transfer bytes")
-                            processContext.close(fd)
-                            return
-                        }
-                        processContext.close(fd)
-                        let responseText = String(decoding: bytes, as: UTF8.self)
-                        // Parse status code from "HTTP/1.1 200 OK\r\n..."
-                        let statusCode: Int64
-                        let body: String
-                        // Find "\r\n\r\n" separator between headers and body
-                        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
-                        var headerEndIndex: String.Index?
-                        var bodyStartIndex: String.Index?
-                        let utf8 = Array(responseText.utf8)
-                        if utf8.count >= separator.count {
-                            for i in 0...(utf8.count - separator.count) {
-                                if utf8[i] == separator[0] && utf8[i + 1] == separator[1]
-                                    && utf8[i + 2] == separator[2]
-                                    && utf8[i + 3] == separator[3]
-                                {
-                                    headerEndIndex = responseText.utf8.index(
-                                        responseText.utf8.startIndex, offsetBy: i)
-                                    bodyStartIndex = responseText.utf8.index(
-                                        responseText.utf8.startIndex, offsetBy: i + 4)
-                                    break
-                                }
+                            if let headerEndIndex, let bodyStartIndex {
+                                let headerPart = String(responseText[responseText.startIndex..<headerEndIndex])
+                                let statusLine = headerPart.split(separator: "\r\n").first ?? ""
+                                let statusParts = statusLine.split(separator: " ", maxSplits: 2)
+                                statusCode = statusParts.count > 1
+                                    ? Int64(statusParts[1]) ?? 0 : 0
+                                body = String(responseText[bodyStartIndex...])
+                            } else {
+                                statusCode = 0
+                                body = responseText
+                            }
+                            let response = GoValue.structure(GoStructValue(
+                                typeName: "http.Response",
+                                fields: [
+                                    GoStructFieldValue(name: "StatusCode", value: .int(statusCode)),
+                                    GoStructFieldValue(name: "Body", value: .string(body)),
+                                ]))
+                            do {
+                                try wakeGoroutine(gettingID, values: [response, .nilValue])
+                            } catch let error as GoRuntimeError {
+                                asynchronousError = error
+                            } catch {
+                                asynchronousError = .typeMismatch
                             }
                         }
-                        if let headerEndIndex, let bodyStartIndex {
-                            let headerPart = String(responseText[responseText.startIndex..<headerEndIndex])
-                            let statusLine = headerPart.split(separator: "\r\n").first ?? ""
-                            let statusParts = statusLine.split(separator: " ", maxSplits: 2)
-                            statusCode = statusParts.count > 1
-                                ? Int64(statusParts[1]) ?? 0 : 0
-                            body = String(responseText[bodyStartIndex...])
-                        } else {
-                            statusCode = 0
-                            body = responseText
-                        }
-                        let response = GoValue.structure(GoStructValue(
-                            typeName: "http.Response",
-                            fields: [
-                                GoStructFieldValue(name: "StatusCode", value: .int(statusCode)),
-                                GoStructFieldValue(name: "Body", value: .string(body)),
-                            ]))
-                        do {
-                            try wakeGoroutine(gettingID, values: [response, .nilValue])
-                        } catch let error as GoRuntimeError {
-                            asynchronousError = error
-                        } catch {
-                            asynchronousError = .typeMismatch
-                        }
                     }
-                }
-                currentBlocked = true
-            case .mutexLock:
-                guard case .mutex(let mutex) = try pop(&stack),
-                    case .mutexStorage(var storage) = try read(
-                        pointer: mutex.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                if storage.locked {
-                    storage.waiters.append(GoRuntimeWaiter(
-                        goroutineID: currentGoroutineID,
-                        waitSequence: allocateWaitSequence()))
                     currentBlocked = true
-                } else {
-                    storage.locked = true
-                }
-                try writePointer(
-                    .mutexStorage(storage), through: mutex.storage, heap: &heap)
-            case .mutexUnlock:
-                guard case .mutex(let mutex) = try pop(&stack),
-                    case .mutexStorage(var storage) = try read(
-                        pointer: mutex.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                guard storage.locked else {
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("sync: unlock of unlocked mutex"))
-                    break
-                }
-                if storage.waiters.isEmpty {
-                    storage.locked = false
-                } else {
-                    let waiter = storage.waiters.removeFirst()
-                    try wakeGoroutine(waiter.goroutineID)
-                }
-                try writePointer(
-                    .mutexStorage(storage), through: mutex.storage, heap: &heap)
-            case .makeWaitGroup:
-                let cell = try heap.allocate(.waitGroupStorage(GoWaitGroupStorage()))
-                stack.append(.waitGroup(GoWaitGroupValue(storage: GoPointer(cell: cell))))
-            case .waitGroupAdd:
-                guard case .int(let delta) = try pop(&stack),
-                    case .waitGroup(let waitGroup) = try pop(&stack),
-                    case .waitGroupStorage(var storage) = try read(
-                        pointer: waitGroup.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                let (next, overflow) = storage.count.addingReportingOverflow(delta)
-                guard !overflow, next >= 0 else {
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("sync: negative WaitGroup counter"))
-                    break
-                }
-                storage.count = next
-                let waiters = next == 0 ? storage.waiters : []
-                if next == 0 { storage.waiters.removeAll() }
-                try writePointer(
-                    .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
-                for waiter in waiters {
-                    try wakeGoroutine(waiter.goroutineID)
-                }
-            case .waitGroupWait:
-                guard case .waitGroup(let waitGroup) = try pop(&stack),
-                    case .waitGroupStorage(var storage) = try read(
-                        pointer: waitGroup.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                if storage.count > 0 {
-                    storage.waiters.append(GoRuntimeWaiter(
-                        goroutineID: currentGoroutineID,
-                        waitSequence: allocateWaitSequence()))
+                case .mutexLock:
+                    guard case .mutex(let mutex) = try pop(&stack),
+                        case .mutexStorage(var storage) = try read(
+                            pointer: mutex.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    if storage.locked {
+                        storage.waiters.append(GoRuntimeWaiter(
+                            goroutineID: currentGoroutineID,
+                            waitSequence: allocateWaitSequence()))
+                        currentBlocked = true
+                    } else {
+                        storage.locked = true
+                    }
                     try writePointer(
-                        .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
-                    currentBlocked = true
-                }
-            case .garbageCollect:
-                performGarbageCollection()
-            case .getMapIndex(let commaOK):
-                let zero = try pop(&stack)
-                let key = try pop(&stack)
-                let base = try pop(&stack)
-                guard case .map(let mapValue) = base else {
-                    if base == .nilValue {
-                        stack.append(zero)
-                        if commaOK { stack.append(.bool(false)) }
+                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                case .mutexUnlock:
+                    guard case .mutex(let mutex) = try pop(&stack),
+                        case .mutexStorage(var storage) = try read(
+                            pointer: mutex.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    guard storage.locked else {
+                        frames[frameIndex].pendingExit = .panicking(
+                            .string("sync: unlock of unlocked mutex"))
                         break
                     }
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                if let value = storage.get(key) {
-                    stack.append(value)
-                    if commaOK { stack.append(.bool(true)) }
-                } else {
-                    stack.append(zero)
-                    if commaOK { stack.append(.bool(false)) }
-                }
-            case .setMapIndex:
-                let value = try pop(&stack)
-                let key = try pop(&stack)
-                let base = try pop(&stack)
-                guard case .map(let mapValue) = base else {
-                    if base == .nilValue { throw GoRuntimeError.panicError("assignment to entry in nil map") }
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                if storage.get(key) == nil,
-                    storage.entries.count >= resourceLimits.maximumMapEntries
-                {
-                    throw GoRuntimeError.resourceLimitExceeded("map entries")
-                }
-                storage.set(key, value)
-                try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
-                stack.append(.map(mapValue))
-            case .deleteMap:
-                let key = try pop(&stack)
-                let base = try pop(&stack)
-                if base == .nilValue {
-                    stack.append(.nilValue)
-                    break
-                }
-                guard case .map(let mapValue) = base else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
-                else { throw GoRuntimeError.typeMismatch }
-                storage.delete(key)
-                try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
-                stack.append(.map(mapValue))
-            case .callInterface(let methodName, let argumentCount):
-                // Stack: [receiver, arg0, arg1, ..., argN-1] (receiver pushed first)
-                guard argumentCount >= 0 else {
-                    throw GoRuntimeError.invalidExecutable("negative interface argument count")
-                }
-                let requiredCount = try checkedAdd(
-                    argumentCount, 1, resource: "interface arguments")
-                guard stack.count >= requiredCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let argStart = stack.count - argumentCount
-                let arguments = Array(stack[argStart...])
-                stack.removeSubrange(argStart...)
-                let receiver = try pop(&stack)
-                // Unwrap interface to get concrete type and value
-                let concreteTypeName: String
-                let concreteValue: GoValue
-                if case .interface(let iface) = receiver {
-                    concreteTypeName = iface.typeName
-                    concreteValue = iface.value
-                } else if case .structure(let sv) = receiver, let tn = sv.typeName {
-                    concreteTypeName = tn
-                    concreteValue = receiver
-                } else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                // Resolve method: try TypeName.method and *TypeName.method
-                let candidates = [
-                    concreteTypeName + "." + methodName,
-                    "*" + concreteTypeName + "." + methodName,
-                ]
-                guard let functionName = candidates.first(where: { functions[$0] != nil }),
-                    let function = functions[functionName]
-                else {
-                    throw GoRuntimeError.missingFunction(concreteTypeName + "." + methodName)
-                }
-                guard frames.count < maximumCallDepth else {
-                    throw GoRuntimeError.callStackLimitExceeded
-                }
-                let allArgs = [concreteValue] + arguments
-                guard allArgs.count == function.parameterCount else {
-                    throw GoRuntimeError.argumentCountMismatch(
-                        function: functionName,
-                        expected: function.parameterCount,
-                        actual: allArgs.count)
-                }
-                frames.append(
-                    try makeFrame(
-                        function: function,
-                        stackBase: stack.count,
-                        arguments: allArgs,
-                        heap: &heap))
-            case .makeInterface(let typeName):
-                let value = try pop(&stack)
-                stack.append(.interface(GoInterfaceValue(typeName: typeName, value: value)))
-            case .typeAssert(let targetName, let commaOK):
-                let zero = try pop(&stack)
-                let source = try pop(&stack)
-                let dynamicType: String?
-                let dynamicValue: GoValue
-                if case .interface(let interfaceValue) = source {
-                    dynamicType = interfaceValue.typeName
-                    dynamicValue = interfaceValue.value
-                } else if source == .nilValue {
-                    dynamicType = nil
-                    dynamicValue = zero
-                } else {
-                    dynamicType = runtimeConcreteTypeName(source)
-                    dynamicValue = source
-                }
-                if dynamicType == targetName {
-                    stack.append(dynamicValue)
-                    if commaOK { stack.append(.bool(true)) }
-                } else if commaOK {
-                    stack.append(zero)
-                    stack.append(.bool(false))
-                } else {
-                    frames[frameIndex].pendingExit = .panicking(
-                        .string("interface conversion: \(dynamicType ?? "nil") is not \(targetName)"))
-                }
-            case .rangeKeys:
-                let base = try pop(&stack)
-                let keys: [GoValue]
-                switch base {
-                case .array(let values):
-                    keys = values.indices.map { .int(Int64($0)) }
-                case .slice(let slice):
-                    _ = try validatedSliceRange(slice)
-                    keys = (0..<slice.length).map { .int(Int64($0)) }
-                case .string(let string):
-                    var byteOffset = 0
-                    var offsets: [GoValue] = []
-                    for scalar in string.unicodeScalars {
-                        offsets.append(.int(Int64(byteOffset)))
-                        byteOffset += scalar.utf8.count
+                    if storage.waiters.isEmpty {
+                        storage.locked = false
+                    } else {
+                        let waiter = storage.waiters.removeFirst()
+                        try wakeGoroutine(waiter.goroutineID)
                     }
-                    keys = offsets
-                case .map(let mapValue):
-                    guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                    try writePointer(
+                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                case .makeWaitGroup:
+                    let cell = try heap.allocate(.waitGroupStorage(GoWaitGroupStorage()))
+                    stack.append(.waitGroup(GoWaitGroupValue(storage: GoPointer(cell: cell))))
+                case .waitGroupAdd:
+                    guard case .int(let delta) = try pop(&stack),
+                        case .waitGroup(let waitGroup) = try pop(&stack),
+                        case .waitGroupStorage(var storage) = try read(
+                            pointer: waitGroup.storage, heap: heap)
                     else { throw GoRuntimeError.typeMismatch }
-                    keys = storage.entries.map(\.key)
-                case .nilValue:
-                    keys = []
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-                stack.append(.array(keys))
-            case .rangeValue:
-                let zero = try pop(&stack)
-                let key = try pop(&stack)
-                let base = try pop(&stack)
-                switch (base, key) {
-                case (.array(let values), .int(let rawIndex)):
-                    guard let index = Int(exactly: rawIndex), values.indices.contains(index)
-                    else { throw GoRuntimeError.indexOutOfRange }
-                    stack.append(values[index])
-                case (.slice(let slice), .int(let rawIndex)):
-                    _ = try validatedSliceRange(slice)
-                    guard let index = Int(exactly: rawIndex), index >= 0, index < slice.length
-                    else { throw GoRuntimeError.indexOutOfRange }
-                    let absoluteIndex = try checkedAdd(
-                        slice.start, index, resource: "slice index")
-                    stack.append(try read(
-                        pointer: appending(index: absoluteIndex, to: slice.backing),
-                        heap: heap))
-                case (.string(let string), .int(let rawOffset)):
-                    guard let offset = Int(exactly: rawOffset) else {
-                        throw GoRuntimeError.indexOutOfRange
+                    let (next, overflow) = storage.count.addingReportingOverflow(delta)
+                    guard !overflow, next >= 0 else {
+                        frames[frameIndex].pendingExit = .panicking(
+                            .string("sync: negative WaitGroup counter"))
+                        break
                     }
-                    var byteOffset = 0
-                    var result: GoValue?
-                    for scalar in string.unicodeScalars {
-                        if byteOffset == offset {
-                            result = .int(Int64(scalar.value))
+                    storage.count = next
+                    let waiters = next == 0 ? storage.waiters : []
+                    if next == 0 { storage.waiters.removeAll() }
+                    try writePointer(
+                        .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
+                    for waiter in waiters {
+                        try wakeGoroutine(waiter.goroutineID)
+                    }
+                case .waitGroupWait:
+                    guard case .waitGroup(let waitGroup) = try pop(&stack),
+                        case .waitGroupStorage(var storage) = try read(
+                            pointer: waitGroup.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    if storage.count > 0 {
+                        storage.waiters.append(GoRuntimeWaiter(
+                            goroutineID: currentGoroutineID,
+                            waitSequence: allocateWaitSequence()))
+                        try writePointer(
+                            .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
+                        currentBlocked = true
+                    }
+                case .garbageCollect:
+                    performGarbageCollection()
+                case .getMapIndex(let commaOK):
+                    let zero = try pop(&stack)
+                    let key = try pop(&stack)
+                    let base = try pop(&stack)
+                    guard case .map(let mapValue) = base else {
+                        if base == .nilValue {
+                            stack.append(zero)
+                            if commaOK { stack.append(.bool(false)) }
                             break
                         }
-                        byteOffset += scalar.utf8.count
+                        throw GoRuntimeError.typeMismatch
                     }
-                    guard let result else { throw GoRuntimeError.indexOutOfRange }
-                    stack.append(result)
-                case (.map(let mapValue), _):
                     guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
                     else { throw GoRuntimeError.typeMismatch }
-                    stack.append(storage.get(key) ?? zero)
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
-            case .testFail(let argumentCount, let fatal):
-                guard argumentCount >= 0, stack.count >= argumentCount else {
-                    throw GoRuntimeError.stackUnderflow
-                }
-                let start = stack.count - argumentCount
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                testFailureCount += 1
-                if !values.isEmpty {
-                    try emit(
-                        try formatOutput(
-                            values,
-                            prefix: "    ",
-                            separator: " ",
-                            suffix: "\n"))
-                }
-                if fatal {
-                    frames[frameIndex].pendingExit = .testFatal
-                }
-            case .testBegin(let name):
-                subtests.append((name, testFailureCount))
-            case .testEnd(let name):
-                let started = subtests.popLast()?.failuresAtStart ?? testFailureCount
-                let passed = testFailureCount == started
-                let status = passed ? "PASS" : "FAIL"
-                try emit("--- \(status): \(name)\n")
-                stack.append(.bool(passed))
-            case .osArgs:
-                let elements = arguments.map { GoValue.string($0) }
-                let cell = try heap.allocate(.array(elements))
-                stack.append(
-                    .slice(
-                        GoSliceValue(
-                            backing: GoPointer(cell: cell),
-                            start: 0,
-                            length: elements.count,
-                            capacity: elements.count,
-                            zeroValue: .string(""))))
-            case .exit:
-                guard case .int(let code) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                programExitCode = Int32(truncatingIfNeeded: code)
-                break executionLoop
-            case .parseInt:
-                guard case .string(let text) = try pop(&stack) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                if let value = Int64(text) {
-                    stack.append(.int(value))
-                    stack.append(.nilValue)
-                } else {
-                    stack.append(.int(0))
-                    stack.append(.interface(GoInterfaceValue(
-                        typeName: "error",
-                        value: .string(
-                            "strconv.Atoi: parsing \"\(text)\": invalid syntax"))))
-                }
-            case .readInput:
-                guard case .slice(let pathSlice) = try pop(&stack),
-                    case .string(let command) = try pop(&stack)
-                else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                _ = try validatedSliceRange(pathSlice)
-                try requireCollectionCount(pathSlice.length, resource: "input paths")
-                var paths: [String] = []
-                paths.reserveCapacity(pathSlice.length)
-                for index in 0..<pathSlice.length {
-                    let absoluteIndex = try checkedAdd(
-                        pathSlice.start, index, resource: "slice index")
-                    guard case .string(let path) = try read(
-                        pointer: appending(
-                            index: absoluteIndex,
-                            to: pathSlice.backing),
-                        heap: heap)
+                    if let value = storage.get(key) {
+                        stack.append(value)
+                        if commaOK { stack.append(.bool(true)) }
+                    } else {
+                        stack.append(zero)
+                        if commaOK { stack.append(.bool(false)) }
+                    }
+                case .setMapIndex:
+                    let value = try pop(&stack)
+                    let key = try pop(&stack)
+                    let base = try pop(&stack)
+                    guard case .map(let mapValue) = base else {
+                        if base == .nilValue { throw GoRuntimeError.panicError("assignment to entry in nil map") }
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    if storage.get(key) == nil,
+                        storage.entries.count >= resourceLimits.maximumMapEntries
+                    {
+                        throw GoRuntimeError.resourceLimitExceeded("map entries")
+                    }
+                    storage.set(key, value)
+                    try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
+                    stack.append(.map(mapValue))
+                case .deleteMap:
+                    let key = try pop(&stack)
+                    let base = try pop(&stack)
+                    if base == .nilValue {
+                        stack.append(.nilValue)
+                        break
+                    }
+                    guard case .map(let mapValue) = base else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    storage.delete(key)
+                    try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
+                    stack.append(.map(mapValue))
+                case .callInterface(let methodName, let argumentCount):
+                    // Stack: [receiver, arg0, arg1, ..., argN-1] (receiver pushed first)
+                    guard argumentCount >= 0 else {
+                        throw GoRuntimeError.invalidExecutable("negative interface argument count")
+                    }
+                    let requiredCount = try checkedAdd(
+                        argumentCount, 1, resource: "interface arguments")
+                    guard stack.count >= requiredCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let argStart = stack.count - argumentCount
+                    let arguments = Array(stack[argStart...])
+                    stack.removeSubrange(argStart...)
+                    let receiver = try pop(&stack)
+                    // Unwrap interface to get concrete type and value
+                    let concreteTypeName: String
+                    let concreteValue: GoValue
+                    if case .interface(let iface) = receiver {
+                        concreteTypeName = iface.typeName
+                        concreteValue = iface.value
+                    } else if case .structure(let sv) = receiver, let tn = sv.typeName {
+                        concreteTypeName = tn
+                        concreteValue = receiver
+                    } else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    // Resolve method: try TypeName.method and *TypeName.method
+                    let candidates = [
+                        concreteTypeName + "." + methodName,
+                        "*" + concreteTypeName + "." + methodName,
+                    ]
+                    guard let functionName = candidates.first(where: { functions[$0] != nil }),
+                        let function = functions[functionName]
+                    else {
+                        throw GoRuntimeError.missingFunction(concreteTypeName + "." + methodName)
+                    }
+                    guard frames.count < maximumCallDepth else {
+                        throw GoRuntimeError.callStackLimitExceeded
+                    }
+                    let allArgs = [concreteValue] + arguments
+                    guard allArgs.count == function.parameterCount else {
+                        throw GoRuntimeError.argumentCountMismatch(
+                            function: functionName,
+                            expected: function.parameterCount,
+                            actual: allArgs.count)
+                    }
+                    frames.append(
+                        try makeFrame(
+                            function: function,
+                            stackBase: stack.count,
+                            arguments: allArgs,
+                            heap: &heap))
+                case .makeInterface(let typeName):
+                    let value = try pop(&stack)
+                    stack.append(.interface(GoInterfaceValue(typeName: typeName, value: value)))
+                case .typeAssert(let targetName, let commaOK):
+                    let zero = try pop(&stack)
+                    let source = try pop(&stack)
+                    let dynamicType: String?
+                    let dynamicValue: GoValue
+                    if case .interface(let interfaceValue) = source {
+                        dynamicType = interfaceValue.typeName
+                        dynamicValue = interfaceValue.value
+                    } else if source == .nilValue {
+                        dynamicType = nil
+                        dynamicValue = zero
+                    } else {
+                        dynamicType = runtimeConcreteTypeName(source)
+                        dynamicValue = source
+                    }
+                    if dynamicType == targetName {
+                        stack.append(dynamicValue)
+                        if commaOK { stack.append(.bool(true)) }
+                    } else if commaOK {
+                        stack.append(zero)
+                        stack.append(.bool(false))
+                    } else {
+                        frames[frameIndex].pendingExit = .panicking(
+                            .string("interface conversion: \(dynamicType ?? "nil") is not \(targetName)"))
+                    }
+                case .rangeKeys:
+                    let base = try pop(&stack)
+                    let keys: [GoValue]
+                    switch base {
+                    case .array(let values):
+                        keys = values.indices.map { .int(Int64($0)) }
+                    case .slice(let slice):
+                        _ = try validatedSliceRange(slice)
+                        keys = (0..<slice.length).map { .int(Int64($0)) }
+                    case .string(let string):
+                        var byteOffset = 0
+                        var offsets: [GoValue] = []
+                        for scalar in string.unicodeScalars {
+                            offsets.append(.int(Int64(byteOffset)))
+                            byteOffset += scalar.utf8.count
+                        }
+                        keys = offsets
+                    case .map(let mapValue):
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        keys = storage.entries.map(\.key)
+                    case .nilValue:
+                        keys = []
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    stack.append(.array(keys))
+                case .rangeValue:
+                    let zero = try pop(&stack)
+                    let key = try pop(&stack)
+                    let base = try pop(&stack)
+                    switch (base, key) {
+                    case (.array(let values), .int(let rawIndex)):
+                        guard let index = Int(exactly: rawIndex), values.indices.contains(index)
+                        else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(values[index])
+                    case (.slice(let slice), .int(let rawIndex)):
+                        _ = try validatedSliceRange(slice)
+                        guard let index = Int(exactly: rawIndex), index >= 0, index < slice.length
+                        else { throw GoRuntimeError.indexOutOfRange }
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, index, resource: "slice index")
+                        stack.append(try read(
+                            pointer: appending(index: absoluteIndex, to: slice.backing),
+                            heap: heap))
+                    case (.string(let string), .int(let rawOffset)):
+                        guard let offset = Int(exactly: rawOffset) else {
+                            throw GoRuntimeError.indexOutOfRange
+                        }
+                        var byteOffset = 0
+                        var result: GoValue?
+                        for scalar in string.unicodeScalars {
+                            if byteOffset == offset {
+                                result = .int(Int64(scalar.value))
+                                break
+                            }
+                            byteOffset += scalar.utf8.count
+                        }
+                        guard let result else { throw GoRuntimeError.indexOutOfRange }
+                        stack.append(result)
+                    case (.map(let mapValue), _):
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        stack.append(storage.get(key) ?? zero)
+                    default:
+                        throw GoRuntimeError.typeMismatch
+                    }
+                case .testFail(let argumentCount, let fatal):
+                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - argumentCount
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    testFailureCount += 1
+                    if !values.isEmpty {
+                        try emit(
+                            try formatOutput(
+                                values,
+                                prefix: "    ",
+                                separator: " ",
+                                suffix: "\n"))
+                    }
+                    if fatal {
+                        frames[frameIndex].pendingExit = .testFatal
+                    }
+                case .testBegin(let name):
+                    subtests.append((name, testFailureCount))
+                case .testEnd(let name):
+                    let started = subtests.popLast()?.failuresAtStart ?? testFailureCount
+                    let passed = testFailureCount == started
+                    let status = passed ? "PASS" : "FAIL"
+                    try emit("--- \(status): \(name)\n")
+                    stack.append(.bool(passed))
+                case .osArgs:
+                    let elements = arguments.map { GoValue.string($0) }
+                    let cell = try heap.allocate(.array(elements))
+                    stack.append(
+                        .slice(
+                            GoSliceValue(
+                                backing: GoPointer(cell: cell),
+                                start: 0,
+                                length: elements.count,
+                                capacity: elements.count,
+                                zeroValue: .string(""))))
+                case .exit:
+                    guard case .int(let code) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    programExitCode = Int32(truncatingIfNeeded: code)
+                    break executionLoop
+                case .parseInt:
+                    guard case .string(let text) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    if let value = Int64(text) {
+                        stack.append(.int(value))
+                        stack.append(.nilValue)
+                    } else {
+                        stack.append(.int(0))
+                        stack.append(.interface(GoInterfaceValue(
+                            typeName: "error",
+                            value: .string(
+                                "strconv.Atoi: parsing \"\(text)\": invalid syntax"))))
+                    }
+                case .readInput:
+                    guard case .slice(let pathSlice) = try pop(&stack),
+                        case .string(let command) = try pop(&stack)
                     else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard path.utf8.count <= resourceLimits.maximumStringBytes else {
-                        throw GoRuntimeError.resourceLimitExceeded("path bytes")
-                    }
-                    paths.append(path)
-                }
-                guard let processContext else {
-                    stack.append(.string(""))
-                    stack.append(.int(1))
-                    break
-                }
-                if paths.isEmpty {
-                    var bytes: [UInt8] = []
-                    inputLoop: while true {
-                        while processContext.readiness(0)?.contains(.readable) != true {
-                            guard eventLoop.runNext() else {
-                                break inputLoop
-                            }
-                            if let asynchronousError { throw asynchronousError }
-                        }
-                        let chunk = try processContext.readFile(0, max: 65_536)
-                        if chunk.isEmpty { break }
-                        guard bytes.count <= resourceLimits.maximumInputBytes,
-                            chunk.count <= resourceLimits.maximumInputBytes - bytes.count
+                    _ = try validatedSliceRange(pathSlice)
+                    try requireCollectionCount(pathSlice.length, resource: "input paths")
+                    var paths: [String] = []
+                    paths.reserveCapacity(pathSlice.length)
+                    for index in 0..<pathSlice.length {
+                        let absoluteIndex = try checkedAdd(
+                            pathSlice.start, index, resource: "slice index")
+                        guard case .string(let path) = try read(
+                            pointer: appending(
+                                index: absoluteIndex,
+                                to: pathSlice.backing),
+                            heap: heap)
                         else {
-                            throw GoRuntimeError.resourceLimitExceeded("input bytes")
+                            throw GoRuntimeError.typeMismatch
                         }
-                        bytes.append(contentsOf: chunk)
+                        guard path.utf8.count <= resourceLimits.maximumStringBytes else {
+                            throw GoRuntimeError.resourceLimitExceeded("path bytes")
+                        }
+                        paths.append(path)
                     }
-                    stack.append(.string(String(decoding: bytes, as: UTF8.self)))
-                    stack.append(.int(0))
-                    break
-                }
-                var bytes: [UInt8] = []
-                var status: Int64 = 0
-                for path in paths {
-                    do {
-                        let descriptor = try processContext.openFile(
-                            path,
-                            access: .readOnly)
-                        defer { try? processContext.closeFile(descriptor) }
-                        while true {
-                            let chunk = try processContext.readFile(
-                                descriptor,
-                                max: 65_536)
+                    guard let processContext else {
+                        stack.append(.string(""))
+                        stack.append(.int(1))
+                        break
+                    }
+                    if paths.isEmpty {
+                        var bytes: [UInt8] = []
+                        inputLoop: while true {
+                            while processContext.readiness(0)?.contains(.readable) != true {
+                                guard eventLoop.runNext() else {
+                                    break inputLoop
+                                }
+                                if let asynchronousError { throw asynchronousError }
+                            }
+                            let chunk = try processContext.readFile(0, max: 65_536)
                             if chunk.isEmpty { break }
                             guard bytes.count <= resourceLimits.maximumInputBytes,
                                 chunk.count <= resourceLimits.maximumInputBytes - bytes.count
@@ -3392,49 +3541,162 @@ public struct GoVirtualMachine: Sendable {
                             }
                             bytes.append(contentsOf: chunk)
                         }
-                    } catch let error as GoRuntimeError {
-                        throw error
+                        stack.append(.string(String(decoding: bytes, as: UTF8.self)))
+                        stack.append(.int(0))
+                        break
+                    }
+                    var bytes: [UInt8] = []
+                    var status: Int64 = 0
+                    for path in paths {
+                        do {
+                            let descriptor = try processContext.openFile(
+                                path,
+                                access: .readOnly)
+                            defer { try? processContext.closeFile(descriptor) }
+                            while true {
+                                let chunk = try processContext.readFile(
+                                    descriptor,
+                                    max: 65_536)
+                                if chunk.isEmpty { break }
+                                guard bytes.count <= resourceLimits.maximumInputBytes,
+                                    chunk.count <= resourceLimits.maximumInputBytes - bytes.count
+                                else {
+                                    throw GoRuntimeError.resourceLimitExceeded("input bytes")
+                                }
+                                bytes.append(contentsOf: chunk)
+                            }
+                        } catch let error as GoRuntimeError {
+                            throw error
+                        } catch {
+                            let message = "\(command): \(path): No such file\n"
+                            try consumeOutputBytes(message.utf8.count)
+                            _ = processContext.write(2, Array(message.utf8))
+                            status = 1
+                        }
+                    }
+                    stack.append(.string(String(decoding: bytes, as: UTF8.self)))
+                    stack.append(.int(status))
+                case .readStdin:
+                    guard let processContext, processContext.readiness(0) != nil else {
+                        stack.append(.string(""))
+                        stack.append(.int(1))
+                        break
+                    }
+                    pendingHostInputWaits += 1
+                    readStandardInputChunk(for: currentGoroutineID)
+                    currentBlocked = true
+                case .writeFile:
+                    guard case .string(let contents) = try pop(&stack),
+                        case .string(let path) = try pop(&stack)
+                    else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard let processContext else {
+                        stack.append(.int(1))
+                        break
+                    }
+                    var status: Int64 = 0
+                    do {
+                        let descriptor = try processContext.openFile(
+                            path,
+                            create: true,
+                            truncate: true,
+                            access: .writeOnly)
+                        defer { try? processContext.closeFile(descriptor) }
+                        var remaining = Array(contents.utf8)[...]
+                        while !remaining.isEmpty {
+                            let written = try processContext.writeFile(
+                                descriptor,
+                                Array(remaining))
+                            guard written > 0 else {
+                                status = 1
+                                break
+                            }
+                            remaining = remaining.dropFirst(written)
+                        }
                     } catch {
-                        let message = "\(command): \(path): No such file\n"
-                        try consumeOutputBytes(message.utf8.count)
-                        _ = processContext.write(2, Array(message.utf8))
                         status = 1
                     }
+                    stack.append(.int(status))
+                case .setTerminalRawMode:
+                    guard case .bool(let enabled) = try pop(&stack) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    let applied = processContext?.setTerminalRawMode(0, enabled) ?? false
+                    if applied { programEnabledRawMode = enabled }
+                    stack.append(.bool(applied))
+                case .terminalWindowSize:
+                    let size = processContext?.terminalWindowSize(1)
+                        ?? processContext?.terminalWindowSize(0)
+                    stack.append(.int(Int64(size?.rows ?? 0)))
+                    stack.append(.int(Int64(size?.columns ?? 0)))
+                case .return:
+                    frames[frameIndex].pendingExit = .returning([])
+                case .returnValues(let count):
+                    guard count >= 0 else {
+                        throw GoRuntimeError.invalidExecutable("negative return count")
+                    }
+                    let requiredStackCount = try checkedAdd(
+                        frames[frameIndex].stackBase,
+                        count,
+                        resource: "operand stack")
+                    guard stack.count >= requiredStackCount else {
+                        throw GoRuntimeError.stackUnderflow
+                    }
+                    let start = stack.count - count
+                    let values = Array(stack[start...])
+                    stack.removeSubrange(start...)
+                    frames[frameIndex].pendingExit = .returning(values)
                 }
-                stack.append(.string(String(decoding: bytes, as: UTF8.self)))
-                stack.append(.int(status))
-            case .return:
-                frames[frameIndex].pendingExit = .returning([])
-            case .returnValues(let count):
-                guard count >= 0 else {
-                    throw GoRuntimeError.invalidExecutable("negative return count")
+                guard stack.count <= resourceLimits.maximumValueStackEntries else {
+                    throw GoRuntimeError.resourceLimitExceeded("operand stack")
                 }
-                let requiredStackCount = try checkedAdd(
-                    frames[frameIndex].stackBase,
-                    count,
-                    resource: "operand stack")
-                guard stack.count >= requiredStackCount else {
-                    throw GoRuntimeError.stackUnderflow
+                if heap.allocationsSinceCollection >= garbageCollectionThreshold,
+                    frames.indices.contains(frameIndex),
+                    frames[frameIndex].function.safepointProgramCounters.contains(
+                        frames[frameIndex].programCounter)
+                {
+                    performGarbageCollection()
                 }
-                let start = stack.count - count
-                let values = Array(stack[start...])
-                stack.removeSubrange(start...)
-                frames[frameIndex].pendingExit = .returning(values)
+                try reportRuntimeMemoryIfChanged()
+                try scheduleNext(requeueCurrent: !currentBlocked)
             }
-            guard stack.count <= resourceLimits.maximumValueStackEntries else {
-                throw GoRuntimeError.resourceLimitExceeded("operand stack")
-            }
-            if heap.allocationsSinceCollection >= garbageCollectionThreshold,
-                frames.indices.contains(frameIndex),
-                frames[frameIndex].function.safepointProgramCounters.contains(
-                    frames[frameIndex].programCounter)
-            {
-                performGarbageCollection()
-            }
-            try reportRuntimeMemoryIfChanged()
-            try scheduleNext(requeueCurrent: !currentBlocked)
+            if testFailureCount > 0 { throw GoRuntimeError.testFailure }
         }
-        if testFailureCount > 0 { throw GoRuntimeError.testFailure }
+
+        /// Continue a suspended run from the stdin continuation, reporting the
+        /// final outcome through `resumedCompletion`.
+        func resumeSuspendedExecution() {
+            isSuspended = false
+            sliceStartInstruction = executed
+            outputBytesWritten = 0
+            do {
+                if let asynchronousError { throw asynchronousError }
+                try driveEventLoopUntilRunnable()
+                try runSlice()
+            } catch is GoExecutionSuspension {
+                isSuspended = true
+                resumeHook = resumeSuspendedExecution
+                return
+            } catch {
+                releaseExecution()
+                resumedCompletion?(.failure(error))
+                return
+            }
+            completedNormally = true
+            releaseExecution()
+            resumedCompletion?(.success(
+                GoProcessResult(exitCode: programExitCode, statistics: heap.statistics)))
+        }
+
+        do {
+            try runSlice()
+        } catch is GoExecutionSuspension {
+            isSuspended = true
+            resumeHook = resumeSuspendedExecution
+            return nil
+        }
+        completedNormally = true
         return GoProcessResult(exitCode: programExitCode, statistics: heap.statistics)
     }
 

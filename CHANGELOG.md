@@ -5,12 +5,25 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- `swiftix/userland` terminal calls for full-screen Go programs:
+  `ReadStdin`, `WriteFile`, `SetRawMode`, and `WindowSize`. Images that use
+  them encode four new bytecode opcodes (97–100); the image format and ABI
+  versions are unchanged, and older runtimes reject such images at decode.
+- `GoVirtualMachine.startProgram`, a resumable run that suspends while its
+  goroutines wait on terminal input. `GoExecutableLoader` uses it, so
+  file-backed interactive programs wait for keystrokes instead of reporting a
+  deadlock. Its instruction and output budgets apply per uninterrupted slice.
+
 ### Fixed
 
 - A process step that completes nested inside another step of the same
   process (for example a read resumed while the Go VM drives the event loop)
   no longer reaps the process with status 0 while the enclosing step is still
   running.
+- A Swiftix Go run that fails with the terminal in raw mode restores cooked
+  mode.
 
 ## 0.11.2 — 2026-09-29
 

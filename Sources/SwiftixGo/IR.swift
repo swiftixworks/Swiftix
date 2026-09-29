@@ -146,6 +146,12 @@ public enum GoIROperation: Sendable, Equatable {
         statusDestination: Int,
         command: Int,
         paths: Int)
+    // Terminal ABI for full-screen programs: suspending stdin reads, whole-file
+    // writes, raw-mode control, and the terminal window size.
+    case readStdin(dataDestination: Int, statusDestination: Int)
+    case writeFile(destination: Int, path: Int, data: Int)
+    case setRawMode(destination: Int, enabled: Int)
+    case windowSize(rowsDestination: Int, columnsDestination: Int)
 }
 
 public struct GoIRFunction: Sendable, Equatable {

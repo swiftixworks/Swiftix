@@ -2161,6 +2161,27 @@ private struct IRLowerer {
                     command: registers[0],
                     paths: registers[1]))
                 return data
+            case .userlandReadStdin:
+                let data = allocateRegister()
+                let status = allocateRegister()
+                operations.append(.readStdin(
+                    dataDestination: data, statusDestination: status))
+                return data
+            case .userlandWriteFile:
+                let status = allocateRegister()
+                operations.append(.writeFile(
+                    destination: status, path: registers[0], data: registers[1]))
+                return status
+            case .userlandSetRawMode:
+                let applied = allocateRegister()
+                operations.append(.setRawMode(destination: applied, enabled: registers[0]))
+                return applied
+            case .userlandWindowSize:
+                let rows = allocateRegister()
+                let columns = allocateRegister()
+                operations.append(.windowSize(
+                    rowsDestination: rows, columnsDestination: columns))
+                return rows
             }
             return nil
         }
@@ -2258,6 +2279,10 @@ private struct IRLowerer {
                 return [.int, .interface([])]
             case .userlandReadInput:
                 return [.string, .int]
+            case .userlandReadStdin:
+                return [.string, .int]
+            case .userlandWindowSize:
+                return [.int, .int]
             default:
                 break
             }
@@ -2363,6 +2388,18 @@ private struct IRLowerer {
                     command: command,
                     paths: paths))
                 return [data, status]
+            case .userlandReadStdin:
+                let data = allocateRegister()
+                let status = allocateRegister()
+                operations.append(.readStdin(
+                    dataDestination: data, statusDestination: status))
+                return [data, status]
+            case .userlandWindowSize:
+                let rows = allocateRegister()
+                let columns = allocateRegister()
+                operations.append(.windowSize(
+                    rowsDestination: rows, columnsDestination: columns))
+                return [rows, columns]
             default:
                 break
             }
@@ -3045,6 +3082,16 @@ private struct IRLowerer {
             {
                 return .channel(direction: .receiveOnly, element: .int)
             }
+            if case .selector(let base, let member, _) = callee,
+                case .identifier("userland", _) = base
+            {
+                switch GoStandardLibrary.resolve(package: "userland", member: member) {
+                case .userlandReadInput?, .userlandReadStdin?: return .string
+                case .userlandWriteFile?, .userlandWindowSize?: return .int
+                case .userlandSetRawMode?: return .bool
+                default: break
+                }
+            }
             if case .selector(let base, let name, _) = callee,
                 syncReceiverName(try type(of: base)) != nil
             {
@@ -3266,6 +3313,10 @@ private enum BytecodeEmitter {
         case .osExit: return 2
         case .parseInt: return 4
         case .readInput: return 5
+        case .readStdin: return 3
+        case .writeFile: return 4
+        case .setRawMode: return 3
+        case .windowSize: return 3
         }
     }
 
@@ -3648,6 +3699,23 @@ private enum BytecodeEmitter {
             instructions.append(.readInput)
             instructions.append(.store(statusDestination))
             instructions.append(.store(dataDestination))
+        case .readStdin(let dataDestination, let statusDestination):
+            instructions.append(.readStdin)
+            instructions.append(.store(statusDestination))
+            instructions.append(.store(dataDestination))
+        case .writeFile(let destination, let path, let data):
+            instructions.append(.load(path))
+            instructions.append(.load(data))
+            instructions.append(.writeFile)
+            instructions.append(.store(destination))
+        case .setRawMode(let destination, let enabled):
+            instructions.append(.load(enabled))
+            instructions.append(.setTerminalRawMode)
+            instructions.append(.store(destination))
+        case .windowSize(let rowsDestination, let columnsDestination):
+            instructions.append(.terminalWindowSize)
+            instructions.append(.store(columnsDestination))
+            instructions.append(.store(rowsDestination))
         }
     }
 

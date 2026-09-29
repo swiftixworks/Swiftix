@@ -52,20 +52,25 @@ public enum GoExecutableLoader {
         }
 
         return Command(name: path, summary: "Swiftix Go executable") { child, arguments in
-            do {
-                let exitCode = try GoVirtualMachine().run(
-                    executable,
-                    eventLoop: child.eventLoop,
-                    processContext: child,
-                    arguments: arguments
-                ) { text in
+            // Resumable so an interactive program can wait for terminal input
+            // across host turns; the process exits when the run completes.
+            GoVirtualMachine().startProgram(
+                executable,
+                eventLoop: child.eventLoop,
+                processContext: child,
+                arguments: arguments,
+                write: { text in
                     _ = child.write(1, Array(text.utf8))
-                }
-                child.exit(exitCode)
-            } catch {
-                writeError(child, "\(path): \(String(describing: error))\n")
-                child.exit(1)
-            }
+                },
+                completion: { outcome in
+                    switch outcome {
+                    case .success(let result):
+                        child.exit(result.exitCode)
+                    case .failure(let error):
+                        writeError(child, "\(path): \(String(describing: error))\n")
+                        child.exit(1)
+                    }
+                })
         }
     }
 

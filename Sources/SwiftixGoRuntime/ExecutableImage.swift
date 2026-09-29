@@ -562,6 +562,14 @@ private struct ImageWriter {
             writeByte(95)
         case .readInput:
             writeByte(96)
+        case .readStdin:
+            writeByte(97)
+        case .writeFile:
+            writeByte(98)
+        case .setTerminalRawMode:
+            writeByte(99)
+        case .terminalWindowSize:
+            writeByte(100)
         case .makeMutex:
             writeByte(68)
         case .mutexLock:
@@ -858,6 +866,10 @@ private struct ImageReader {
         case 94: return .exit
         case 95: return .parseInt
         case 96: return .readInput
+        case 97: return .readStdin
+        case 98: return .writeFile
+        case 99: return .setTerminalRawMode
+        case 100: return .terminalWindowSize
         default: throw GoExecutableImageError.invalidOpcode(opcode)
         }
     }

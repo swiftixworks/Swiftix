@@ -99,6 +99,24 @@ SwiftixGoHost      host-file adapter and CLI
 - Each executable corresponds to one Swiftix process and shares its argv/env/cwd/file descriptors/signals.
 - The standard library reaches the guest VFS and network only through the `ProcessContext` syscall bridge.
 - `GoRuntimeResourceLimits` bounds images, heap, collections, goroutines, timers, handles, and I/O.
+- `swiftix/userland` provides the terminal ABI for full-screen programs:
+  `ReadStdin() (string, int)` returns the next fd 0 chunk (at most 4096 bytes,
+  never splitting a UTF-8 sequence) with status 0, or status 1 at end of input;
+  `WriteFile(path, data string) int` creates or truncates a VFS file and returns
+  0 or 1; `SetRawMode(enabled bool) bool` switches the fd 0 terminal and reports
+  `false` when fd 0 is not a terminal; `WindowSize() (int, int)` returns rows
+  and columns of the fd 1 (or fd 0) terminal, or `(0, 0)`. There is no
+  `SIGWINCH`; programs re-read `WindowSize` after input.
+- File-backed executables run resumably (`GoVirtualMachine.startProgram`). When
+  every goroutine waits and only `ReadStdin` can make progress, the run suspends
+  and the kernel resumes it when fd 0 delivers input, so an interactive program
+  waits for the terminal across host turns. The instruction and output budgets
+  then bound each uninterrupted slice between suspensions, not the session.
+  `runProgram` and `go run` still complete synchronously and report such a wait
+  as a deadlock.
+- A run that fails while its program left the terminal raw restores cooked
+  mode; a program that exits normally keeps the mode it chose, and the shell
+  restores cooked mode before its next prompt.
 - Exceeding a boundary must return a stable error rather than causing a host trap, infinite recursion, or unbounded allocation.
 
 The executable-image format and ABI have exact versions. Incompatible, corrupt, or incorrectly targeted images are rejected before launch.

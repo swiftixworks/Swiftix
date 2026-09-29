@@ -1439,6 +1439,13 @@ private struct FunctionChecker {
                 try require(arguments[1], assignableTo: .slice(.string))
                 return .string
             }
+            if case .identifier("userland", _) = base,
+                importedPaths.contains("swiftix/userland"),
+                let results = try userlandTerminalResults(
+                    name, arguments: arguments, position: position)
+            {
+                return results.first ?? .void
+            }
             if case .identifier(let packageName, _) = base,
                 packageName == "time",
                 importedPaths.contains("time"),
@@ -2214,6 +2221,42 @@ private struct FunctionChecker {
         return nil
     }
 
+    /// Signatures of the `swiftix/userland` terminal and file calls used by
+    /// full-screen programs, or `nil` when `name` is not one of them.
+    mutating func userlandTerminalResults(
+        _ name: String,
+        arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> [GoType]? {
+        let parameters: [GoType]
+        let results: [GoType]
+        switch name {
+        case "ReadStdin":
+            parameters = []
+            results = [.string, .int]
+        case "WriteFile":
+            parameters = [.string, .string]
+            results = [.int]
+        case "SetRawMode":
+            parameters = [.bool]
+            results = [.bool]
+        case "WindowSize":
+            parameters = []
+            results = [.int, .int]
+        default:
+            return nil
+        }
+        guard arguments.count == parameters.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: "wrong number of arguments in call to userland.\(name)")
+        }
+        for (argument, parameter) in zip(arguments, parameters) {
+            try require(argument, assignableTo: parameter)
+        }
+        return results
+    }
+
     mutating func callResultTypes(
         callee: GoExpression,
         arguments: [GoExpression],
@@ -2269,6 +2312,13 @@ private struct FunctionChecker {
                 try require(arguments[0], assignableTo: .string)
                 try require(arguments[1], assignableTo: .slice(.string))
                 return [.string, .int]
+            }
+            if case .identifier("userland", _) = base,
+                importedPaths.contains("swiftix/userland"),
+                let results = try userlandTerminalResults(
+                    name, arguments: arguments, position: position)
+            {
+                return results
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "context",

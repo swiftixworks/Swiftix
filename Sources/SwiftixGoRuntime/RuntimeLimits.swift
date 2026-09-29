@@ -345,7 +345,8 @@ internal enum GoExecutableValidator {
             .makeMutex, .mutexLock, .mutexUnlock, .makeWaitGroup,
             .waitGroupAdd, .waitGroupWait, .garbageCollect, .getMapIndex,
             .setMapIndex, .deleteMap, .rangeKeys, .rangeValue, .osArgs, .exit,
-            .parseInt, .readInput:
+            .parseInt, .readInput, .readStdin, .writeFile, .setTerminalRawMode,
+            .terminalWindowSize:
             break
         }
     }

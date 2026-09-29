@@ -19,6 +19,10 @@ enum GoBuiltinFunction: Sendable, Equatable {
     case osExit
     case strconvAtoi
     case userlandReadInput
+    case userlandReadStdin
+    case userlandWriteFile
+    case userlandSetRawMode
+    case userlandWindowSize
 }
 
 enum GoStandardLibrary {
@@ -34,6 +38,10 @@ enum GoStandardLibrary {
         case ("os", "Exit"): return .osExit
         case ("strconv", "Atoi"): return .strconvAtoi
         case ("userland", "ReadInput"): return .userlandReadInput
+        case ("userland", "ReadStdin"): return .userlandReadStdin
+        case ("userland", "WriteFile"): return .userlandWriteFile
+        case ("userland", "SetRawMode"): return .userlandSetRawMode
+        case ("userland", "WindowSize"): return .userlandWindowSize
         case ("time", "After"): return .timeAfter
         case ("time", "Sleep"): return .timeSleep
         case ("time", "Tick"): return .timeTick

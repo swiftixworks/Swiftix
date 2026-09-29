@@ -28,6 +28,38 @@ struct ShellTests {
         #expect(contains(captured.out, Array("hello world".utf8)))  // echo output
     }
 
+    @Test func shellRestoresCookedModeAfterAForegroundProgramLeavesTheTerminalRaw() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        let pty = PseudoTerminal()
+
+        final class Capture { var out: [UInt8] = []; var rawWhileRunning = false }
+        let captured = Capture()
+        pty.onOutput = { [weak pty] in
+            guard let pty else { return }
+            captured.out.append(contentsOf: pty.readForApp(max: 65_535))
+        }
+
+        let registry = CommandRegistry.builtins
+        registry.register(Command(name: "leave-raw", summary: "exit with a raw tty") { ctx, _ in
+            ctx.setTerminalRawMode(0, true)
+            captured.rawWhileRunning = pty.rawMode
+            ctx.exit(0)
+        })
+        kernel.spawn("sh", Programs.shell(tty: pty.slave, commands: registry))
+        loop.runUntilIdle()
+
+        pty.writeFromApp(Array("leave-raw\n".utf8))
+        loop.runUntilIdle()
+        #expect(captured.rawWhileRunning)
+        #expect(!pty.rawMode)
+
+        // Cooked line editing is back: the erased character never reaches `echo`.
+        pty.writeFromApp(Array("echo cookedX\u{7F}\n".utf8))
+        loop.runUntilIdle()
+        #expect(String(decoding: captured.out, as: UTF8.self).contains("cooked\n"))
+    }
+
     @Test func unknownCommandReports() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
