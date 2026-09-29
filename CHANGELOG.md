@@ -5,6 +5,19 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.11.1 — 2026-09-29
+
+This release adds host toolchain packages for two more host platforms. The
+toolchain itself is unchanged from 0.11.0.
+
+### Added
+
+- `swiftix-toolchain` packages for macOS on Intel (`amd64`: `.pkg` and
+  `.tar.gz`) and Linux on `arm64` (`.deb` and `.tar.gz`). CI builds and
+  install-smoke-tests them next to the existing macOS `arm64` and Linux
+  `amd64` packages, and signs and notarizes both macOS packages for tagged
+  releases.
+
 ## 0.11.0 — 2026-08-16
 
 This release establishes the versioned teaching-observability surface used by
