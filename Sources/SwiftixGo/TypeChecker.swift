@@ -1,5 +1,7 @@
 /// Static type checking for the Swiftix Go language subset.
 
+import SwiftixGoRuntime
+
 public struct GoStructFieldType: Sendable, Equatable {
     public let name: String
     public let type: GoType
@@ -1446,6 +1448,11 @@ private struct FunctionChecker {
             {
                 return results.first ?? .void
             }
+            if case .identifier("strings", _) = base,
+                importedPaths.contains("strings")
+            {
+                return try stringsCallResult(name, arguments: arguments, position: position)
+            }
             if case .identifier(let packageName, _) = base,
                 packageName == "time",
                 importedPaths.contains("time"),
@@ -2257,6 +2264,27 @@ private struct FunctionChecker {
         return results
     }
 
+    /// Check a call to a supported `strings` function and return its result.
+    mutating func stringsCallResult(
+        _ name: String,
+        arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        guard let function = GoStringsFunction(goName: name) else {
+            throw GoDiagnostic(position: position, message: "undefined: strings.\(name)")
+        }
+        let signature = function.signature
+        guard arguments.count == signature.parameters.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: "wrong number of arguments in call to strings.\(name)")
+        }
+        for (argument, parameter) in zip(arguments, signature.parameters) {
+            try require(argument, assignableTo: parameter)
+        }
+        return signature.result
+    }
+
     mutating func callResultTypes(
         callee: GoExpression,
         arguments: [GoExpression],
@@ -2319,6 +2347,11 @@ private struct FunctionChecker {
                     name, arguments: arguments, position: position)
             {
                 return results
+            }
+            if case .identifier("strings", _) = base,
+                importedPaths.contains("strings")
+            {
+                return [try stringsCallResult(name, arguments: arguments, position: position)]
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "context",

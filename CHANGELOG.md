@@ -20,6 +20,11 @@ format, behavior and platform changes are recorded here.
   emit terminal control sequences such as `"\x1b[2J"`. Escapes must still
   form valid UTF-8, and `gofmt -r` re-quotes control characters as `\x`
   escapes.
+- A native `strings` package: `Contains`, `Count`, `HasPrefix`, `HasSuffix`,
+  `Index`, `Join`, `LastIndex`, `Repeat`, `Split`, and `TrimSpace`, with Go
+  semantics and string and collection limits. Calls encode as opcode 101
+  followed by a function byte, so later functions need no new opcode; older
+  runtimes reject them at decode.
 
 ### Fixed
 

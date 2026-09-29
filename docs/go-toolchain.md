@@ -41,6 +41,7 @@ go build -o hello .
 | Runtime | Independent call stacks, managed heap, precise roots, and synchronous mark-sweep GC |
 | Tools | version/env/help, mod init, fmt, run, test, build, install, and clean -cache |
 | Standard library | fmt/errors/io/os, strings/bytes/strconv, basic collections, testing/sync/time/context, and parts of net/net/http |
+| `strings` | Native `Contains`, `Count`, `HasPrefix`, `HasSuffix`, `Index`, `Join`, `LastIndex`, `Repeat`, `Split`, and `TrimSpace` with Go semantics; each call costs a few VM instructions regardless of length |
 | System | argv/env/cwd/exit, VFS, file descriptors/pipes, shell PATH, logical time, and the minimal TCP path |
 
 ### Known Gaps

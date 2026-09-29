@@ -1,5 +1,7 @@
 /// Compile-time catalogue of the Swiftix Go standard-library surface.
 
+import SwiftixGoRuntime
+
 enum GoBuiltinFunction: Sendable, Equatable {
     case fmtPrint
     case fmtPrintln
@@ -23,12 +25,13 @@ enum GoBuiltinFunction: Sendable, Equatable {
     case userlandWriteFile
     case userlandSetRawMode
     case userlandWindowSize
+    case strings(GoStringsFunction)
 }
 
 enum GoStandardLibrary {
     static let supportedPackages = [
         "fmt", "testing", "time", "sync", "runtime",
-        "context", "net", "net/http", "os", "strconv", "swiftix/userland",
+        "context", "net", "net/http", "os", "strconv", "strings", "swiftix/userland",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -58,6 +61,8 @@ enum GoStandardLibrary {
         case ("http", "ListenAndServe"): return .httpListenAndServe
         case ("http", "Get"): return .httpGet
         case ("runtime", "GC"): return .runtimeGC
+        case ("strings", let name):
+            return GoStringsFunction(goName: name).map { .strings($0) }
         default: return nil
         }
     }
@@ -69,6 +74,20 @@ enum GoStandardLibrary {
         case ("time", "Millisecond"): return 1_000_000
         case ("time", "Second"): return 1_000_000_000
         default: return nil
+        }
+    }
+}
+
+extension GoStringsFunction {
+    /// Parameter and result types of the Go signature.
+    var signature: (parameters: [GoType], result: GoType) {
+        switch self {
+        case .contains, .hasPrefix, .hasSuffix: return ([.string, .string], .bool)
+        case .count, .index, .lastIndex: return ([.string, .string], .int)
+        case .join: return ([.slice(.string), .string], .string)
+        case .repeatString: return ([.string, .int], .string)
+        case .split: return ([.string, .string], .slice(.string))
+        case .trimSpace: return ([.string], .string)
         }
     }
 }

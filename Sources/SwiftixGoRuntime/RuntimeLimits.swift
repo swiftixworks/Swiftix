@@ -346,7 +346,7 @@ internal enum GoExecutableValidator {
             .waitGroupAdd, .waitGroupWait, .garbageCollect, .getMapIndex,
             .setMapIndex, .deleteMap, .rangeKeys, .rangeValue, .osArgs, .exit,
             .parseInt, .readInput, .readStdin, .writeFile, .setTerminalRawMode,
-            .terminalWindowSize:
+            .terminalWindowSize, .strings:
             break
         }
     }

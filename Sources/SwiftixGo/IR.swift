@@ -1,5 +1,7 @@
 /// Register-based intermediate representation shared by the compiler stages.
 
+import SwiftixGoRuntime
+
 public enum GoIRConstant: Sendable, Equatable {
     case int(Int64)
     case string(String)
@@ -152,6 +154,8 @@ public enum GoIROperation: Sendable, Equatable {
     case writeFile(destination: Int, path: Int, data: Int)
     case setRawMode(destination: Int, enabled: Int)
     case windowSize(rowsDestination: Int, columnsDestination: Int)
+    // Native Go `strings` functions.
+    case stringsCall(destination: Int, function: GoStringsFunction, arguments: [Int])
 }
 
 public struct GoIRFunction: Sendable, Equatable {

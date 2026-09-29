@@ -2182,6 +2182,11 @@ private struct IRLowerer {
                 operations.append(.windowSize(
                     rowsDestination: rows, columnsDestination: columns))
                 return rows
+            case .strings(let function):
+                let destination = allocateRegister()
+                operations.append(.stringsCall(
+                    destination: destination, function: function, arguments: registers))
+                return destination
             }
             return nil
         }
@@ -3083,6 +3088,12 @@ private struct IRLowerer {
                 return .channel(direction: .receiveOnly, element: .int)
             }
             if case .selector(let base, let member, _) = callee,
+                case .identifier("strings", _) = base,
+                let function = GoStringsFunction(goName: member)
+            {
+                return function.signature.result
+            }
+            if case .selector(let base, let member, _) = callee,
                 case .identifier("userland", _) = base
             {
                 switch GoStandardLibrary.resolve(package: "userland", member: member) {
@@ -3317,6 +3328,7 @@ private enum BytecodeEmitter {
         case .writeFile: return 4
         case .setRawMode: return 3
         case .windowSize: return 3
+        case .stringsCall(_, _, let arguments): return arguments.count + 2
         }
     }
 
@@ -3716,6 +3728,12 @@ private enum BytecodeEmitter {
             instructions.append(.terminalWindowSize)
             instructions.append(.store(columnsDestination))
             instructions.append(.store(rowsDestination))
+        case .stringsCall(let destination, let function, let arguments):
+            for argument in arguments {
+                instructions.append(.load(argument))
+            }
+            instructions.append(.strings(function))
+            instructions.append(.store(destination))
         }
     }
 

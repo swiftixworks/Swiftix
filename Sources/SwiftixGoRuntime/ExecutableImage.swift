@@ -570,6 +570,9 @@ private struct ImageWriter {
             writeByte(99)
         case .terminalWindowSize:
             writeByte(100)
+        case .strings(let function):
+            writeByte(101)
+            writeByte(function.rawValue)
         case .makeMutex:
             writeByte(68)
         case .mutexLock:
@@ -870,6 +873,12 @@ private struct ImageReader {
         case 98: return .writeFile
         case 99: return .setTerminalRawMode
         case 100: return .terminalWindowSize
+        case 101:
+            let code = try readByte()
+            guard let function = GoStringsFunction(rawValue: code) else {
+                throw GoExecutableImageError.invalidOpcode(code)
+            }
+            return .strings(function)
         default: throw GoExecutableImageError.invalidOpcode(opcode)
         }
     }

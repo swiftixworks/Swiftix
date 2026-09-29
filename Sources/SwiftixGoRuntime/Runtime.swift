@@ -453,6 +453,8 @@ public enum GoInstruction: Sendable, Equatable {
     /// Push `(rows, columns)` of the terminal at fd 1 (or fd 0), or `(0, 0)`
     /// when neither is a terminal.
     case terminalWindowSize
+    /// Pop the operands of a Go `strings` function and push its result.
+    case strings(GoStringsFunction)
 }
 
 public struct GoBytecodeFunction: Sendable, Equatable {
@@ -1532,6 +1534,96 @@ public struct GoVirtualMachine: Sendable {
             }
             rootValues.append(contentsOf: runtimeHandleRoots.values)
             heap.collect(rootCells: rootCells, rootValues: rootValues)
+        }
+
+        /// Pop the operands of a Go `strings` function and return its result.
+        func executeStrings(
+            _ function: GoStringsFunction,
+            stack: inout [GoValue]
+        ) throws -> GoValue {
+            func requireStringBytes(_ count: Int) throws {
+                guard count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+            }
+            switch function {
+            case .join:
+                guard case .string(let separator) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                var elements: [String] = []
+                switch try pop(&stack) {
+                case .nilValue:
+                    break
+                case .slice(let slice):
+                    _ = try validatedSliceRange(slice)
+                    for index in 0..<slice.length {
+                        let absoluteIndex = try checkedAdd(
+                            slice.start, index, resource: "slice index")
+                        guard case .string(let element) = try read(
+                            pointer: appending(index: absoluteIndex, to: slice.backing),
+                            heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        elements.append(element)
+                    }
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
+                var total = separator.utf8.count * max(0, elements.count - 1)
+                for element in elements {
+                    total = try checkedAdd(total, element.utf8.count, resource: "string bytes")
+                }
+                try requireStringBytes(total)
+                return .string(elements.joined(separator: separator))
+            case .repeatString:
+                guard case .int(let rawCount) = try pop(&stack),
+                    case .string(let text) = try pop(&stack)
+                else { throw GoRuntimeError.typeMismatch }
+                guard rawCount >= 0, let count = Int(exactly: rawCount) else {
+                    throw GoRuntimeError.panicError("strings: negative Repeat count")
+                }
+                let (total, overflow) = text.utf8.count.multipliedReportingOverflow(by: count)
+                guard !overflow else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                try requireStringBytes(total)
+                return .string(String(repeating: text, count: count))
+            case .trimSpace:
+                guard case .string(let text) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return .string(GoStrings.trimSpace(text))
+            case .contains, .count, .hasPrefix, .hasSuffix, .index, .lastIndex, .split:
+                guard case .string(let second) = try pop(&stack),
+                    case .string(let first) = try pop(&stack)
+                else { throw GoRuntimeError.typeMismatch }
+                switch function {
+                case .contains:
+                    return .bool(GoStrings.index(first, second) >= 0)
+                case .count:
+                    return .int(Int64(GoStrings.count(first, second)))
+                case .hasPrefix:
+                    return .bool(first.utf8.starts(with: second.utf8))
+                case .hasSuffix:
+                    return .bool(first.utf8.reversed().starts(with: second.utf8.reversed()))
+                case .index:
+                    return .int(Int64(GoStrings.index(first, second)))
+                case .lastIndex:
+                    return .int(Int64(GoStrings.lastIndex(first, second)))
+                default:
+                    let parts = GoStrings.split(first, second)
+                    try requireCollectionCount(parts.count, resource: "slice elements")
+                    let elements = parts.map { GoValue.string($0) }
+                    let cell = try heap.allocate(.array(elements))
+                    return .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell),
+                            start: 0,
+                            length: elements.count,
+                            capacity: elements.count,
+                            zeroValue: .string("")))
+                }
+            }
         }
 
         /// Run guest code until the program finishes or suspends on host input.
@@ -3631,6 +3723,8 @@ public struct GoVirtualMachine: Sendable {
                         ?? processContext?.terminalWindowSize(0)
                     stack.append(.int(Int64(size?.rows ?? 0)))
                     stack.append(.int(Int64(size?.columns ?? 0)))
+                case .strings(let function):
+                    stack.append(try executeStrings(function, stack: &stack))
                 case .return:
                     frames[frameIndex].pendingExit = .returning([])
                 case .returnValues(let count):
