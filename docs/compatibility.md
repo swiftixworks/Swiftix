@@ -1,10 +1,10 @@
 # Compatibility and migration
 
-> Current release baseline: Swiftix 0.11.1
+> Current release baseline: Swiftix 0.11.2
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Swiftix package | 0.11.1 | Each pre-1.0 minor may break API; patches preserve their minor series |
+| Swiftix package | 0.11.2 | Each pre-1.0 minor may break API; patches preserve their minor series |
 | Teaching procfs schema | 1 | Exact schema; independently packaged diagnostic tools must be rebuilt after a bump |
 | Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore |
 | Rootfs image | 1 | Exact format; digest, target and resource limits validated |

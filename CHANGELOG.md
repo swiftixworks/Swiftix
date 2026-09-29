@@ -5,6 +5,16 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.11.2 — 2026-09-29
+
+This release republishes the host toolchain packages so that every
+platform's downloads are complete. The toolchain is unchanged from 0.11.0.
+
+### Fixed
+
+- The Linux `arm64` `.tar.gz` package, which was missing from the 0.11.1
+  downloads, is published again alongside the other seven packages.
+
 ## 0.11.1 — 2026-09-29
 
 This release adds host toolchain packages for two more host platforms. The
