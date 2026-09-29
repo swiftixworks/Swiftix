@@ -12,6 +12,7 @@ output_dir="${repository_root}/.build/toolchain-artifacts"
 requested_version=""
 requested_formats="all"
 source_commit=""
+requested_architecture=""
 skip_build=false
 
 usage() {
@@ -23,6 +24,8 @@ Options:
   --output-dir DIRECTORY  Artifact destination (default: .build/toolchain-artifacts).
   --formats LIST          Comma-separated pkg,deb,tar.gz or "all".
   --source-commit SHA     Source commit recorded beside the checksums.
+  --architecture ARCH     Target arm64 or amd64 (default: the host). macOS can
+                          cross-compile the other architecture; Linux cannot.
   --skip-build            Package existing release binaries.
   -h, --help              Show this help.
 
@@ -47,6 +50,10 @@ while (($# > 0)); do
             ;;
         --source-commit)
             source_commit="${2:?missing value for --source-commit}"
+            shift 2
+            ;;
+        --architecture)
+            requested_architecture="${2:?missing value for --architecture}"
             shift 2
             ;;
         --skip-build)
@@ -98,19 +105,33 @@ case "${host_os}" in
         ;;
 esac
 case "${host_machine}" in
-    arm64|aarch64)
-        architecture="arm64"
-        debian_architecture="arm64"
-        ;;
-    x86_64|amd64)
-        architecture="amd64"
-        debian_architecture="amd64"
-        ;;
+    arm64|aarch64) host_architecture="arm64" ;;
+    x86_64|amd64) host_architecture="amd64" ;;
     *)
         echo "unsupported packaging architecture: ${host_machine}" >&2
         exit 1
         ;;
 esac
+architecture="${requested_architecture:-${host_architecture}}"
+case "${architecture}" in
+    arm64) swift_architecture="arm64" ;;
+    amd64) swift_architecture="x86_64" ;;
+    *)
+        echo "unsupported target architecture: ${architecture} (use arm64 or amd64)" >&2
+        exit 2
+        ;;
+esac
+debian_architecture="${architecture}"
+cross_compiling=false
+if [[ "${architecture}" != "${host_architecture}" ]]; then
+    if [[ "${platform}" != "macos" ]]; then
+        echo "cross-architecture packaging is only supported on macOS" >&2
+        exit 2
+    fi
+    # SwiftPM cross-compiles Apple targets with --arch; an Apple silicon host
+    # runs the resulting x86_64 binary under Rosetta for the version check.
+    cross_compiling=true
+fi
 
 formats="${requested_formats}"
 if [[ "${formats}" == "all" ]]; then
@@ -140,6 +161,9 @@ if [[ "${platform}" != "linux" && ",${formats}," == *,deb,* ]]; then
 fi
 
 build_flags=(-c release -Xswiftc -warnings-as-errors)
+if [[ "${cross_compiling}" == "true" ]]; then
+    build_flags+=(--arch "${swift_architecture}")
+fi
 if [[ "${platform}" == "linux" && "${SWIFTIX_STATIC_SWIFT_STDLIB:-true}" != "false" ]]; then
     build_flags+=(--static-swift-stdlib)
 fi

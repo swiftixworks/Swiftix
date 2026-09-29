@@ -6,13 +6,16 @@
 
 set -euo pipefail
 
-if (($# != 2)); then
-    echo "usage: Packaging/smoke-test-toolchain.sh ARTIFACT_DIR VERSION" >&2
+if (($# < 2 || $# > 3)); then
+    echo "usage: Packaging/smoke-test-toolchain.sh ARTIFACT_DIR VERSION [ARCHITECTURE]" >&2
     exit 2
 fi
 
 artifact_dir="$1"
 version="$2"
+# The package architecture to test (arm64 or amd64, default: the host). On
+# Apple silicon an amd64 package runs under Rosetta.
+requested_architecture="${3:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "${script_dir}/.." && pwd)"
 "${repository_root}/Scripts/validate-semver.py" "${version}"
@@ -51,10 +54,12 @@ verify_commands() {
 
 case "$(uname -s)" in
     Darwin)
-        package_path="${artifact_dir}/swiftix-toolchain-${version}-macos-$(uname -m).pkg"
-        if [[ "$(uname -m)" == "x86_64" ]]; then
-            package_path="${artifact_dir}/swiftix-toolchain-${version}-macos-amd64.pkg"
+        macos_architecture="${requested_architecture}"
+        if [[ -z "${macos_architecture}" ]]; then
+            macos_architecture="$(uname -m)"
+            if [[ "${macos_architecture}" == "x86_64" ]]; then macos_architecture="amd64"; fi
         fi
+        package_path="${artifact_dir}/swiftix-toolchain-${version}-macos-${macos_architecture}.pkg"
         test -f "${package_path}"
         require_absent /usr/local/bin/swiftix-go
         require_absent /usr/local/share/doc/swiftix-toolchain/LICENSE
@@ -76,6 +81,10 @@ case "$(uname -s)" in
         ;;
     Linux)
         architecture="$(dpkg --print-architecture)"
+        if [[ -n "${requested_architecture}" && "${requested_architecture}" != "${architecture}" ]]; then
+            echo "cannot smoke-test a ${requested_architecture} package on a ${architecture} host" >&2
+            exit 1
+        fi
         package_path="${artifact_dir}/swiftix-toolchain_${version}_${architecture}.deb"
         test -f "${package_path}"
         require_absent /usr/bin/swiftix-go

@@ -87,29 +87,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-15-intel]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
-
-      - name: Select an Xcode that provides Swift 6.3
-        # The Intel image's default Xcode predates Swift 6.3 (swift-tools-version).
-        if: matrix.os == 'macos-15-intel'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V -r); do
-            if DEVELOPER_DIR="${app}/Contents/Developer" xcrun swift --version 2>/dev/null \
-              | grep -Eq 'Swift version (6\.([3-9]|[1-9][0-9])|[7-9]\.)'; then
-              sudo xcode-select --switch "${app}"
-              swift --version
-              exit 0
-            fi
-          done
-          echo "no installed Xcode provides Swift 6.3 or newer:" >&2
-          ls -d /Applications/Xcode*.app >&2 || true
-          exit 1
 
       - name: Install Swift 6.3.3
         if: runner.os == 'Linux'
@@ -170,33 +152,22 @@ jobs:
         run: swift build --package-path Example -Xswiftc -warnings-as-errors
 
   package-host-toolchain:
-    name: Package host toolchain (${{ matrix.os }})
+    name: Package host toolchain (${{ matrix.os }}${{ matrix.architecture && format(', {0}', matrix.architecture) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-15-intel]
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: macos-26
+          # No Intel image ships Swift 6.3, so the Intel package is
+          # cross-compiled on Apple silicon and smoke-tested under Rosetta.
+          - os: macos-26
+            architecture: amd64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
-
-      - name: Select an Xcode that provides Swift 6.3
-        # The Intel image's default Xcode predates Swift 6.3 (swift-tools-version).
-        if: matrix.os == 'macos-15-intel'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V -r); do
-            if DEVELOPER_DIR="${app}/Contents/Developer" xcrun swift --version 2>/dev/null \
-              | grep -Eq 'Swift version (6\.([3-9]|[1-9][0-9])|[7-9]\.)'; then
-              sudo xcode-select --switch "${app}"
-              swift --version
-              exit 0
-            fi
-          done
-          echo "no installed Xcode provides Swift 6.3 or newer:" >&2
-          ls -d /Applications/Xcode*.app >&2 || true
-          exit 1
 
       - name: Install Swift 6.3.3
         if: runner.os == 'Linux'
@@ -236,6 +207,8 @@ jobs:
       - name: Resolve release identity
         id: release
         shell: bash
+        env:
+          MATRIX_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           version="$(sed -n 's/.*public static let version = "\([^"]*\)".*/\1/p' Sources/Swiftix/Swiftix.swift)"
           Scripts/validate-semver.py "${version}"
@@ -243,10 +216,10 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match Swiftix.version ${version}" >&2
             exit 1
           fi
-          case "$(uname -m)" in
+          case "${MATRIX_ARCHITECTURE:-$(uname -m)}" in
             arm64|aarch64) architecture=arm64 ;;
             x86_64|amd64) architecture=amd64 ;;
-            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+            *) echo "unsupported architecture: ${MATRIX_ARCHITECTURE:-$(uname -m)}" >&2; exit 1 ;;
           esac
           if [[ "$(uname -s)" == Darwin ]]; then platform=macos; else platform=linux; fi
           echo "version=${version}" >>"${GITHUB_OUTPUT}"
@@ -310,10 +283,15 @@ jobs:
           echo "SWIFTIX_NOTARY_KEY_ID=${NOTARY_KEY_ID}" >>"${GITHUB_ENV}"
           echo "SWIFTIX_NOTARY_ISSUER_ID=${NOTARY_ISSUER_ID}" >>"${GITHUB_ENV}"
 
+      - name: Install Rosetta for the cross-compiled Intel package
+        if: runner.os == 'macOS' && matrix.architecture == 'amd64'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
       - name: Build installers
         run: |
           Packaging/build-toolchain.sh \
             --version "${{ steps.release.outputs.version }}" \
+            --architecture "${{ steps.release.outputs.architecture }}" \
             --source-commit "${GITHUB_SHA}" \
             --output-dir toolchain-artifacts
 
@@ -321,7 +299,8 @@ jobs:
         run: |
           Packaging/smoke-test-toolchain.sh \
             toolchain-artifacts \
-            "${{ steps.release.outputs.version }}"
+            "${{ steps.release.outputs.version }}" \
+            "${{ steps.release.outputs.architecture }}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6
