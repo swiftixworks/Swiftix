@@ -4,7 +4,7 @@
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Swiftix package | 0.11.2 | Each pre-1.0 minor may break API; patches preserve their minor series |
+| Swiftix package | 0.12.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
 | Teaching procfs schema | 1 | Exact schema; independently packaged diagnostic tools must be rebuilt after a bump |
 | Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore |
 | Rootfs image | 1 | Exact format; digest, target and resource limits validated |
@@ -163,6 +163,21 @@ Other intentional 0.10 API and semantic corrections:
   `SyscallError.brokenPipe` (`EPIPE`);
 - a second UDP bind never displaces a live incumbent, including when only the
   newcomer enables `SO_REUSEADDR`.
+
+The 0.12 Swiftix Go terminal and `strings` support intentionally extends the
+`v0.11.2` API:
+
+- `GoInstruction` gains `.readStdin`, `.writeFile`, `.setTerminalRawMode`,
+  `.terminalWindowSize`, and `.strings(GoStringsFunction)`, and
+  `GoIROperation` gains the matching operations; exhaustive switches must
+  handle the new cases.
+- images that use the new opcodes (97–101) need a 0.12 runtime; the image
+  format and ABI versions stay at 10, so existing images keep running.
+- `GoExecutableLoader` runs file-backed programs resumably, so a program that
+  waits on terminal input suspends instead of failing with a deadlock, and its
+  instruction and output budgets apply per uninterrupted slice. Direct
+  `runProgram` callers keep the synchronous contract; use `startProgram` for
+  interactive programs.
 
 Unknown snapshot, rootfs, Go image, and package formats fail before mutating
 guest state. Preserve the old artifact and report every relevant version from

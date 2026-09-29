@@ -5,6 +5,13 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- The package version advances to 0.12.0: the public `GoInstruction` and
+  `GoIROperation` enums gain cases for the terminal ABI and `strings`, which
+  breaks exhaustive switches. See the 0.12 notes in
+  [compatibility](docs/compatibility.md).
+
 ### Added
 
 - `swiftix/userland` terminal calls for full-screen Go programs:
