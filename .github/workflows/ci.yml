@@ -87,11 +87,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Select an Xcode that provides Swift 6.3
+        # The Intel image's default Xcode predates Swift 6.3 (swift-tools-version).
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V -r); do
+            if DEVELOPER_DIR="${app}/Contents/Developer" xcrun swift --version 2>/dev/null \
+              | grep -Eq 'Swift version (6\.([3-9]|[1-9][0-9])|[7-9]\.)'; then
+              sudo xcode-select --switch "${app}"
+              swift --version
+              exit 0
+            fi
+          done
+          echo "no installed Xcode provides Swift 6.3 or newer:" >&2
+          ls -d /Applications/Xcode*.app >&2 || true
+          exit 1
 
       - name: Install Swift 6.3.3
         if: runner.os == 'Linux'
@@ -156,11 +174,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Select an Xcode that provides Swift 6.3
+        # The Intel image's default Xcode predates Swift 6.3 (swift-tools-version).
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for app in $(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V -r); do
+            if DEVELOPER_DIR="${app}/Contents/Developer" xcrun swift --version 2>/dev/null \
+              | grep -Eq 'Swift version (6\.([3-9]|[1-9][0-9])|[7-9]\.)'; then
+              sudo xcode-select --switch "${app}"
+              swift --version
+              exit 0
+            fi
+          done
+          echo "no installed Xcode provides Swift 6.3 or newer:" >&2
+          ls -d /Applications/Xcode*.app >&2 || true
+          exit 1
 
       - name: Install Swift 6.3.3
         if: runner.os == 'Linux'
