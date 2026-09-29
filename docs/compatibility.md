@@ -1,6 +1,6 @@
 # Compatibility and migration
 
-> Current release baseline: Swiftix 0.11.2
+> Current release baseline: Swiftix 0.12.0
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |

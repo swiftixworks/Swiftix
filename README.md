@@ -28,7 +28,7 @@ Pre-1.0 consumers should pin the intended minor compatibility series:
 dependencies: [
     .package(
         url: "https://github.com/swiftixworks/Swiftix.git",
-        .upToNextMinor(from: "0.11.0")
+        .upToNextMinor(from: "0.12.0")
     ),
 ],
 targets: [
@@ -39,7 +39,7 @@ targets: [
 ]
 ```
 
-Patch releases preserve the 0.11 public API; a later pre-1.0 minor may make a
+Patch releases preserve the 0.12 public API; a later pre-1.0 minor may make a
 documented breaking correction.
 
 ## Minimal Example

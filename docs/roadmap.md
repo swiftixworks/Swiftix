@@ -1,7 +1,7 @@
 # Swiftix Product Roadmap
 
 > Status: direction draft
-> Updated: 2026-08-16
+> Updated: 2026-09-30
 > Versions define capability boundaries, not release dates.
 
 ## Positioning and Version Rules
@@ -57,6 +57,24 @@ through the public guest surface; every displayed value has a tested source of
 truth; aggregate runtime-memory overflow fails deterministically; the 0.11 API,
 procfs schemas, documentation, and release metadata pass all compatibility and
 platform gates.
+
+## 0.12 — Interactive Guest Programs
+
+Let independently packaged Swiftix Go programs run full-screen in a terminal
+without folding them back into the core.
+
+- Give Swiftix Go a terminal ABI: raw mode, window size, suspending stdin
+  reads, and whole-file writes.
+- Run file-backed executables resumably, so a program waits across host turns
+  for terminal input instead of reporting a deadlock.
+- Add Go string escapes and native `strings` functions, so text programs avoid
+  per-byte guest loops.
+- Keep a nested process step from reaping a process whose enclosing step is
+  still running.
+
+**Exit criterion:** the independently packaged `nano` edits and saves files
+through the public guest surface of the Minimal distribution; the 0.12 API
+break is versioned and documented; release metadata and API gates pass.
 
 ## 1.0 — Stable Foundation
 

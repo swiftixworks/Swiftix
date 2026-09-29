@@ -5,8 +5,19 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.12.0 — 2026-09-30
+
+This release lets independently packaged Swiftix Go programs run full-screen
+in a terminal, such as the nano-style editor from the `editors` repository.
+It is an intentional pre-1.0 API break: see the 0.12 notes in
+[compatibility](docs/compatibility.md).
+
 ### Changed
 
+- The GitHub Actions workflow is removed. Verification runs locally with the
+  commands in the README, and host toolchain packages are built, signed, and
+  notarized as manual release steps; this release publishes no packaged
+  toolchain.
 - The package version advances to 0.12.0: the public `GoInstruction` and
   `GoIROperation` enums gain cases for the terminal ABI and `strings`, which
   breaks exhaustive switches. See the 0.12 notes in
