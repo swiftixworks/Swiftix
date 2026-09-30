@@ -112,7 +112,7 @@ swift build --package-path Example -Xswiftc -warnings-as-errors
 git diff --check
 ```
 
-There is no hosted CI: run the commands above before merging. Package host tools with `Packaging/build-toolchain.sh` and smoke-test them with `Packaging/smoke-test-toolchain.sh`; signing and notarizing macOS release artifacts is a manual release step. See the [product roadmap](docs/roadmap.md) for the complete release criteria.
+There is no CI on push or pull requests: run the commands above before merging. To package a release, start the manual **Release toolchain** workflow with the release tag; it builds the macOS and Linux installers with `Packaging/build-toolchain.sh`, signs and notarizes the macOS packages, and smoke-tests each one with `Packaging/smoke-test-toolchain.sh`. See the [product roadmap](docs/roadmap.md) for the complete release criteria.
 
 ## Documentation
 
