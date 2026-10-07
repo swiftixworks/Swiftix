@@ -1,6 +1,6 @@
 # Swiftix Core Architecture and Scope
 
-> Last verified: 2026-08-15<br>
+> Last verified: 2026-10-07<br>
 > Scope: the `Swiftix` core target
 
 This document answers three questions: what the core owns, how its objects collaborate, and where downstream consumers connect. See the [README](../README.md) for installation and examples, and the links at the end for specialized contracts.
@@ -83,7 +83,34 @@ are not prerequisites for duplicating a complete Linux container stack.
 - Blocking syscalls suspend and resume through park/wake and `IOReadiness`; async frontends return to the bound `SwiftixExecutor`.
 - Owner scopes support pause, resume, and cancel; event tokens can physically remove timers.
 - The Go VM uses an instruction quantum so ready kernel work cannot be starved indefinitely.
+- A CPU-bound process gives up the processor with `ProcessContext.yield` (the Go quantum does), not a zero-length sleep. A yield keeps its place among ready work but does not hold logical time; see [Real-Time Driving](#real-time-driving).
 - `Kernel.pause/resume/shutdown` manages process work and network timers together, and node destruction cancels owned work.
+
+### Real-Time Driving
+
+A real-time host calls `EventLoop.advance(by:stepBudget:)` with the time that
+elapsed since its previous call and the amount of work it can afford.
+
+- **Timers and executor jobs hold the clock.** They run in deadline order at
+  exactly their deadline. If the budget runs out first, the call returns
+  `.budgetExceeded` with `now` at the last event processed, short of the
+  target, and nothing is skipped.
+- **Yielded CPU-bound work does not.** Inside the window, a timer that is due
+  later runs after at most 8 consecutive yields. When the budget runs out and
+  yields are the only work left in the window, `now` still reaches the target;
+  the result is `.budgetExceeded` because ready work remains.
+- **Host contract.** Treat `.budgetExceeded` as "call again soon", and compare
+  `now` with the frame's own target: if it is short, advance by the remainder
+  rather than discarding it, or guest time falls behind. The step budget is how
+  much CPU-bound work one interval holds, so a busy process gets further per
+  frame with a larger budget while timer times stay the same. Runs driven the
+  same way are identical.
+- `runUntilIdle()` and `runNext()` are unchanged: they never move the clock
+  past ready work, yields included.
+
+Processes that loop through `async` syscalls (`awk`, `bc`, `cat /dev/zero`)
+still resume as executor jobs and therefore still hold the clock while they
+spin; only the Go quantum uses the yield today.
 
 ### Host-Owned Machine State
 
@@ -92,7 +119,14 @@ Real time and power belong to the host, so the core exposes them as small
 `Kernel.wallClock` (set with `setWallClock(epochSeconds:utcOffsetSeconds:zoneAbbreviation:)`)
 maps logical time to epoch time and a fixed zone; its default is the
 deterministic "logical zero is the Unix epoch, UTC", and file timestamps are
-stamped with it. `Kernel.onPowerRequest` receives `.shutdown`/`.reboot` when a
+stamped with it: every created node gets all three times, and a directory's
+mtime/ctime follow the entries added to, removed from, or renamed in it.
+Restoring a snapshot or image keeps the stored times. Nodes the kernel itself
+provides (`/dev/null`, `/proc/uptime`) are dated at boot on the current
+mapping, and computed ones (`/proc/<pid>`) at the time of the lookup.
+`uptime` and `/proc/uptime` count logical seconds since boot, so they trail
+`date` by whatever real time the host did not advance and later bridged with
+`setWallClock`. `Kernel.onPowerRequest` receives `.shutdown`/`.reboot` when a
 uid-0 guest calls `ProcessContext.requestPower` (`shutdown`, `reboot`,
 `poweroff`, `halt`); it runs on the kernel executor from a kernel-owned job, the
 core never acts on the request itself, and without a handler the commands fail

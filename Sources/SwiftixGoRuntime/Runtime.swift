@@ -1361,10 +1361,11 @@ public struct GoVirtualMachine: Sendable {
             }
             if quantumEnded {
                 if cooperative, let processContext {
-                    // End this step. The zero-length sleep keeps the process
-                    // alive and queues the next slice behind other ready work.
+                    // End this step. The yield keeps the process runnable and
+                    // queues the next slice behind other ready work, without
+                    // holding logical time at this instant.
                     beginHostWait()
-                    processContext.sleep(0) { endHostWait() }
+                    processContext.yield { endHostWait() }
                     throw GoExecutionSuspension()
                 }
                 // Give one already-ready EventLoop job/timer a turn at each

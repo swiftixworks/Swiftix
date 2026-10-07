@@ -22,13 +22,18 @@ final class ProcessScheduler {
     /// the process's work scope, so stop/pause can freeze it and logical exit
     /// physically removes it even while a zombie identity remains.
     /// `finishStep` then decides the process's fate.
-    func runStep(_ process: Process, _ work: @escaping () -> Void) {
+    ///
+    /// `yielding` marks the step as the continuation of a CPU-bound process
+    /// that gave up the processor: it is queued in the same place, but the
+    /// event loop lets timers and the clock pass it (see `EventLoop`).
+    func runStep(_ process: Process, yielding: Bool = false, _ work: @escaping () -> Void) {
         guard processTable.contains(process.pid), process.isLive else { return }
         process.queuedSteps += 1
         if !process.isStopped, process.runState != .running {
             process.runState = .runnable
         }
-        process.workScope.schedule(after: 0) { [weak self, weak process] in
+        let enqueue = yielding ? process.workScope.yield : { process.workScope.schedule(after: 0, $0) }
+        enqueue { [weak self, weak process] in
             guard let self, let process,
                   self.processTable.contains(process.pid), process.isLive else { return }
             process.queuedSteps -= 1

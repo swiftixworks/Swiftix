@@ -318,8 +318,11 @@ public final class Kernel {
         guard mountpoint != "/",
               let node = vfs.lookup(mountpoint, mounts: ns), node.kind == .directory else { return false }
         let name = MountNamespace.components(mountpoint).last ?? "/"
+        // The root of a new filesystem is created now, like any directory.
+        let root = VNode(directory: name)
+        root.touchAll(epochNow)
         ns.add(MountNamespace.MountEntry(mountpoint: mountpoint,
-                                         root: VNode(directory: name),
+                                         root: root,
                                          type: "tmpfs", source: "tmpfs"))
         return true
     }
@@ -750,8 +753,8 @@ public final class Kernel {
         processExit.handleExit(process, status: ProcessExitStatus.exited(0))
     }
 
-    func runStep(_ process: Process, _ work: @escaping () -> Void) {
-        processScheduler.runStep(process, work)
+    func runStep(_ process: Process, yielding: Bool = false, _ work: @escaping () -> Void) {
+        processScheduler.runStep(process, yielding: yielding, work)
     }
 
     func exit(_ process: Process, code: Int32) {
@@ -931,6 +934,15 @@ public final class Kernel {
         wallClock = WallClock(epochAtLogicalZero: epochSeconds - loop.now,
                               utcOffsetSeconds: utcOffsetSeconds,
                               zoneAbbreviation: zoneAbbreviation)
+        stampKernelProvidedNodes()
+    }
+
+    /// Date the nodes the kernel itself provides (`/dev/null`, `/proc/uptime`,
+    /// ...) at boot, as `/proc/stat` reports it. They are created before a host
+    /// can inject its clock, so they are dated again whenever the mapping
+    /// changes; nothing persisted is touched.
+    private func stampKernelProvidedNodes() {
+        vfs.stampKernelProvidedNodes(wallClock.epochSeconds(atLogicalTime: bootLogicalTime))
     }
 
     /// Reseed the generator behind `/dev/random` and `/dev/urandom`. The stream
@@ -1135,6 +1147,7 @@ public final class Kernel {
         for path in cgroups.allPaths {
             if let group = cgroups.cgroup(path) { mountCgroupFiles(group) }
         }
+        stampKernelProvidedNodes()
     }
 
     /// System-wide procfs files that have a real source of truth in this kernel.

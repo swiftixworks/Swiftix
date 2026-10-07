@@ -437,6 +437,19 @@ extension ProcessContext {
         }
     }
 
+    /// Give up the processor in the middle of CPU-bound work, then resume in a
+    /// later step. Other ready processes and kernel work run in between, the
+    /// process stays runnable (not sleeping), and a pending signal is delivered
+    /// before `resume`. Call as the tail of a step.
+    ///
+    /// Use this, not `sleep(0)`, for a long computation: a zero-length sleep is
+    /// a timer at the current instant, so a process that keeps taking one
+    /// holds logical time still for the whole kernel, while a yield lets due
+    /// timers and the clock move past it (see `EventLoop.advance(by:stepBudget:)`).
+    public func yield(resume: @escaping () -> Void) {
+        kernel.runStep(process, yielding: true, resume)
+    }
+
     // MARK: - Child processes
 
     /// Block until one of this process's children exits.

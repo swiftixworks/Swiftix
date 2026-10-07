@@ -392,11 +392,6 @@ extension VirtualFileSystem {
                                   inodes: orderedRecords)
     }
 
-    private func shouldPersist(_ node: VNode) -> Bool {
-        !node.isKernelProvided
-            && !(node.kind == .file && (node.provider != nil || node.deviceKind != nil))
-    }
-
     /// Validate and build a detached candidate tree before changing the live VFS.
     /// The final root-state adoption is the only mutation, so any malformed image
     /// returns `false` with the previous tree byte-for-byte and metadata-identical.

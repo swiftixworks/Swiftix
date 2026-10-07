@@ -37,9 +37,16 @@ final class VirtualFileSystem {
 
     let root = VNode(directory: "/")
 
-    /// Logical clock provider — returns `EventLoop.now` so timestamp updates
-    /// use the simulation's deterministic time rather than wall-clock time.
-    /// Set by the kernel at construction.
+    /// Timestamp source: the kernel wall clock (`Kernel.epochNow`), which maps
+    /// the loop's logical time onto epoch seconds. Deterministic unless the
+    /// host injected a real epoch. Set by the kernel at construction.
+    ///
+    /// Every namespace mutation in this type stamps through it, the same way
+    /// for every node kind and for both the mount-aware and the
+    /// capability-scoped entry points: a created node gets all three times, and
+    /// the directory that gains, loses, or renames an entry gets a new
+    /// mtime/ctime (POSIX). Restoring a snapshot does not pass through here, so
+    /// persisted times are kept as stored.
     var clock: () -> Double = { 0 }
 
     /// The process on whose behalf the VFS is currently being consulted. Every
@@ -257,7 +264,7 @@ final class VirtualFileSystem {
             if let search, !exempt, !search.permits(node) { return .searchDenied }
             // Real children win; a dynamic-directory node (e.g. /proc) can also
             // resolve computed children like a live pid.
-            guard let next = node.child(part) ?? node.resolveDynamicChild?(part) else { return .missing }
+            guard let next = node.child(part) ?? computedChild(part, of: node) else { return .missing }
             let isFinal = remaining.isEmpty
             if next.kind == .symlink, !(isFinal && !follow) {
                 hops += 1
@@ -283,6 +290,38 @@ final class VirtualFileSystem {
         return .found(node)
     }
 
+    /// A computed child of a dynamic directory (`/proc/<pid>`, `/dev/pts/<n>`).
+    /// The transient subtree is built for this lookup, so it is stamped with
+    /// the current time rather than left at the epoch.
+    private func computedChild(_ name: String, of directory: VNode) -> VNode? {
+        guard let child = directory.resolveDynamicChild?(name) else { return nil }
+        let now = clock()
+        var pending = [child]
+        while let node = pending.popLast() {
+            node.touchAll(now)
+            pending.append(contentsOf: node.children.values)
+        }
+        return child
+    }
+
+    /// Whether `node` is written to a filesystem snapshot. Kernel-provided
+    /// nodes and computed or device files are re-created on every boot.
+    func shouldPersist(_ node: VNode) -> Bool {
+        !node.isKernelProvided
+            && !(node.kind == .file && (node.provider != nil || node.deviceKind != nil))
+    }
+
+    /// Give every node the kernel re-creates on boot (device files, procfs and
+    /// sysfs files, the `/dev/std*` links) the timestamp `epoch`. Persisted
+    /// nodes, including the directories that hold them, are never touched.
+    func stampKernelProvidedNodes(_ epoch: Double) {
+        var pending = [root]
+        while let node = pending.popLast() {
+            if !shouldPersist(node) { node.touchAll(epoch) }
+            pending.append(contentsOf: node.children.values)
+        }
+    }
+
     /// Create a regular file beneath a capability root. Unlike the convenience
     /// tmpfs API, this requires the parent directory to exist; intermediate
     /// symlinks are resolved with the same confinement as `lookup`.
@@ -304,7 +343,32 @@ final class VirtualFileSystem {
         guard let parent = lookup(parentPath, beneath: root),
               parent.kind == .directory else { return nil }
         if let existing = parent.child(name) { return existing }
-        return parent.addChild(name: name, node: make(name))
+        return addEntry(name, make(name), to: parent, at: clock())
+    }
+
+    /// Enter a freshly created node into `parent`: the node is born `now` and
+    /// the directory's contents changed `now`.
+    @discardableResult
+    private func addEntry(_ name: String, _ node: VNode, to parent: VNode, at now: Double) -> VNode {
+        parent.addChild(name: name, node: node)
+        node.touchAll(now)
+        parent.touchModify(now)
+        return node
+    }
+
+    /// Drop the entry `name` of `parent`, which references `target`. The inode
+    /// loses a link (ctime) and the directory an entry (mtime/ctime). When the
+    /// last name goes while descriptors are still open, the node stays alive
+    /// for them (deferred deletion) until the last one closes.
+    @discardableResult
+    private func removeEntry(_ name: String, of target: VNode, from parent: VNode, at now: Double) -> Bool {
+        target.nlink -= 1
+        if target.nlink <= 0, target.openHandles > 0 {
+            target.unlinked = true
+        }
+        target.touchChange(now)
+        parent.touchModify(now)
+        return parent.removeChild(name)
     }
 
     /// Remove a file or empty directory beneath a capability root without letting
@@ -317,7 +381,7 @@ final class VirtualFileSystem {
               parent.kind == .directory,
               let target = parent.child(name) else { return false }
         if target.kind == .directory, !target.children.isEmpty { return false }
-        return parent.removeChild(name)
+        return removeEntry(name, of: target, from: parent, at: clock())
     }
 
     enum RenameError: Error {
@@ -372,11 +436,17 @@ final class VirtualFileSystem {
             if destination.kind == .directory, !destination.children.isEmpty {
                 throw RenameError.destinationNotEmpty
             }
-            _ = destinationParent.removeChild(destinationName)
+            removeEntry(destinationName, of: destination, from: destinationParent, at: clock())
         }
 
+        // The inode only changes names, so its link count and data times stay;
+        // its ctime and both directories' mtime/ctime record the move.
+        let now = clock()
         _ = sourceParent.removeChild(sourceName)
         destinationParent.addChild(name: destinationName, node: source)
+        source.touchChange(now)
+        sourceParent.touchModify(now)
+        destinationParent.touchModify(now)
     }
 
     private func contains(_ root: VNode, node candidate: VNode) -> Bool {
@@ -407,19 +477,26 @@ final class VirtualFileSystem {
         let (origin, subpath) = mountOrigin(path, mounts)
         let parts = components(subpath)
         guard let name = parts.last else { return nil }
-        var node = origin
-        for part in parts.dropLast() {
-            let child = node.child(part)
-                ?? node.addChild(name: part, node: VNode(directory: part))
-            child.touchAll(clock())
-            node = child
-        }
-        if node.child(name) != nil { return nil }
-        let link = node.addChild(name: name, node: VNode(symlink: name, target: target))
         let now = clock()
-        link.touchAll(now)
-        node.touchModify(now)
-        return link
+        guard let node = makeParents(parts.dropLast(), from: origin, at: now),
+              node.child(name) == nil else { return nil }
+        return addEntry(name, VNode(symlink: name, target: target), to: node, at: now)
+    }
+
+    /// Walk `parts` from `origin`, creating each missing directory (stamped
+    /// `now`, like its parent's mtime). Existing directories are traversed
+    /// untouched; `nil` when a component exists and is not a directory.
+    private func makeParents(_ parts: ArraySlice<String>, from origin: VNode, at now: Double) -> VNode? {
+        var node = origin
+        for part in parts {
+            if let existing = node.child(part) {
+                guard existing.kind == .directory else { return nil }
+                node = existing
+            } else {
+                node = addEntry(part, VNode(directory: part), to: node, at: now)
+            }
+        }
+        return node
     }
 
     /// Create intermediate directories as needed (like `mkdir -p`).
@@ -508,15 +585,7 @@ final class VirtualFileSystem {
         }
         guard let target = parent.child(name) else { return false }
         if target.kind == .directory, !target.children.isEmpty { return false }
-        let now = clock()
-        target.nlink -= 1
-        if target.nlink <= 0, target.openHandles > 0 {
-            // Deferred deletion: unreachable by path but still alive for open fds.
-            target.unlinked = true
-        }
-        target.touchChange(now)
-        parent.touchModify(now)
-        return parent.removeChild(name)
+        return removeEntry(name, of: target, from: parent, at: clock())
     }
 
     /// Create a synthetic (procfs/sysfs) file whose contents are computed by

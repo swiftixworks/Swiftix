@@ -144,10 +144,21 @@ SwiftixGoHost      host-file adapter and CLI
   `GoVirtualMachine.startProcess`) run cooperatively as the body of their
   process and never drive the event loop themselves:
   - **CPU.** After each instruction quantum (4,096 instructions) the process
-    yields to the event loop and continues in a later step, so other processes
-    run in between and a signal such as Ctrl-C ends a runaway program. There is
-    no total instruction cap; `startProcess(instructionBudget:)` sets one for a
-    host that wants it.
+    yields to the event loop (`ProcessContext.yield`) and continues in a later
+    step, so other processes run in between and a signal such as Ctrl-C ends a
+    runaway program. `ps` shows it running (`R`). There is no total
+    instruction cap; `startProcess(instructionBudget:)` sets one for a host
+    that wants it.
+  - **Time.** A program that never blocks does not stop logical time. Under
+    `EventLoop.advance(by:stepBudget:)`, a timer due inside the interval (a
+    `sleep` in another process, a TCP retransmission, an ARP timeout) runs at
+    its deadline after at most 8 quanta, and the clock reaches the end of the
+    interval even though the program is still runnable. The host's step
+    budget is the number of quanta one interval holds; the call returns
+    `.budgetExceeded` while the program runs, which a host should read as
+    "more work is ready", not as "time did not pass". See
+    [Real-Time Driving](architecture.md#real-time-driving). Under
+    `runUntilIdle()` the program still runs to completion at one instant.
   - **Waiting.** `time.Sleep`, `time.After`/`time.Tick`, context timeouts,
     `ReadStdin`, `ReadInput` on standard input, `f.Read`, and network waits park
     the process in the kernel (`ps` shows it sleeping) until logical time

@@ -5,6 +5,45 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- `ProcessContext.yield(resume:)`: a CPU-bound process gives up the processor
+  and continues in a later step without holding logical time, unlike
+  `sleep(0)`.
+
+### Changed
+
+- `EventLoop.advance(by:stepBudget:)` no longer lets yielded CPU-bound work
+  freeze the clock. A timer due inside the interval runs at its deadline after
+  at most 8 consecutive yields, and when the budget runs out with only yields
+  left, `now` still reaches the target (the result stays `.budgetExceeded`).
+  Timers, executor jobs, and ordinary zero-delay work hold the clock as
+  before, and `runUntilIdle()`/`runNext()` are unchanged. Hosts should keep
+  advancing toward their own frame target when a call stops short of it; see
+  "Real-Time Driving" in `docs/architecture.md`.
+- A file-backed Go program yields at each instruction quantum instead of taking
+  a zero-length sleep, and `ps` reports a spinning program as running (`R`).
+
+### Fixed
+
+- A CPU-bound Go program no longer stops logical time for its kernel: a
+  `sleep` in another process, TCP retransmission, ARP, and `ping` timeouts now
+  fire while it runs. Previously each quantum re-queued itself at the current
+  instant, `advance(by:)` never reached its target, and it returned
+  `.budgetExceeded` with the clock unmoved for as long as the program ran.
+- `mkdir`, `mv`, `rm`, `rmdir`, and every other command that goes through the
+  capability-scoped file calls now stamp what they change. A new directory or
+  file created that way was left at the epoch (1970 with an injected clock), a
+  directory's mtime/ctime did not follow entries added, removed, or renamed
+  through those calls, and a renamed node kept its old ctime.
+- `rm` of one of several hard links now gives the link count back and updates
+  the inode's ctime.
+- `symlink` no longer restamps the existing directories that lead to the link.
+- A tmpfs mount root, `/dev` and `/proc` files, and computed nodes such as
+  `/proc/<pid>` and `/dev/pts/<n>` no longer show the epoch: kernel-provided
+  nodes are dated at boot on the injected clock and computed ones at lookup.
+  Restored snapshots and images keep their stored times.
+
 ## 0.13.0 — 2026-10-07
 
 A userland baseline: the shell is a POSIX-style interpreter, the built-in

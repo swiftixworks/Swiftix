@@ -9,6 +9,13 @@
 ///   * Virtual-time / discrete-event driving: call `runNext()` in a loop with an
 ///     application-specific stopping condition to jump to successive deadlines.
 ///
+/// Ready work comes in three kinds. Timer callbacks run in deadline order and
+/// executor jobs in FIFO order; both hold the clock at their instant until
+/// they have run. A *yield* is the continuation of a CPU-bound task that gave
+/// up the processor (see `CancellationScope.yield`): it runs in the same order
+/// as a zero-delay timer, but a task that never stops yielding must not stop
+/// time, so `advance(by:)` lets later timers and the clock pass it.
+///
 /// Not thread-safe by design: a topology runs on a single executor and hundreds
 /// of nodes share one loop, rather than one-thread-per-node.
 public final class EventLoop {
@@ -49,6 +56,7 @@ public final class EventLoop {
             let remainingDelay: Double
             let sequence: UInt64
             let token: EventToken?
+            var isYield = false
             let work: () -> Void
         }
 
@@ -83,6 +91,13 @@ public final class EventLoop {
         /// Schedule a callback owned by this scope.
         public func schedule(after delay: Double, _ work: @escaping () -> Void) {
             loop.schedule(after: delay, owner: owner, work)
+        }
+
+        /// Schedule the continuation of CPU-bound work that is giving up the
+        /// processor. It runs where a zero-delay callback would, but does not
+        /// hold back logical time: see ``EventLoop/advance(by:stepBudget:)``.
+        func yield(_ work: @escaping () -> Void) {
+            loop.schedule(after: 0, owner: owner, token: nil, isYield: true, work)
         }
 
         /// Permanently cancel and physically remove all callbacks in this scope.
@@ -127,6 +142,7 @@ public final class EventLoop {
         let seq: UInt64           // tie-breaker => stable FIFO order at equal deadlines
         let owner: WorkOwner?
         let token: EventToken?
+        var isYield = false
         let work: () -> Void
     }
 
@@ -156,8 +172,18 @@ public final class EventLoop {
 
     private static let maximumJobBurst = 8
 
+    /// How many yields may run in a row inside an `advance` window before a
+    /// timer that is due later in the window gets the next step.
+    private static let maximumYieldBurst = 8
+
     private var queue: [Scheduled] = []
     private var seqCounter: UInt64 = 0
+
+    /// Continuations of CPU-bound work, FIFO. Each carries the deadline (the
+    /// instant it yielded) and sequence a zero-delay timer would have, so its
+    /// place among ready timers is unchanged; keeping yields out of the heap
+    /// leaves the earliest real timer at the heap root.
+    private var yieldQueue = FIFOQueue<Scheduled>()
 
     /// FIFO queue of Swift-concurrency jobs posted by the loop-owned
     /// `SerialExecutor` (see `SwiftixExecutor`). Drained at the current logical
@@ -174,6 +200,9 @@ public final class EventLoop {
     /// timer gets the next step even if jobs keep reposting themselves.
     private var consecutiveJobSteps = 0
 
+    /// Yields run since a timer last ran; see `maximumYieldBurst`.
+    private var consecutiveYieldSteps = 0
+
     /// Called synchronously when pending work changes from empty to non-empty.
     /// There is one callback slot so a loop has a single wakeup consumer.
     public var onWorkAvailable: (() -> Void)?
@@ -181,16 +210,17 @@ public final class EventLoop {
     /// Whether either an active timer callback or executor job is queued. Work
     /// frozen in a paused owner is intentionally excluded: it cannot run until
     /// that owner resumes and must not keep a real-time driver awake.
-    public var hasPendingWork: Bool { !queue.isEmpty || !jobQueue.isEmpty }
+    public var hasPendingWork: Bool { !queue.isEmpty || !jobQueue.isEmpty || !yieldQueue.isEmpty }
 
     /// Total active timer callbacks and executor jobs. Paused-owner work is not
     /// runnable and is therefore excluded from this count.
-    public var pendingWorkCount: Int { queue.count + jobQueue.count }
+    public var pendingWorkCount: Int { queue.count + jobQueue.count + yieldQueue.count }
 
-    /// The earliest queued logical deadline. Executor jobs are ready at `now`.
+    /// The earliest queued logical deadline. Executor jobs and yielded
+    /// CPU-bound work are ready at `now`.
     public var nextDeadline: Double? {
         let timerDeadline = queue.first?.deadline
-        guard !jobQueue.isEmpty else { return timerDeadline }
+        guard !jobQueue.isEmpty || !yieldQueue.isEmpty else { return timerDeadline }
         guard let timerDeadline else { return now }
         return min(timerDeadline, now)
     }
@@ -230,6 +260,7 @@ public final class EventLoop {
                 remainingDelay: max(0, $0.deadline - now),
                 sequence: $0.seq,
                 token: $0.token,
+                isYield: $0.isYield,
                 work: $0.work)
         })
         owner.state = .paused
@@ -250,15 +281,16 @@ public final class EventLoop {
             guard item.token?.isPending != false else { continue }
             let deadline = now + item.remainingDelay
             guard deadline.isFinite else { continue }
-            insertScheduled(Scheduled(
+            enqueue(Scheduled(
                 deadline: deadline,
                 seq: seqCounter,
                 owner: owner,
                 token: item.token,
+                isYield: item.isYield,
                 work: item.work))
             seqCounter &+= 1
         }
-        if wasIdle, !queue.isEmpty { onWorkAvailable?() }
+        if wasIdle, hasPendingWork { onWorkAvailable?() }
     }
 
     /// Permanently cancel every active or paused callback for an owner. Entries
@@ -310,6 +342,7 @@ public final class EventLoop {
         after delay: Double,
         owner: WorkOwner?,
         token: EventToken?,
+        isYield: Bool = false,
         _ work: @escaping () -> Void
     ) {
         guard delay.isFinite else {
@@ -333,6 +366,7 @@ public final class EventLoop {
                     remainingDelay: normalizedDelay,
                     sequence: seqCounter,
                     token: token,
+                    isYield: isYield,
                     work: work))
                 seqCounter &+= 1
                 return
@@ -342,14 +376,23 @@ public final class EventLoop {
         }
 
         let wasIdle = !hasPendingWork
-        insertScheduled(Scheduled(
+        enqueue(Scheduled(
             deadline: deadline,
             seq: seqCounter,
             owner: owner,
             token: token,
+            isYield: isYield,
             work: work))
         seqCounter &+= 1
         if wasIdle { onWorkAvailable?() }
+    }
+
+    private func enqueue(_ scheduled: Scheduled) {
+        if scheduled.isYield {
+            yieldQueue.append(scheduled)
+        } else {
+            insertScheduled(scheduled)
+        }
     }
 
     /// Enqueue unowned consumer work as soon as possible (deadline == now).
@@ -366,7 +409,8 @@ public final class EventLoop {
     /// binary heap from retained entries. This avoids cancelled tombstones in
     /// pending counts and at the heap root.
     private func removeScheduled(ownedBy owner: WorkOwner) -> [Scheduled] {
-        var removed: [Scheduled] = []
+        var removed = removeYields(ownedBy: owner)
+        let yieldCount = removed.count
         var retained: [Scheduled] = []
         retained.reserveCapacity(queue.count)
         for item in queue {
@@ -376,9 +420,24 @@ public final class EventLoop {
                 retained.append(item)
             }
         }
-        guard !removed.isEmpty else { return [] }
+        guard removed.count > yieldCount else { return removed }
         queue.removeAll(keepingCapacity: true)
         for item in retained { insertScheduled(item) }
+        return removed
+    }
+
+    private func removeYields(ownedBy owner: WorkOwner) -> [Scheduled] {
+        guard !yieldQueue.isEmpty else { return [] }
+        var removed: [Scheduled] = []
+        var retained = FIFOQueue<Scheduled>()
+        while let item = yieldQueue.popFirst() {
+            if item.owner === owner {
+                removed.append(item)
+            } else {
+                retained.append(item)
+            }
+        }
+        yieldQueue = retained
         return removed
     }
 
@@ -406,6 +465,19 @@ public final class EventLoop {
     /// If the budget is exceeded, `now` remains at the last processed event and
     /// is not advanced to `target` past queued, unprocessed work. Invalid intervals
     /// return `.completed` without changing any state.
+    ///
+    /// Yielded CPU-bound work is the exception, because a task that yields
+    /// forever would otherwise freeze the clock:
+    ///
+    /// - After a short burst of yields, a timer due later in the window runs
+    ///   at its own deadline, so timers are not starved.
+    /// - When the budget runs out and yields are the only work left inside the
+    ///   window, `now` still reaches `target`. The call reports
+    ///   `.budgetExceeded` (ready work remains), and the interval has elapsed.
+    ///
+    /// The step budget is therefore the amount of CPU-bound work one interval
+    /// can hold. How far such a task gets per interval depends on the budget;
+    /// the order and logical times of everything else do not.
     @discardableResult
     public func advance(
         by interval: Double,
@@ -420,22 +492,32 @@ public final class EventLoop {
 
         return withStepBudget(stepBudget) { budget in
             while true {
-                switch performNextStep(dueBy: target, budget: budget) {
+                switch performNextStep(dueBy: target, budget: budget, timersPreemptYields: true) {
                 case .ran:
                     // A callback may have entered another drain and exhausted the
                     // shared budget. Do not advance the outer operation's clock.
-                    if budget.wasExceeded { return .budgetExceeded }
+                    if budget.wasExceeded { return exhausted(target) }
                 case .noWork:
-                    if budget.wasExceeded { return .budgetExceeded }
+                    if budget.wasExceeded { return exhausted(target) }
                     // A nested run may already have advanced farther than this
                     // operation's target; logical time must never move backward.
                     now = max(now, target)
                     return .completed
                 case .budgetExceeded:
-                    return .budgetExceeded
+                    return exhausted(target)
                 }
             }
         }
+    }
+
+    /// Finish an `advance` whose budget ran out. Jobs and timers due by
+    /// `target` keep the clock where it is; yielded CPU-bound work does not.
+    private func exhausted(_ target: Double) -> RunResult {
+        let timerIsDue = queue.first.map { $0.deadline <= target } ?? false
+        if jobQueue.isEmpty, !timerIsDue, !yieldQueue.isEmpty {
+            now = max(now, target)
+        }
+        return .budgetExceeded
     }
 
     /// Drain executor jobs and timer callbacks whose deadline is already ≤ `now`.
@@ -485,7 +567,7 @@ public final class EventLoop {
 
     /// Number of timer callbacks still pending. Kept for compatibility; use
     /// `pendingWorkCount` when both timers and executor jobs matter.
-    public var pendingCount: Int { queue.count }
+    public var pendingCount: Int { queue.count + yieldQueue.count }
 
     private func withStepBudget(
         _ requestedLimit: Int,
@@ -503,42 +585,67 @@ public final class EventLoop {
         return budget.wasExceeded ? .budgetExceeded : result
     }
 
-    /// Run one fairly selected job/timer without removing it until budget is
-    /// available. Timers are selected in heap order; jobs stay FIFO.
-    private func performNextStep(dueBy timerLimit: Double, budget: StepBudget) -> StepOutcome {
+    /// Run one fairly selected job/timer/yield without removing it until
+    /// budget is available. Timers are selected in heap order; jobs and yields
+    /// stay FIFO.
+    private func performNextStep(
+        dueBy timerLimit: Double,
+        budget: StepBudget,
+        timersPreemptYields: Bool = false
+    ) -> StepOutcome {
         let hasJob = !jobQueue.isEmpty
-        let hasEligibleTimer = queue.first.map { $0.deadline <= timerLimit } ?? false
-        guard hasJob || hasEligibleTimer else {
-            if !hasPendingWork { consecutiveJobSteps = 0 }
+        let hasEligibleCallback = (queue.first.map { $0.deadline <= timerLimit } ?? false)
+            || (yieldQueue.first.map { $0.deadline <= timerLimit } ?? false)
+        guard hasJob || hasEligibleCallback else {
+            if !hasPendingWork {
+                consecutiveJobSteps = 0
+                consecutiveYieldSteps = 0
+            }
             return .noWork
         }
 
-        let shouldRunTimer = hasEligibleTimer
+        let shouldRunCallback = hasEligibleCallback
             && (!hasJob || consecutiveJobSteps >= EventLoop.maximumJobBurst)
 
         guard budget.consume() else { return .budgetExceeded }
 
-        if shouldRunTimer {
-            guard let next = dequeueEarliest(dueBy: timerLimit) else { return .noWork }
-            next.token?.isPending = false
-            consecutiveJobSteps = 0
-            now = max(now, next.deadline)
-            next.work()
+        if !shouldRunCallback, let job = jobQueue.popFirst() {
+            consecutiveJobSteps = min(consecutiveJobSteps + 1, EventLoop.maximumJobBurst)
+            job.runSynchronously(on: executor.asUnownedSerialExecutor())
             return .ran
         }
 
-        guard let job = jobQueue.popFirst() else {
-            // The only remaining possibility is an eligible timer.
-            guard let next = dequeueEarliest(dueBy: timerLimit) else { return .noWork }
-            next.token?.isPending = false
-            consecutiveJobSteps = 0
-            now = max(now, next.deadline)
-            next.work()
-            return .ran
+        guard let next = dequeueCallback(dueBy: timerLimit,
+                                         timersPreemptYields: timersPreemptYields) else {
+            return .noWork
         }
-        consecutiveJobSteps = min(consecutiveJobSteps + 1, EventLoop.maximumJobBurst)
-        job.runSynchronously(on: executor.asUnownedSerialExecutor())
+        next.token?.isPending = false
+        consecutiveJobSteps = 0
+        now = max(now, next.deadline)
+        next.work()
         return .ran
+    }
+
+    /// Remove the next timer or yield due by `limit`. They share one order,
+    /// (deadline, sequence), so a yield runs exactly where a zero-delay timer
+    /// scheduled at the same moment would. With `timersPreemptYields`, a timer
+    /// that is later in that order still runs once `maximumYieldBurst` yields
+    /// have run in a row.
+    private func dequeueCallback(dueBy limit: Double, timersPreemptYields: Bool) -> Scheduled? {
+        let timer = queue.first.flatMap { $0.deadline <= limit ? $0 : nil }
+        let yield = yieldQueue.first.flatMap { $0.deadline <= limit ? $0 : nil }
+        var runsYield = yield != nil
+        if let timer, let yield {
+            let burstSpent = timersPreemptYields
+                && consecutiveYieldSteps >= EventLoop.maximumYieldBurst
+            runsYield = !isEarlier(timer, than: yield) && !burstSpent
+        }
+        guard runsYield else {
+            consecutiveYieldSteps = 0
+            return dequeueEarliest(dueBy: limit)
+        }
+        consecutiveYieldSteps = min(consecutiveYieldSteps + 1, EventLoop.maximumYieldBurst)
+        return yieldQueue.popFirst()
     }
 
     /// Remove the earliest due timer from the binary min-heap.
