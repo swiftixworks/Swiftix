@@ -38,7 +38,7 @@ struct GoToolCommandTests: GoTestHarness {
                         """)
             })
 
-        #expect(output.contains("go version go1.24-swiftix.0.3 swiftix/svm64"))
+        #expect(output.contains("go version go1.24-swiftix.0.4 swiftix/svm64"))
         #expect(output.contains("swiftix\nsvm64\noff"))
         #expect(output.contains("hello from go"))
     }

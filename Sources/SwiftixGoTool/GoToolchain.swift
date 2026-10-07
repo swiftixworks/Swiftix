@@ -6,7 +6,7 @@ import SwiftixGoRuntime
 
 public enum GoToolchain {
     public static let languageVersion = "1.24"
-    public static let toolVersion = "go1.24-swiftix.0.3"
+    public static let toolVersion = "go1.24-swiftix.0.4"
 
     public static func register(in registry: CommandRegistry) {
         registry.register(command())

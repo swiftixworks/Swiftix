@@ -76,6 +76,27 @@ without folding them back into the core.
 through the public guest surface of the Minimal distribution; the 0.12 API
 break is versioned and documented; release metadata and API gates pass.
 
+## 0.13 — Userland Baseline
+
+Make the guest usable the way a Linux user expects before freezing 1.0,
+without importing Linux subsystems.
+
+- Run real POSIX-style shell scripts: `sh`, shebang files, the standard
+  builtins, subshells, and parameter, tilde, and brace expansion.
+- Give the built-in commands conventional options and error text, and add the
+  everyday tools that were missing (`awk`, `sed` addresses, `tar`, `less`,
+  checksums, process and network utilities).
+- Model wall-clock time, a user database, the standard device nodes,
+  `/proc/self`, umask, and init signal protection.
+- Let Swiftix Go link a module's local packages, and align its string, byte,
+  conversion, operator, and literal semantics with Go so sources also build
+  with standard Go tools.
+
+**Exit criterion:** the regression list in `UserlandBaselineTests` passes
+through the public guest surface; the base command package builds from an
+ordinary multi-package Go module that standard `go vet` accepts; the 0.13
+behavior changes are documented; release metadata and API gates pass.
+
 ## 1.0 — Stable Foundation
 
 Deliver the current contract without adding GUI, hot snapshots, or new protocol-stack scope.

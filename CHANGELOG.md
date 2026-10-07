@@ -5,6 +5,8 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.13.0 — 2026-10-07
+
 A userland baseline: the shell is a POSIX-style interpreter, the built-in
 command set covers everyday coreutils use, and time, identity, devices, and
 signals behave the way a Linux user expects. Public API changes are additive.

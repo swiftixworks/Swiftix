@@ -1,10 +1,10 @@
 # Compatibility and migration
 
-> Current release baseline: Swiftix 0.12.0
+> Current release baseline: Swiftix 0.13.0
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Swiftix package | 0.12.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
+| Swiftix package | 0.13.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
 | Teaching procfs schema | 1 | Exact schema; independently packaged diagnostic tools must be rebuilt after a bump |
 | Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore. The legacy `root` projection is written to at most 256 directory levels (`legacyProjectionDepthLimit`); deeper levels are in the inode table only |
 | Rootfs image | 1 | Exact format; digest, target and resource limits validated |
@@ -186,6 +186,29 @@ The 0.12 Swiftix Go terminal and `strings` support intentionally extends the
   instruction and output budgets apply per uninterrupted slice. Direct
   `runProgram` callers keep the synchronous contract; use `startProgram` for
   interactive programs.
+
+The 0.13 userland baseline changes guest-visible behavior and the Swiftix Go
+source dialect; the Swift API is additive against `v0.12.0`:
+
+- shell: unquoted expansions are field-split, variables are exported only
+  with `export`, and command substitution, shell-code pipeline stages, and
+  `( ... )` run in a child shell; scripts that relied on the old behavior need
+  quoting or `export`;
+- commands: `grep` and `sed` default to basic regular expressions (`-E` for
+  extended), `mkdir` without `-p` no longer creates parents, new files honor
+  umask 022, and tree walkers do not follow symbolic links;
+- hosts that want real time must call `Kernel.setWallClock`, and hosts that
+  want guest `shutdown`/`reboot` must set `Kernel.onPowerRequest`; without
+  them logical zero is the Unix epoch and power requests are refused;
+- Swiftix Go source: `s[i]` on a string is a `byte`, so code that used it as
+  an `int` needs `int(s[i])`; `010` is octal; `time.After` returns
+  `<-chan time.Time`. Programs must be rebuilt from updated source. The image
+  format and ABI stay at 10, so images built by 0.12 keep running, but images
+  built by 0.13 that call the new native library functions (`sort`, `strconv`,
+  `os.File`, conversions) need a 0.13 runtime;
+- file-backed Swiftix Go programs are scheduled cooperatively: a host must
+  advance logical time for their timers to fire, and the 1,000,000-instruction
+  total cap no longer ends a long-running program.
 
 Unknown snapshot, rootfs, Go image, and package formats fail before mutating
 guest state. Preserve the old artifact and report every relevant version from
