@@ -299,7 +299,9 @@ extension Programs {
         // MARK: - Commands
 
         /// How many iterations a `while`/`until` loop runs before it gives
-        /// the processor back, so signals arrive and other work runs.
+        /// the processor back, so signals arrive and other work runs. The
+        /// first iteration yields too, so a long loop is yielded work (which
+        /// does not hold logical time) from its start.
         private static let loopYieldInterval = 256
 
         func execCommand(_ command: ScriptCommand, background: Bool, _ done: @escaping () -> Void) {
@@ -360,7 +362,7 @@ extension Programs {
                             lastBodyStatus = self.status.last
                             let again = self.continueLoopAfterBody()
                             iterations += 1
-                            guard again, iterations % Self.loopYieldInterval == 0 else {
+                            guard again, iterations % Self.loopYieldInterval == 1 else {
                                 next(again)
                                 return
                             }

@@ -1128,6 +1128,9 @@ extension BuiltinCommands {
                         // Backpressure: finish this batch (parking until the pipe drains).
                         guard await ctx.writeAll(1, Array(batch[accepted...])) else { return }
                         uninterrupted = 0
+                        // A reader that keeps up makes this an endless loop
+                        // at one instant; yield so it does not hold the clock.
+                        do { try await ctx.yield() } catch { return }
                     } else {
                         uninterrupted += 1
                         if uninterrupted >= 32 {

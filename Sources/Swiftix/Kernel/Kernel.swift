@@ -753,8 +753,15 @@ public final class Kernel {
         processExit.handleExit(process, status: ProcessExitStatus.exited(0))
     }
 
+    /// Queue one step of `process`. A step queued by yielded CPU-bound work
+    /// is a yield as well: when a spinning process wakes another one (a pipe
+    /// it filled or drained, a child it started, its own exit), the woken
+    /// step belongs to the same burst and must not hold logical time either,
+    /// or two always-ready processes feeding each other would stop the
+    /// clock. A process woken by anything else (a timer, terminal input, the
+    /// network) takes an ordinary step.
     func runStep(_ process: Process, yielding: Bool = false, _ work: @escaping () -> Void) {
-        processScheduler.runStep(process, yielding: yielding, work)
+        processScheduler.runStep(process, yielding: yielding || loop.isRunningYieldedWork, work)
     }
 
     func exit(_ process: Process, code: Int32) {

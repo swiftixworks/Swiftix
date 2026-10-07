@@ -32,7 +32,11 @@ format, behavior and platform changes are recorded here.
   yields on the first iteration of a loop instead of only every 256th.
 - A read from `/dev/zero`, `/dev/full`, `/dev/random`, or `/dev/urandom`
   through the blocking or async frontend resumes as a yield.
-- A shell `while`/`until` loop yields every 256 iterations.
+- A shell `while`/`until` loop yields on its first iteration and then every
+  256 iterations.
+- A process step queued by yielded work (a wake-up through a pipe, a child
+  being started, an exit being reported) is queued as a yield, and `yes`
+  yields each time a full pipe makes it wait.
 - A file-backed Go program yields at each instruction quantum instead of taking
   a zero-length sleep, and `ps` reports a spinning program as running (`R`).
 
@@ -46,7 +50,7 @@ format, behavior and platform changes are recorded here.
 - `awk`, `bc`, and commands that copy from an endless device (`cat /dev/zero`,
   `dd if=/dev/urandom`) no longer stop logical time for their kernel while
   they run under a real-time host; a `sleep` in another process now wakes on
-  time.
+  time. The same holds for endless pipelines such as `yes | cat > /dev/null`.
 - A shell loop made only of builtins (`while :; do :; done`, also in the
   background) no longer runs as a single step that never ends. The call that
   drove it (`advance(by:)`, `runUntilIdle()`) never returned, so the host

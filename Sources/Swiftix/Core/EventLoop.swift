@@ -205,9 +205,15 @@ public final class EventLoop {
     private var yieldJobCount = 0
 
     /// Whether a job posted right now continues a task that yielded: set
-    /// while such a task is resumed and while one of its jobs runs. See
-    /// `resumingYieldedTask`.
+    /// while such a task is resumed and while a yield or one of its jobs
+    /// runs. See `resumingYieldedTask`.
     private var isResumingYieldedTask = false
+
+    /// Whether the step now running is yielded CPU-bound work: a yield, or a
+    /// job that continues a yielded task. What such work makes ready at this
+    /// instant is part of the same burst, so the kernel queues the process
+    /// steps it causes as yields too (see `Kernel.runStep`).
+    var isRunningYieldedWork: Bool { isResumingYieldedTask }
 
     /// The budget shared by reentrant `advance`, `runUntilIdle`, and `runNext`
     /// calls. Only the outermost bounded operation creates a budget.
@@ -265,7 +271,8 @@ public final class EventLoop {
     /// between two suspensions, so a job posted while a yield job runs is a
     /// yield job as well. The chain ends when the task waits for something:
     /// its last job posts nothing, and whatever wakes it later is ordinary
-    /// work again. Timers scheduled along the way are ordinary timers.
+    /// work again. Timers scheduled along the way are ordinary timers. A job
+    /// posted while a yield itself runs is a yield job for the same reason.
     func resumingYieldedTask(_ resume: () -> Void) {
         withJobsRecorded(asYield: true, resume)
     }
@@ -672,7 +679,7 @@ public final class EventLoop {
         next.token?.isPending = false
         consecutiveJobSteps = 0
         now = max(now, next.deadline)
-        withJobsRecorded(asYield: false, next.work)
+        withJobsRecorded(asYield: next.isYield, next.work)
         return .ran
     }
 

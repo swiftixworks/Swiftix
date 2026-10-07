@@ -264,6 +264,9 @@ struct AsyncYieldTests {
         "cat /dev/zero > /dev/null &",
         "dd if=/dev/urandom of=/dev/null &",
         "while :; do :; done &",
+        "yes | cat > /dev/null &",
+        "cat /dev/zero | cat > /dev/null &",
+        "while :; do echo y; done | cat > /dev/null &",
     ])
     func sleepWakesWhileABackgroundCommandSpins(_ line: String) {
         let h = CommandHarness()

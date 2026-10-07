@@ -121,9 +121,14 @@ Reads from an endless device (`/dev/zero`, `/dev/full`, `/dev/random`,
 well, because such a read never waits for anything: `cat /dev/zero > /dev/null`
 does not hold the clock.
 
-Two always-ready processes that keep waking each other through a pipe
-(`yes | cat > /dev/null`) still do: each wake-up is an ordinary step at the
-current instant, and neither side ever yields.
+A process step queued while yielded work runs is a yield as well. When a
+spinning process wakes another one (through a pipe it filled or drained, by
+starting it, or by exiting), the woken step is part of the same burst, so
+`yes | cat > /dev/null` does not hold the clock even though `cat` never
+yields. A process woken by anything else (a timer, terminal input, the
+network) takes an ordinary step, which ends the burst for it. The rule needs
+one side to yield: two processes that only ever wake each other, with no
+yield anywhere, are ordinary work and still hold the clock.
 
 ### Host-Owned Machine State
 
