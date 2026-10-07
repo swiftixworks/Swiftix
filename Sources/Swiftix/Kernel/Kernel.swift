@@ -138,8 +138,8 @@ public final class Kernel {
     private lazy var signalDispatcher = SignalDispatcher(
         processTable: processTable,
         childWaitQueue: childWaitQueue,
-        schedule: { [weak self] process, work in
-            self?.runStep(process, work)
+        schedule: { [weak self] process, yielding, work in
+            self?.runStep(process, yielding: yielding, work)
         },
         terminate: { [weak self] process, signal in
             self?.processExit.terminate(process, bySignal: signal)

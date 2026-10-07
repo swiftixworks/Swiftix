@@ -2,7 +2,7 @@
 final class SignalDispatcher {
     private let processTable: ProcessTable
     private let childWaitQueue: ChildWaitQueue
-    private let schedule: (Process, @escaping () -> Void) -> Void
+    private let schedule: (Process, _ yielding: Bool, @escaping () -> Void) -> Void
     private let terminate: (Process, Int32) -> Void
     private let signalParent: (PID, Int32) -> Void
 
@@ -13,7 +13,7 @@ final class SignalDispatcher {
 
     init(processTable: ProcessTable,
          childWaitQueue: ChildWaitQueue,
-         schedule: @escaping (Process, @escaping () -> Void) -> Void,
+         schedule: @escaping (Process, _ yielding: Bool, @escaping () -> Void) -> Void,
          terminate: @escaping (Process, Int32) -> Void,
          signalParent: @escaping (PID, Int32) -> Void) {
         self.processTable = processTable
@@ -137,7 +137,7 @@ final class SignalDispatcher {
                 notifyParent(of: process)
             }
             if let handler = process.signalHandlers[signal] {
-                schedule(process) { handler() }
+                schedule(process, false) { handler() }
             }
             return
         }
@@ -145,7 +145,7 @@ final class SignalDispatcher {
             if process.runState == .running {
                 handler()
             } else {
-                schedule(process) { handler() }
+                schedule(process, false) { handler() }
             }
             return
         }
@@ -173,18 +173,21 @@ final class SignalDispatcher {
         return true
     }
 
-    /// SIGCONT: clear the stop and replay any deferred steps. If none were
-    /// deferred, restore the process to blocked (still parked on I/O) or runnable.
+    /// SIGCONT: clear the stop and replay any deferred steps, a deferred
+    /// yield as a yield. If none were deferred, restore the process to
+    /// blocked (still parked on I/O) or runnable; an async body that was
+    /// computing after a yield when it stopped is still computing.
     @discardableResult
     private func resumeStopped(_ process: Process) -> Bool {
         guard process.isLive, process.isStopped else { return false }
         let deferred = process.pendingSteps
         process.pendingSteps.removeAll()
         if deferred.isEmpty {
-            process.runState = process.blockedOn > 0 ? .waiting : .runnable
+            let isParked = process.blockedOn > 0 && !process.isComputingAfterYield
+            process.runState = isParked ? .waiting : .runnable
         } else {
             process.runState = .runnable
-            for work in deferred { schedule(process, work) }
+            for step in deferred { schedule(process, step.yielding, step.work) }
         }
         childWaitQueue.post(parent: process.ppid,
                             child: process.pid,

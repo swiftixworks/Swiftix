@@ -38,6 +38,10 @@ format, behavior and platform changes are recorded here.
   yielding (`awk`, `bc`, `cat /dev/zero`, a custom body calling `yield()`) as
   running (`R`) until it next waits. It was shown as sleeping (`S`) for most
   of each turn.
+- A yielding process that is stopped and continued is yielded work again at
+  once: a step held back while it was stopped is replayed as a yield if it
+  was one, so the process is reported as running (`R`) and does not hold
+  logical time for the first turn after `SIGCONT`.
 - A process step queued by yielded work (a wake-up through a pipe, a child
   being started, an exit being reported) is queued as a yield, and `yes`
   yields each time a full pipe makes it wait.

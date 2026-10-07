@@ -53,6 +53,12 @@ final class Process {
     /// there instead of sleeping. Cleared as soon as it registers a wait.
     var isInYieldedBurst = false
 
+    /// An async body that a yield resumed and that holds only its lifetime
+    /// wait: it is computing in executor jobs, not parked.
+    var isComputingAfterYield: Bool {
+        isInYieldedBurst && asyncBodyWaitID != nil && blockedOn == 1
+    }
+
     /// Steps of this process currently executing. A step can run nested inside
     /// another when process code drives the event loop itself (the Swiftix Go
     /// VM does); only the outermost step decides the process's fate.
@@ -95,9 +101,16 @@ final class Process {
     private var syscallTraceSequence = 0
     static let syscallTraceCapacity = 128
 
+    /// A step held back while the process is stopped. It remembers whether it
+    /// was a yield, so it is replayed as one.
+    struct DeferredStep {
+        let yielding: Bool
+        let work: () -> Void
+    }
+
     /// Job-control stop (SIGSTOP/SIGTSTP). While stopped, scheduling steps are
     /// held in `pendingSteps` and replayed on SIGCONT.
-    var pendingSteps: [() -> Void] = []
+    var pendingSteps: [DeferredStep] = []
 
     var cwd = "/"
     var environment: [String: String] = [:]

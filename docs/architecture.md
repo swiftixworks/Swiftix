@@ -174,7 +174,9 @@ An `async` body computes in executor jobs, outside any scheduler step, so
 between waits it has neither a queued nor a running step. It is reported as
 `R` there only while it is yielded work: from the yield that resumed it until
 it next registers a wait. An async body that was woken by something else
-(a sleep, input) is reported as `S` while it computes, as before.
+(a sleep, input) is reported as `S` while it computes, as before. A stop does
+not end the burst: a yield held back while the process was stopped is replayed
+as a yield on `SIGCONT`.
 
 Logical exit is two-phase. First, Swiftix cancels the process's owned callbacks
 and waits, closes descriptors, records an explicit `ProcessExitStatus`, and

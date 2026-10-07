@@ -243,6 +243,37 @@ struct AsyncYieldTests {
         #expect(state() == "S")
     }
 
+    /// Stopping a spinner holds it (`T`); continuing it makes it yielded
+    /// work again at once: running in `ps`, and not holding the clock.
+    /// The stop lands in either half of a turn depending on the warm-up.
+    @Test(arguments: 0..<12)
+    func stoppedSpinnerIsRunnableAgainAfterContinue(warmUpSteps: Int) {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        let slices = Counter()
+        let pid = Self.spawnSpinner(kernel, slices: slices)
+        func state() -> String? { kernel.snapshotProcesses().first { $0.pid == pid }?.state }
+        Self.drive(loop, frames: 2)
+        loop.runUntilIdle(stepBudget: warmUpSteps)
+
+        kernel.kill(pid, signal: Signal.sigstop.rawValue)
+        Self.drive(loop, frames: 3)
+        #expect(state() == "T")
+        let stopped = slices.value
+        Self.drive(loop, frames: 3)
+        #expect(slices.value == stopped)
+
+        kernel.kill(pid, signal: Signal.sigcont.rawValue)
+        #expect(state() == "R")
+        let continuedAt = loop.now
+        for frame in 1...20 {
+            #expect(loop.advance(by: Self.frame, stepBudget: 7) == .budgetExceeded)
+            #expect(state() == "R")
+            #expect(abs(loop.now - continuedAt - Double(frame) * Self.frame) < 1e-9)
+        }
+        #expect(slices.value > stopped)
+    }
+
     /// An async process that never yields keeps the existing report: it is
     /// sleeping whenever it waits, also for a zero-length sleep.
     @Test func sleepingAsyncProcessIsStillReportedSleeping() {

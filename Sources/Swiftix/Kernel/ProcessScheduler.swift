@@ -38,7 +38,8 @@ final class ProcessScheduler {
                   self.processTable.contains(process.pid), process.isLive else { return }
             process.queuedSteps -= 1
             if process.isStopped {
-                process.pendingSteps.append(work)   // job-control stop: defer until SIGCONT
+                // Job-control stop: defer until SIGCONT.
+                process.pendingSteps.append(Process.DeferredStep(yielding: yielding, work: work))
                 return
             }
             process.runState = .running
@@ -73,9 +74,7 @@ final class ProcessScheduler {
             process.runState = .stopped
         } else if process.queuedSteps > 0 {
             process.runState = .runnable
-        } else if process.isInYieldedBurst, process.asyncBodyWaitID != nil, process.blockedOn == 1 {
-            // An async body resumed by a yield holds only its lifetime wait:
-            // it is computing in executor jobs, not parked.
+        } else if process.isComputingAfterYield {
             process.runState = .runnable
         } else if process.blockedOn > 0 {
             process.runState = .waiting                 // parked on I/O or a child
