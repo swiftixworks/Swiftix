@@ -63,8 +63,49 @@ public final class Kernel {
     /// command set. `nil` until a shell (or the consumer) installs one.
     public var commandRegistry: CommandRegistry?
 
+    /// Mapping from logical time to real (epoch) time and the local zone. The
+    /// default is deterministic (logical zero == the Unix epoch, UTC); a host
+    /// injects real time with `setWallClock(epochSeconds:utcOffsetSeconds:zoneAbbreviation:)`.
+    /// Read and written on the kernel's serial executor. File timestamps are
+    /// stamped with this clock, so set it before spawning processes.
+    public var wallClock = WallClock()
+
+    /// Host handler for guest power requests (`shutdown`, `reboot`, `poweroff`,
+    /// `halt`). It is invoked on the kernel's serial executor from a kernel-owned
+    /// loop job — never from inside the requesting process's step — so the
+    /// handler may call `pause()` or `shutdown()` directly. While it is `nil`
+    /// the guest commands report that the host does not support power control
+    /// and exit non-zero. The core never changes its own lifecycle in response
+    /// to a request; acting on it is entirely the host's decision.
+    public var onPowerRequest: ((PowerRequest) -> Void)?
+
+    /// Seed used for `/dev/random` and `/dev/urandom` until `seedRandom(_:)` is
+    /// called. Fixed so an unseeded kernel is reproducible.
+    public static let defaultRandomSeed: UInt64 = 0x5377_6966_7469_7821
+
+    private var random = DeterministicRandom(seed: Kernel.defaultRandomSeed)
+
+    /// Logical time at which this kernel was created (its "boot"). A shared
+    /// `EventLoop` may already have advanced before a kernel is built.
+    let bootLogicalTime: Double
+
+    /// Stable `pts/<n>` numbers for terminals that are (or were) a process's
+    /// controlling terminal. Entries are weak: a number is reused once its
+    /// terminal has been released by the host.
+    private struct TerminalSlot {
+        let index: Int
+        weak var terminal: TerminalControl?
+    }
+    private var terminalSlots: [TerminalSlot] = []
+
     private lazy var processTable = ProcessTable(loop: loop)
-    private lazy var processIntrospection = ProcessIntrospection(processTable: processTable)
+    private lazy var processIntrospection: ProcessIntrospection = {
+        let introspection = ProcessIntrospection(processTable: processTable)
+        introspection.terminalIndex = { [weak self] terminal in
+            self?.terminalIndex(for: terminal)
+        }
+        return introspection
+    }()
     private lazy var processGroups = ProcessGroupController(processTable: processTable)
     private lazy var childWaitQueue = ChildWaitQueue(processTable: processTable)
     private lazy var processExit = ProcessExitCoordinator(
@@ -116,7 +157,8 @@ public final class Kernel {
         self.workOwner = workOwner
         self.runtimeMemoryLimitBytes = max(0, runtimeMemoryLimitBytes)
         self.netns = NetworkNamespace(loop: loop, workOwner: workOwner)
-        vfs.clock = { [weak loop] in loop?.now ?? 0 }
+        self.bootLogicalTime = loop.now
+        vfs.clock = { [weak self] in self?.epochNow ?? 0 }
         childWaitQueue.onExitConsumed = { [weak self] parent, child in
             self?.processExit.reapExitedChild(parent: parent, child: child)
         }
@@ -257,6 +299,12 @@ public final class Kernel {
     func processRows(visibleTo pid: PID) -> [ProcessSnapshotRow] {
         let namespace = processTable.process(pid)?.pidNamespace ?? rootPIDNS
         return processIntrospection.snapshotProcesses(in: namespace)
+    }
+
+    /// The effective uid/gid of the process with global pid `pid`, or `nil` when
+    /// no such process is retained. Backs the USER column of `ps`.
+    func processCredentials(_ pid: PID) -> (uid: UInt32, gid: UInt32)? {
+        processTable.process(pid).map { ($0.uid, $0.gid) }
     }
 
     // MARK: - Mounts
@@ -530,6 +578,7 @@ public final class Kernel {
             child.environment = parent.environment
             child.uid = parent.uid
             child.gid = parent.gid
+            child.umask = parent.umask
             child.supplementaryGroups = parent.supplementaryGroups
             child.processGroupID = parent.processGroupID
             child.sessionID = parent.sessionID
@@ -836,8 +885,18 @@ public final class Kernel {
         }
     }
 
+    /// Deliver `signal` to `pid` with host authority. Unlike a guest `kill`,
+    /// this is never filtered by the PID-1 protection (see
+    /// `SignalDispatcher.kill(_:signal:sender:)`), so a host can always stop
+    /// or terminate a session's init process.
     public func kill(_ pid: PID, signal: Int32) {
-        signalDispatcher.kill(pid, signal: signal)
+        signalDispatcher.kill(pid, signal: signal, sender: nil)
+    }
+
+    /// Guest-originated signal: `sender` is the calling process, which lets the
+    /// dispatcher apply Linux's protection of a PID namespace's init.
+    func kill(_ pid: PID, signal: Int32, from sender: Process) {
+        signalDispatcher.kill(pid, signal: signal, sender: sender)
     }
 
     func setSignalMask(for process: Process, _ signals: Set<Int32>) {
@@ -850,6 +909,115 @@ public final class Kernel {
 
     func unblockSignal(_ signal: Int32, for process: Process) {
         signalDispatcher.unblockSignal(signal, for: process)
+    }
+
+    // MARK: - Wall clock, entropy, terminals, power
+
+    /// Current real time as seconds since the Unix epoch, derived from the
+    /// logical clock through `wallClock`. Deterministic unless the host injected
+    /// a real epoch.
+    var epochNow: Double { wallClock.epochSeconds(atLogicalTime: loop.now) }
+
+    /// Anchor the wall clock so that *now* (the loop's current logical time)
+    /// reads as `epochSeconds`. Hosts call this once after construction, and
+    /// again after any period in which logical time did not follow real time
+    /// (for example after `resume()` from a long suspension). A non-finite
+    /// `epochSeconds` leaves the clock unchanged. Call on the kernel's serial
+    /// executor.
+    public func setWallClock(epochSeconds: Double,
+                             utcOffsetSeconds: Int = 0,
+                             zoneAbbreviation: String = "UTC") {
+        guard epochSeconds.isFinite else { return }
+        wallClock = WallClock(epochAtLogicalZero: epochSeconds - loop.now,
+                              utcOffsetSeconds: utcOffsetSeconds,
+                              zoneAbbreviation: zoneAbbreviation)
+    }
+
+    /// Reseed the generator behind `/dev/random` and `/dev/urandom`. The stream
+    /// is a deterministic function of the seed and is **not** cryptographically
+    /// secure, whatever the seed's origin. Call on the kernel's serial executor.
+    public func seedRandom(_ seed: UInt64) {
+        random = DeterministicRandom(seed: seed)
+    }
+
+    /// The next `count` bytes of the kernel's pseudo-random stream.
+    func randomBytes(_ count: Int) -> [UInt8] {
+        random.bytes(count)
+    }
+
+    /// Total scheduler steps run by this kernel — a monotonic counter with a
+    /// real source of truth, used as `ctxt` in `/proc/stat` and to bound how
+    /// much an unbounded device hands out within one step.
+    var schedulerStepCount: UInt64 { processScheduler.stepCount }
+
+    /// The `pts` number of `terminal`, assigning the lowest free one on first
+    /// use. Numbers are stable for the terminal's lifetime.
+    @discardableResult
+    func terminalIndex(for terminal: TerminalControl) -> Int {
+        terminalSlots.removeAll { $0.terminal == nil }
+        if let slot = terminalSlots.first(where: { $0.terminal === terminal }) {
+            return slot.index
+        }
+        var index = 0
+        let used = Set(terminalSlots.map(\.index))
+        while used.contains(index) { index += 1 }
+        terminalSlots.append(TerminalSlot(index: index, terminal: terminal))
+        return index
+    }
+
+    /// The live terminal registered under `pts/<index>`, if any.
+    func terminal(atIndex index: Int) -> TerminalControl? {
+        terminalSlots.first { $0.index == index }?.terminal
+    }
+
+    /// Registered `pts` numbers whose terminal is still alive, ascending.
+    var terminalIndices: [Int] {
+        terminalSlots.filter { $0.terminal != nil }.map(\.index).sorted()
+    }
+
+    /// One login session attached to a terminal, as reported by `who`/`w`.
+    struct TerminalSession: Equatable {
+        let terminalIndex: Int
+        let sessionID: PID
+        let uid: UInt32
+        /// Epoch seconds at which the session leader was spawned.
+        let startEpoch: Double
+        /// Name of the terminal's current foreground process-group leader (or
+        /// the session leader when no foreground group is set).
+        let foregroundCommand: String
+    }
+
+    /// Sessions that currently own a controlling terminal, ordered by `pts`
+    /// number. Derived entirely from the process table: a session is listed
+    /// while its leader is alive and still has a controlling terminal.
+    func terminalSessions() -> [TerminalSession] {
+        processTable.all.compactMap { process -> TerminalSession? in
+            guard process.isLive, process.sessionID == process.pid,
+                  let terminal = process.controllingTerminal else { return nil }
+            let foreground = terminal.foregroundProcessGroupID
+                .flatMap { processTable.process($0) }
+                .flatMap { $0.isLive ? $0 : nil }
+            let command = foreground ?? process
+            return TerminalSession(
+                terminalIndex: terminalIndex(for: terminal),
+                sessionID: process.pid,
+                uid: process.uid,
+                startEpoch: wallClock.epochSeconds(atLogicalTime: process.startTime),
+                foregroundCommand: command.args.isEmpty
+                    ? command.name : command.args.joined(separator: " "))
+        }
+        .sorted { ($0.terminalIndex, $0.sessionID) < ($1.terminalIndex, $1.sessionID) }
+    }
+
+    /// Hand a guest power request to the host. Returns `false` when no handler
+    /// is installed. The handler runs from a kernel-owned loop job so it never
+    /// re-enters the requesting process's step.
+    func postPowerRequest(_ request: PowerRequest) -> Bool {
+        guard lifecycleState != .shutdown, onPowerRequest != nil else { return false }
+        loop.schedule(after: 0, owner: workOwner) { [weak self] in
+            self?.onPowerRequest?(request)
+        }
+        return true
     }
 
     // MARK: - Filesystem persistence
@@ -958,15 +1126,103 @@ public final class Kernel {
         // resolved live from the process table (see ProcfsProvider).
         ProcfsProvider.mountPerProcess(on: vfs, processIntrospection: processIntrospection)
 
-        // A minimal /dev with the bit-bucket device. (/dev/zero is intentionally
-        // omitted: an unbounded zero-reader would spin the cooperative loop.)
-        vfs.createDevice("/dev/null", kind: .null)
+        mountSystemProcFS()
+        mountDevices()
 
         // /sys/fs/cgroup: the cgroup hierarchy's synthetic files. Re-mount every
         // existing group (the root always, plus any created at runtime) so the
         // tree survives a filesystem restore, which drops synthetic files.
         for path in cgroups.allPaths {
             if let group = cgroups.cgroup(path) { mountCgroupFiles(group) }
+        }
+    }
+
+    /// System-wide procfs files that have a real source of truth in this kernel.
+    private func mountSystemProcFS() {
+        // /proc/loadavg. Every scheduler step completes within one logical
+        // instant, so the time-weighted run-queue length over logical time is
+        // identically zero: the three averages are exact, not placeholders. The
+        // remaining fields are live: runnable/retained processes and the most
+        // recently allocated pid.
+        vfs.createSyntheticFile(ProcfsSchema.LoadAverage.path) { [weak self] in
+            guard let self else { return [] }
+            let all = self.processTable.all
+            let running = all.lazy.filter {
+                $0.isLive && ($0.runState == .running || $0.runState == .runnable)
+            }.count
+            return ProcfsSchema.render([ProcfsSchema.LoadAverage.line(
+                running: running, total: all.count, lastPID: self.processTable.lastPID)])
+        }
+        // /proc/stat: only the counters this kernel actually maintains. There is
+        // no CPU-time accounting, so the Linux `cpu` lines are deliberately absent.
+        vfs.createSyntheticFile(ProcfsSchema.Stat.path) { [weak self] in
+            guard let self else { return [] }
+            let all = self.processTable.all
+            let running = all.lazy.filter {
+                $0.isLive && ($0.runState == .running || $0.runState == .runnable)
+            }.count
+            let blocked = all.lazy.filter { $0.isLive && $0.runState == .waiting }.count
+            let boot = self.wallClock.epochSeconds(atLogicalTime: self.bootLogicalTime)
+            return ProcfsSchema.render(ProcfsSchema.Stat.lines(
+                contextSwitches: self.schedulerStepCount,
+                bootEpoch: Int64(boot.rounded(.down)),
+                processesCreated: self.processTable.lastPID,
+                running: running,
+                blocked: blocked))
+        }
+        // /proc/filesystems: the filesystem types `mount` and the kernel provide.
+        vfs.createSyntheticFile(ProcfsSchema.Filesystems.path) {
+            ProcfsSchema.render(ProcfsSchema.Filesystems.lines)
+        }
+        // /proc/sys/kernel: read-only identity. `hostname` follows the reader's
+        // UTS namespace, like `uname -n`.
+        vfs.createSyntheticFile(ProcfsSchema.SysKernel.hostnamePath) { [weak self] in
+            guard let self else { return [] }
+            let uts = self.vfs.reader?.utsNamespace ?? self.rootUTS
+            return Array((uts.hostname + "\n").utf8)
+        }
+        vfs.createSyntheticFile(ProcfsSchema.SysKernel.ostypePath) {
+            Array((ProcfsSchema.SysKernel.ostype + "\n").utf8)
+        }
+        vfs.createSyntheticFile(ProcfsSchema.SysKernel.osreleasePath) {
+            Array((Swiftix.version + "\n").utf8)
+        }
+        // The directory holds only computed files, so it is not persisted.
+        vfs.lookup("/proc/sys")?.isKernelProvided = true
+    }
+
+    /// Kernel-provided `/dev`. These nodes are (re)created here rather than
+    /// stored, so they exist on a fresh kernel and after restoring a snapshot or
+    /// rootfs image that predates them; none of them is ever persisted.
+    private func mountDevices() {
+        vfs.createDevice("/dev/null", kind: .null)
+        vfs.createDevice("/dev/zero", kind: .zero)
+        vfs.createDevice("/dev/full", kind: .full)
+        // Both names read the same deterministic, seedable, non-cryptographic
+        // stream (see `seedRandom(_:)`).
+        vfs.createDevice("/dev/random", kind: .random)
+        vfs.createDevice("/dev/urandom", kind: .random)
+        // The calling process's controlling terminal.
+        vfs.createDevice("/dev/tty", kind: .controllingTerminal)
+        // Per-process descriptor views resolve through /proc/self/fd.
+        vfs.createKernelSymlink("/dev/fd", target: "/proc/self/fd")
+        vfs.createKernelSymlink("/dev/stdin", target: "/proc/self/fd/0")
+        vfs.createKernelSymlink("/dev/stdout", target: "/proc/self/fd/1")
+        vfs.createKernelSymlink("/dev/stderr", target: "/proc/self/fd/2")
+        // /dev/pts/<n>: one node per registered terminal, resolved live.
+        if let pts = vfs.createDirectory("/dev/pts") {
+            pts.isKernelProvided = true
+            pts.dynamicChildNames = { [weak self] in
+                self?.terminalIndices.map(String.init) ?? []
+            }
+            pts.resolveDynamicChild = { [weak self] name in
+                guard let self, let index = Int(name), String(index) == name,
+                      self.terminal(atIndex: index) != nil else { return nil }
+                let node = VNode(file: name)
+                node.deviceKind = .terminal(index: index)
+                node.mode = [.ownerRead, .ownerWrite, .groupWrite]
+                return node
+            }
         }
     }
 }

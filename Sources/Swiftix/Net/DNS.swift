@@ -93,6 +93,58 @@ enum DNS {
         return (id, nil)
     }
 
+    /// A decoded response: header fields plus every `A` answer, in order. Used by
+    /// the lookup tools (`dig`, `nslookup`, `host`) that print more than the
+    /// first address `parseResponse` returns.
+    struct Message: Equatable {
+        struct Answer: Equatable {
+            let name: String
+            let ttl: UInt32
+            let address: IPv4Address
+        }
+
+        let id: UInt16
+        let flags: UInt16
+        let questionCount: Int
+        let answers: [Answer]
+
+        /// RCODE (0 = NOERROR, 2 = SERVFAIL, 3 = NXDOMAIN, …).
+        var responseCode: Int { Int(flags & 0x000F) }
+    }
+
+    /// Parse a response into its header and `A` answers. Non-`A` records (for
+    /// example a CNAME ahead of the address) are skipped, not treated as errors.
+    static func parseMessage(_ bytes: [UInt8]) -> Message? {
+        guard bytes.count >= 12 else { return nil }
+        let qd = Int(uint16(bytes, 4))
+        let an = Int(uint16(bytes, 6))
+        var offset = 12
+        for _ in 0..<qd {
+            guard let next = skipName(bytes, offset) else { return nil }
+            offset = next + 4   // QTYPE + QCLASS
+        }
+        var answers: [Message.Answer] = []
+        for _ in 0..<an {
+            guard let (name, afterName) = readName(bytes, offset) else { return nil }
+            var o = afterName
+            guard o + 10 <= bytes.count else { return nil }
+            let type = uint16(bytes, o)
+            let ttl = (UInt32(uint16(bytes, o + 4)) << 16) | UInt32(uint16(bytes, o + 6))
+            let rdlength = Int(uint16(bytes, o + 8))
+            o += 10
+            guard o + rdlength <= bytes.count else { return nil }
+            if type == 1, rdlength == 4 {
+                answers.append(Message.Answer(
+                    name: name,
+                    ttl: ttl,
+                    address: IPv4Address(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3])))
+            }
+            offset = o + rdlength
+        }
+        return Message(id: uint16(bytes, 0), flags: uint16(bytes, 2),
+                       questionCount: qd, answers: answers)
+    }
+
     // MARK: - Header / question builders
 
     private static func appendHeader(_ bytes: inout [UInt8], id: UInt16, flags: UInt16, qd: UInt16, an: UInt16) {

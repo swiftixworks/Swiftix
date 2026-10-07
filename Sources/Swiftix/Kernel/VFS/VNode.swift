@@ -47,10 +47,28 @@ final class VNode {
     var deviceKind: DeviceKind?
 
     /// The kinds of special device file the VFS models.
-    enum DeviceKind {
+    enum DeviceKind: Equatable {
         /// `/dev/null` — discards writes, reads as end-of-file.
         case null
+        /// `/dev/zero` — discards writes, reads as an endless run of zero bytes.
+        case zero
+        /// `/dev/full` — reads like `/dev/zero`, every write fails with ENOSPC.
+        case full
+        /// `/dev/random` / `/dev/urandom` — the kernel's deterministic,
+        /// seedable, non-cryptographic byte stream.
+        case random
+        /// `/dev/tty` — whatever terminal controls the *opening* process.
+        case controllingTerminal
+        /// `/dev/pts/<index>` — one registered terminal.
+        case terminal(index: Int)
+        /// `/proc/<pid>/fd/<fd>` — opening it duplicates that open-file
+        /// description into the opener, like `dup` across processes.
+        case descriptor(pid: PID, fd: Int)
     }
+
+    /// A node the kernel re-creates on every boot/restore (device files, the
+    /// `/dev/std*` links). Such nodes are never written to a filesystem snapshot.
+    var isKernelProvided = false
 
     // MARK: - Hard links & deferred deletion
 
@@ -72,7 +90,7 @@ final class VNode {
     /// writers. Data is released when the last handle closes.
     var unlinked: Bool = false
 
-    // MARK: - Timestamps (logical clock ticks from EventLoop.now)
+    // MARK: - Timestamps (seconds on the kernel wall clock; see `Kernel.wallClock`)
 
     /// Last access time (read). Updated by `read` operations.
     var atime: Double = 0
@@ -250,6 +268,7 @@ final class VNode {
         dynamicChildNames = nil
         resolveDynamicChild = nil
         deviceKind = nil
+        isKernelProvided = false
         nlink = source.nlink
         openHandles = 0
         unlinked = false

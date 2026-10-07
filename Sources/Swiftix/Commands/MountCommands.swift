@@ -19,7 +19,8 @@ extension BuiltinCommands {
             // mount — with no arguments, list the caller's mount table; otherwise
             // `mount -t tmpfs <src> <dir>` or `mount --bind <src> <dir>` (also
             // `mount -o bind …`).
-            Command(name: "mount", summary: "mount a filesystem, or list mounts", category: .fileSystem) { ctx, argv in
+            Command(name: "mount", summary: "mount a filesystem, or list mounts", category: .fileSystem,
+                    usage: "mount [-t tmpfs|--bind] <source> <dir>\nWith no arguments, list the mount table.") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 if args.isEmpty {
                     for row in ctx.mountTable() {
@@ -75,7 +76,8 @@ extension BuiltinCommands {
             },
 
             // umount MOUNTPOINT — detach the filesystem mounted there.
-            Command(name: "umount", summary: "unmount a filesystem", category: .fileSystem) { ctx, argv in
+            Command(name: "umount", summary: "unmount a filesystem", category: .fileSystem,
+                    usage: "umount <mountpoint>") { ctx, argv in
                 guard argv.count > 1 else {
                     ctx.usage("umount", "umount <mountpoint>"); return
                 }

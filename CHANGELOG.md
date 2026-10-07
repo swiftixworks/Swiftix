@@ -5,8 +5,90 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+A userland baseline: the shell is a POSIX-style interpreter, the built-in
+command set covers everyday coreutils use, and time, identity, devices, and
+signals behave the way a Linux user expects. Public API changes are additive.
+
+### Added
+
+- Shell language: `if`/`for`/`while`/`until`/`case`, functions with `local`
+  and `return`, here-documents and here-strings, `$(...)`, `$((...))`,
+  `${v:-d}`-style parameter expansion, brace and tilde expansion, subshells
+  and groups, `trap`, `set -eux`, aliases, and job control. `sh` runs a script
+  file, `sh -c STRING`, or a nested interactive shell, and an executable
+  script (`./x.sh a b`, or by name through `$PATH`) runs as a program.
+- Shell builtins `umask [-S] [MODE]` (octal and symbolic) and `$RANDOM`, plus
+  `BUILTIN --help` for every builtin.
+- Commands: `awk` (patterns, arrays, user functions, `printf`, `getline`,
+  `system()`, and `|` pipes through `sh -c`), `tar`, `bc`, `dd`, `od`,
+  `hexdump`, `xxd`, `base64`, `tr`, `comm`, `join`, `paste`, `column`,
+  `expand`, `fold`, `split`, `tac`, `cmp`, `strings`, `file`, `tree`,
+  `realpath`, `mktemp`, `truncate`, `rmdir`, `sync`, `yes`, `less`, `time`,
+  `watch`, `nproc`, `printenv`, `pgrep`, `pkill`, `pidof`, `killall`, `date`,
+  `cal`, `id`, `groups`, `who`, `w`, `logname`, `tty`, `stty`, `shutdown`,
+  `reboot`, `poweroff`, `halt`, `dig`, `ss`, and `telnet`.
+- Every registered command answers `--help` with `Usage: …` and exits 0, and
+  `man COMMAND` renders the same text. `Command` gains an optional `usage`
+  string for consumer-registered commands.
+- Wall clock: `Kernel.setWallClock` injects the epoch and zone; `date`,
+  `ls -l`, `stat`, `tar tv`, `touch -d`/`-t`, and `find -newer`/`-mmin`/
+  `-mtime` use it. Without an injected clock, logical zero is the Unix epoch.
+- Identity: users and groups come from `/etc/passwd` and `/etc/group` (with a
+  synthetic `root`/`userN` fallback) in `ls -l`, `stat`, `chown`,
+  `find -user`, `ps`, `id`, `whoami`, the prompt, and `su`. `su` accepts a
+  name or uid and the forms `su`, `su -`, `su - USER`, `su USER -c COMMAND`,
+  and `su USER COMMAND ARG...`.
+- Devices and procfs: `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`,
+  `/dev/tty`, `/dev/pts/N`, `/dev/stdin|stdout|stderr`, `/dev/fd`;
+  `/proc/self`, `/proc/<pid>/{stat,comm,environ,fd,cwd}`, and system files
+  such as `/proc/uptime`, `/proc/loadavg`, `/proc/meminfo`, and
+  `/proc/version`.
+- Per-process `umask` (`ProcessContext.umask(_:)`, `fileCreationMask`), and
+  `Kernel.onPowerRequest` for `shutdown`/`reboot`.
+- Network commands: `ip addr|link|route|neigh`, `ss`, `dig`, `telnet`,
+  `hostname -I|-i|-s|-f`, a fuller `curl`/`wget`/`nc`/`ping`/`traceroute`
+  option set, and uniform option parsing — an unknown option is a usage error
+  (exit 2), never taken for a host name.
+- Ctrl-C at the shell: at an idle prompt it discards the input line and
+  prompts again; at a continuation prompt (`> `) it abandons the pending
+  command; it stops a running shell loop; and a nested interactive shell
+  survives it. `$?` is 130 afterwards.
+
 ### Changed
 
+- Unquoted expansions are split into fields on `$IFS` and then globbed;
+  quote an expansion (`"$v"`) to keep it as one word.
+- Shell variables are no longer exported by default: `v=1` is visible to
+  child processes only after `export v` (or as a `v=1 command` prefix).
+- Command substitution, pipeline stages that run shell code, and `( ... )`
+  run in a child shell, so their assignments and `cd` do not affect the
+  parent.
+- New files, directories, and FIFOs honor the process `umask` (022 by
+  default): `mkdir` creates mode 0755 and `mkfifo` 0644.
+- `grep` and `sed` use POSIX basic regular expressions by default; pass `-E`
+  for extended syntax (`+`, `?`, `|`, unescaped groups).
+- `mkdir` without `-p` no longer creates missing parent directories, and
+  reports an existing directory as an error.
+- `head` and `tail` print `==> NAME <==` headers when given several files.
+- `find`, `du`, `tree`, `ls -R`, `grep -r`, `rm -r`, and `cp -r` no longer
+  follow symbolic links met during a walk (`grep -R` follows them, visiting
+  each directory once); `chmod -R`, `chown -R`, and `tar` walk the same way.
+  `grep -r`, `cp -r`, and `tar` skip device nodes met during a walk.
+- `ls -l` and `stat` print calendar times and user/group names (`ls -n` for
+  numeric ids). In `stat -c`, `%X`/`%Y`/`%Z` are integer epoch seconds and
+  `%x`/`%y`/`%z` the readable forms.
+- Reading an endless device with `cat` (`cat /dev/zero`) streams until
+  interrupted, as on Linux. A failed write is reported and fails the command:
+  `echo x > /dev/full` prints `echo: write error: No space left on device`
+  and exits 1.
+- PID 1 of a PID namespace ignores guest signals it has no handler for, so
+  `kill -9 1` no longer ends the session it is typed into. Signals sent
+  through the host `Kernel` API are unaffected.
+- A foreground job killed by Ctrl-C ends the rest of its command line
+  (`sleep 100; echo done` prints nothing).
+- `hostname -I` and other options are parsed as options; they previously set
+  the host name to the option text.
+- `whoami` and the shell's default `USER`/`HOME` come from the user database.
 - Directory search (execute) permission is enforced on every component of a
   path, not only the last: as uid 1000, `cat /root/x` now fails with
   `Permission denied` when `/root` is mode 0700, whatever the mode of `x`.
@@ -25,6 +107,16 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- A directory tree nested thousands of levels deep (reachable from a guest
+  with `mkdir -p`) no longer overflows the host stack. Releasing the tree,
+  `/proc/meminfo` and resource accounting, rename's subtree check, filesystem
+  snapshot capture/validation/restore, and `rm -r`, `chmod -R`, `chown -R`,
+  `du`, `tree`, `grep -r`, `df`, and `free` now walk with explicit worklists.
+  A snapshot's legacy `root` projection is written to at most
+  `FilesystemSnapshot.legacyProjectionDepthLimit` (256) directory levels;
+  the inode table still holds every level, and images whose `root` carries
+  the full tree remain valid.
+
 - A process that exits or is killed with a connected TCP socket open now
   closes the connection: Ctrl-C on `nc` or `curl` no longer leaves the server
   side established forever. The peer sees a FIN, or a reset if the process
@@ -40,6 +132,11 @@ format, behavior and platform changes are recorded here.
 - A receive on a connection that was already reset returns immediately
   instead of parking forever, and bytes that arrived before a reset are
   delivered before the reset is reported.
+- `mv`, `chmod`, `chown`, and `du` report `Permission denied` rather than
+  `No such file or directory` for a path behind an unsearchable directory.
+- Output larger than a pipe buffer (64 KiB) is no longer truncated in
+  pipelines or command substitution (`x=$(seq 1 20000)`,
+  `seq 1 50000 | sort -rn | head -1`): producers wait for the reader.
 
 ## 0.12.0 — 2026-09-30
 
@@ -193,7 +290,6 @@ This pre-1.0 minor intentionally changes the public kernel API described in the
 ### Added
 
 - Single-node kernel, VFS, process/fd/signal/pty model and IPv4 TCP/IP stack.
-- Swiftix Go compiler, bytecode runtime and macOS/Linux host tools.
 - Deterministic root filesystem images and Debian-style package management.
 - Public topology, terminal, uplink and observability seams.
 

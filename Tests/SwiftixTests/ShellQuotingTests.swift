@@ -29,9 +29,11 @@ struct ShellQuotingTests {
         #expect(contains(run(["FOO=xy", "args '$FOO'"]), Array("<$FOO>".utf8)))
     }
 
-    @Test func expandedValueIsNotWordSplit() {
-        // A value with a space stays one argument (no post-expansion splitting).
-        #expect(contains(run(["FOO=\"a b\"", "args $FOO"]), Array("<a b>".utf8)))
+    @Test func unquotedExpansionIsWordSplitQuotedIsNot() {
+        // POSIX field splitting: an unquoted expansion splits on whitespace,
+        // a double-quoted one stays a single argument.
+        #expect(contains(run(["FOO=\"a b\"", "args $FOO"]), Array("<a,b>".utf8)))
+        #expect(contains(run(["FOO=\"a b\"", "args \"$FOO\""]), Array("<a b>".utf8)))
     }
 
     @Test func quotedMetacharacterIsLiteral() {

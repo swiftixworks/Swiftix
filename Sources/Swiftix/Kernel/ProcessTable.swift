@@ -11,6 +11,10 @@ final class ProcessTable {
     var count: Int { storage.count }
     var all: [Process] { Array(storage.values) }
 
+    /// The most recently allocated pid (0 before the first spawn). Because pids
+    /// are never reused, this is also the number of processes ever created.
+    var lastPID: PID { nextPID - 1 }
+
     func process(_ pid: PID) -> Process? {
         storage[pid]
     }
@@ -26,7 +30,8 @@ final class ProcessTable {
             pid: pid,
             ppid: parent,
             name: name,
-            workScope: loop.makeCancellationScope())
+            workScope: loop.makeCancellationScope(),
+            startTime: loop.now)
         process.args = args
         storage[pid] = process
         return process

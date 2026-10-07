@@ -38,6 +38,12 @@ final class NetworkNeighborCache {
         resolutionEpochs[ip.raw] = nil
     }
 
+    /// Forget a resolved binding (`ip neigh del`). Packets already queued behind
+    /// an in-flight resolution are untouched. Returns whether a binding existed.
+    func remove(ip: IPv4Address) -> Bool {
+        entries.removeValue(forKey: ip.raw) != nil
+    }
+
     func mac(for ip: IPv4Address) -> MACAddress? {
         entries[ip.raw]
     }

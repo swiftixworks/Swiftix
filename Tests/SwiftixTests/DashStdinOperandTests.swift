@@ -30,13 +30,13 @@ struct DashStdinOperandTests {
     /// `cmd file -` reads the file first and standard input second, so the operand
     /// order is what determines the concatenation order.
     @Test func dashIsReadInOperandOrderAfterAFile() {
-        let out = runShell(["echo zzz | head -n 100 /nums -"], seed: seedNums)
+        let out = runShell(["echo zzz | cat /nums -"], seed: seedNums)
         #expect(contains(out, Array("1\n2\n3\n4\n5\nzzz\n".utf8)))
     }
 
     /// ...and `cmd - file` reads standard input first.
     @Test func dashIsReadInOperandOrderBeforeAFile() {
-        let out = runShell(["echo aaa | head -n 100 - /nums"], seed: seedNums)
+        let out = runShell(["echo aaa | cat - /nums"], seed: seedNums)
         #expect(contains(out, Array("aaa\n1\n2\n3\n4\n5\n".utf8)))
     }
 

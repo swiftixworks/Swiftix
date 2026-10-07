@@ -125,6 +125,16 @@ final class FileDescriptorTable {
         return allocate(description)
     }
 
+    /// Duplicate descriptor `fd` of `other` into this table at the lowest free
+    /// descriptor, sharing its open-file description (offset, access mode, and
+    /// status flags) exactly like `dup`. This is how opening
+    /// `/proc/<pid>/fd/<n>` — and therefore `/dev/stdin`, `/dev/fd/<n>` — hands
+    /// back the *same* open file rather than a fresh one.
+    func duplicate(_ fd: Int, from other: FileDescriptorTable) -> Int? {
+        guard !isSealed, let description = other.table[fd]?.description else { return nil }
+        return allocate(description)
+    }
+
     /// Duplicate `fd` onto `target` (`dup2`). Closing an existing target releases
     /// only that descriptor reference; the source description remains live.
     @discardableResult
@@ -197,6 +207,12 @@ final class FileDescriptorTable {
             case is NullDeviceHandle:
                 type = "device"
                 detail = "null"
+            case let device as ZeroDeviceHandle:
+                type = "device"
+                detail = device.isFull ? "full" : "zero"
+            case is RandomDeviceHandle:
+                type = "device"
+                detail = "random"
             default:
                 type = "other"
                 detail = "-"

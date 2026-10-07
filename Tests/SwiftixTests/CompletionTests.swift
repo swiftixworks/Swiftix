@@ -180,4 +180,21 @@ struct CompletionTests {
         #expect(result.candidates == ["hosts"])
         #expect(result.insertion == "osts ")
     }
+
+
+    @Test func completesShellBuiltinsAndNewCommands() {
+        let kernel = Kernel(loop: EventLoop())
+        let registry = CommandRegistry.builtins
+        #expect(kernel.complete(line: "uma", commands: registry, shellPID: 0).candidates == ["umask"])
+        #expect(kernel.complete(line: "expo", commands: registry, shellPID: 0).insertion == "rt ")
+        #expect(kernel.complete(line: "aw", commands: registry, shellPID: 0).candidates == ["awk"])
+        let all = kernel.complete(line: "", commands: registry, shellPID: 0).candidates
+        for name in ["alias", "cd", "export", "read", "sh", "su", "date", "ip", "awk", "sed"] {
+            #expect(all.contains(name), "\(name) is not offered")
+        }
+        #expect(!all.contains(":"))
+        #expect(!all.contains("."))
+        // Every registered command is a candidate.
+        #expect(Set(registry.names).isSubset(of: Set(all)))
+    }
 }

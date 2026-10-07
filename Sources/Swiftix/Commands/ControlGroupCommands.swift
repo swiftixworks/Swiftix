@@ -19,7 +19,8 @@ extension BuiltinCommands {
     static func controlGroupCommands() -> [Command] {
         [
             // cgcreate GROUP — create a cgroup (and any missing parents).
-            Command(name: "cgcreate", summary: "create a cgroup", category: .system) { ctx, argv in
+            Command(name: "cgcreate", summary: "create a cgroup", category: .system,
+                    usage: "cgcreate <group>") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 guard let group = args.first else {
                     ctx.usage("cgcreate", "cgcreate <group>"); return
@@ -32,7 +33,8 @@ extension BuiltinCommands {
             },
 
             // cgset GROUP pids.max N — set the subtree process limit (N or "max").
-            Command(name: "cgset", summary: "set a cgroup limit (pids.max)", category: .system) { ctx, argv in
+            Command(name: "cgset", summary: "set a cgroup limit (pids.max)", category: .system,
+                    usage: "cgset <group> pids.max <N|max>") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 guard args.count == 3, args[1] == "pids.max" else {
                     ctx.usage("cgset", "cgset <group> pids.max <N|max>"); return
@@ -56,7 +58,8 @@ extension BuiltinCommands {
             },
 
             // cgdelete GROUP — remove an empty leaf cgroup.
-            Command(name: "cgdelete", summary: "remove an empty cgroup", category: .system) { ctx, argv in
+            Command(name: "cgdelete", summary: "remove an empty cgroup", category: .system,
+                    usage: "cgdelete <group>") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 guard let group = args.first else {
                     ctx.usage("cgdelete", "cgdelete <group>"); return
@@ -72,7 +75,8 @@ extension BuiltinCommands {
             // cgexec GROUP CMD [args...] — run CMD inside GROUP. The child joins the
             // group before its body runs; if the group is already full it reports
             // the limit and exits without running.
-            Command(name: "cgexec", summary: "run a command in a cgroup", category: .system) { ctx, argv in
+            Command(name: "cgexec", summary: "run a command in a cgroup", category: .system,
+                    usage: "cgexec <group> <command> [args...]") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 guard args.count >= 2 else {
                     ctx.usage("cgexec", "cgexec <group> <command> [args...]"); return

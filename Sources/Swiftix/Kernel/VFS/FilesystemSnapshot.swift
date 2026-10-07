@@ -393,7 +393,8 @@ extension VirtualFileSystem {
     }
 
     private func shouldPersist(_ node: VNode) -> Bool {
-        !(node.kind == .file && (node.provider != nil || node.deviceKind != nil))
+        !node.isKernelProvided
+            && !(node.kind == .file && (node.provider != nil || node.deviceKind != nil))
     }
 
     /// Validate and build a detached candidate tree before changing the live VFS.

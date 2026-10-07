@@ -4,6 +4,11 @@ final class ProcessScheduler {
     private let deliverPendingSignals: (Process) -> Bool
     private let exit: (Process, ProcessExitStatus) -> Void
 
+    /// Steps run so far across every process of this kernel. Monotonic; used as
+    /// the context-switch counter in `/proc/stat` and as the "current step"
+    /// identity that bounds reads from unbounded devices.
+    private(set) var stepCount: UInt64 = 0
+
     init(processTable: ProcessTable,
          deliverPendingSignals: @escaping (Process) -> Bool,
          exit: @escaping (Process, ProcessExitStatus) -> Void) {
@@ -33,6 +38,7 @@ final class ProcessScheduler {
             }
             process.runState = .running
             process.scheduleTicks += 1   // CPU-activity proxy: how often this process was run
+            self.stepCount &+= 1
             process.activeStepDepth += 1
             work()
             process.activeStepDepth -= 1

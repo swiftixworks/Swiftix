@@ -316,6 +316,90 @@ final class NullDeviceHandle: FileObject {
     var readiness: IOReadiness { [.readable, .writable] }
 }
 
+/// Bounds how many bytes an unbounded device (`/dev/zero`, `/dev/urandom`)
+/// hands out within one scheduler step.
+///
+/// Swiftix processes are cooperative: a synchronous "read until EOF" loop over
+/// an endless device would never return to the event loop, freezing every
+/// process and growing memory without limit. So one step may draw at most
+/// `bytesPerStep`; after that, reads in the same step return empty (which such
+/// loops treat as EOF). A program that streams with the blocking/async read
+/// frontend takes a fresh step per read and therefore sees an endless stream,
+/// and stays interruptible by signals between steps.
+final class StepReadBudget {
+    static let bytesPerStep = 1 * 1_024 * 1_024
+
+    private let currentStep: () -> UInt64
+    private var step: UInt64 = .max
+    private var drawn = 0
+
+    init(currentStep: @escaping () -> UInt64) {
+        self.currentStep = currentStep
+    }
+
+    /// Reserve up to `requested` bytes from this step's allowance.
+    func take(_ requested: Int) -> Int {
+        let now = currentStep()
+        if now != step {
+            step = now
+            drawn = 0
+        }
+        let granted = Swift.max(0, Swift.min(requested, Self.bytesPerStep - drawn))
+        drawn += granted
+        return granted
+    }
+}
+
+/// `/dev/zero` and `/dev/full`: reads yield zero bytes (bounded per scheduler
+/// step, see `StepReadBudget`). `/dev/zero` discards writes; `/dev/full`
+/// accepts none and reports ENOSPC through the throwing write frontend.
+final class ZeroDeviceHandle: FileObject, WriteRejecting {
+    private let budget: StepReadBudget
+    let isFull: Bool
+
+    init(budget: StepReadBudget, isFull: Bool) {
+        self.budget = budget
+        self.isFull = isFull
+    }
+
+    func read(max: Int) -> [UInt8] {
+        [UInt8](repeating: 0, count: budget.take(max))
+    }
+
+    @discardableResult
+    func write(_ bytes: [UInt8]) -> Int { isFull ? 0 : bytes.count }
+
+    var writeRejection: SyscallError? { isFull ? .noSpace : nil }
+
+    var readiness: IOReadiness { [.readable, .writable] }
+}
+
+/// `/dev/random` / `/dev/urandom`: reads draw from the kernel's deterministic,
+/// seedable generator (not cryptographically secure); writes are discarded.
+final class RandomDeviceHandle: FileObject {
+    private let budget: StepReadBudget
+    private let source: (Int) -> [UInt8]
+
+    init(budget: StepReadBudget, source: @escaping (Int) -> [UInt8]) {
+        self.budget = budget
+        self.source = source
+    }
+
+    func read(max: Int) -> [UInt8] { source(budget.take(max)) }
+
+    @discardableResult
+    func write(_ bytes: [UInt8]) -> Int { bytes.count }
+
+    var readiness: IOReadiness { [.readable, .writable] }
+}
+
+/// A write endpoint that refuses every non-empty write with a fixed errno
+/// (`/dev/full` → ENOSPC). The plain `write` syscall reports it as a zero-byte
+/// write; the throwing frontend surfaces the typed error.
+protocol WriteRejecting: AnyObject {
+    var writeRejection: SyscallError? { get }
+}
+
 /// An open handle to a regular file in the VFS, carrying its own shared
 /// read/write offset. Ordinary writes are positional; append-mode writes select
 /// EOF immediately before each write. Tracks open-handle count on the underlying

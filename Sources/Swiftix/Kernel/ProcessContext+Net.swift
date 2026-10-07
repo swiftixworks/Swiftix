@@ -359,4 +359,142 @@ extension ProcessContext {
         recordSyscall("close", result: wasOpen ? "0" : "-1", detail: "fd=\(fd)")
     }
 
+    // MARK: - Command-line support (internal)
+    //
+    // Additive, `internal` entry points for the network built-ins (`ip`, `ss`,
+    // `netstat`, `curl`, `nc`, `ping`). They expose value snapshots and bounded
+    // waits; none of them changes how the existing syscalls above behave.
+
+    /// Attached interfaces with carrier and counters, for `ip link`/`ip addr`.
+    func snapshotNetworkLinks() -> [NetworkLinkSnapshot] {
+        kernel.netns.stack.snapshotLinks()
+    }
+
+    /// Every TCP listener, TCP connection and bound UDP socket in this network
+    /// namespace, for `ss`/`netstat`.
+    func snapshotNetworkSockets() -> [NetworkSocketSnapshot] {
+        kernel.netns.stack.snapshotSockets()
+    }
+
+    /// `configureNetwork(_:)` that reports why a change was rejected instead of
+    /// dropping it silently.
+    func configureNetworkValidated(_ change: NetworkConfigurationChange) throws {
+        try kernel.netns.stack.configureValidated(change)
+    }
+
+    /// Remove one route (`ip route del`). Returns whether a route matched.
+    @discardableResult
+    func removeNetworkRoute(destination: IPv4Address,
+                            prefixLength: Int,
+                            gateway: IPv4Address?,
+                            interfaceIndex: Int?) -> Bool {
+        kernel.netns.stack.removeRoute(destination: destination,
+                                       prefixLength: prefixLength,
+                                       gateway: gateway,
+                                       interfaceIndex: interfaceIndex)
+    }
+
+    /// Remove one neighbor binding (`ip neigh del`). Returns whether it existed.
+    @discardableResult
+    func removeNetworkNeighbor(ip: IPv4Address) -> Bool {
+        kernel.netns.stack.removeNeighbor(ip: ip)
+    }
+
+    /// How a bounded active open ended.
+    enum TCPConnectOutcome: Equatable {
+        case connected
+        /// The peer answered the SYN with a reset.
+        case refused
+        /// The handshake was abandoned after the retransmission cap.
+        case unreachable
+        /// `timeout` elapsed first.
+        case timedOut
+    }
+
+    /// Active open that reports refusal and honors a deadline. The plain
+    /// `tcpConnect` resumes identically for "established" and "reset", and never
+    /// gives up early; clients need both distinctions for their exit codes.
+    /// `timeout == nil` waits for the stack's own verdict.
+    func tcpConnect(_ fd: Int,
+                    to address: IPv4Address,
+                    port: UInt16,
+                    timeout: Double?) async throws -> TCPConnectOutcome {
+        guard let socket = process.fileDescriptors.object(fd) as? TCPSocket else {
+            throw SyscallError.badFileDescriptor
+        }
+        // Start the handshake through the callback syscall (which only arms a
+        // wake-up), then wait on readiness so the wait itself is cancellable and
+        // can time out.
+        tcpConnect(fd, to: address, port: port) {}
+        guard let connection = socket.connection else { throw SyscallError.badFileDescriptor }
+        let deadline = timeout.map { kernel.loop.now + max(0, $0) }
+        while true {
+            if connection.wasReset { return .refused }
+            switch connection.state {
+            case .closed: return .unreachable
+            case .synSent: break
+            default: return .connected
+            }
+            let remaining = deadline.map { $0 - kernel.loop.now }
+            if let remaining, remaining <= 0 { return .timedOut }
+            _ = try await poll([PollRequest(fd: fd, interests: [.writable])], timeout: remaining)
+        }
+    }
+
+    /// Await readable data (or EOF/reset) on `fd` for at most `timeout` seconds.
+    /// Returns `false` when the wait timed out. `nil` waits indefinitely.
+    func waitReadable(_ fd: Int, timeout: Double?) async throws -> Bool {
+        let ready = try await poll([PollRequest(fd: fd, interests: [.readable])],
+                                   timeout: timeout.map { max(0, $0) })
+        return !ready.isEmpty
+    }
+
+    /// The remote endpoint of a connected TCP descriptor.
+    func tcpPeer(_ fd: Int) -> (address: IPv4Address, port: UInt16)? {
+        guard let connection = (process.fileDescriptors.object(fd) as? TCPSocket)?.connection else {
+            return nil
+        }
+        return (connection.remoteIP, connection.remotePort)
+    }
+
+    /// The async ICMP echo with a caller-supplied payload. The payload-less
+    /// frontend reports an 8-byte reply; `ping` needs Linux's 56-byte default so
+    /// its `N bytes from` line is truthful.
+    func icmpEcho(to address: IPv4Address,
+                  identifier: UInt16,
+                  sequence: UInt16,
+                  payload: [UInt8],
+                  ttl: UInt8,
+                  timeout: Double) async throws -> Programs.PingOutcome {
+        let replyBytes = payload.count + ICMPMessage.headerLength
+        let outcome: Programs.PingOutcome = try await withCheckedThrowingContinuation { continuation in
+            // Mirrors the async frontend's interruptible wait: exactly one of
+            // {the echo outcome, process termination} resumes the continuation.
+            var finished = false
+            let process = self.process
+            let cancellationID = process.beginWait(.asyncContinuation) {
+                guard !finished else { return }
+                finished = true
+                continuation.resume(throwing: SyscallError.interrupted)
+            }
+            icmpEcho(to: address, identifier: identifier, sequence: sequence,
+                     payload: payload, ttl: ttl, timeout: timeout) { [weak process] from, replyTTL, rtt in
+                guard !finished else { return }
+                finished = true
+                if let process {
+                    process.disarmWaitCancellation(cancellationID)
+                    process.endWait(cancellationID)
+                }
+                if let from {
+                    continuation.resume(returning: .reply(from: from, sequence: sequence, ttl: replyTTL,
+                                                          bytes: replyBytes, rttSeconds: rtt))
+                } else {
+                    continuation.resume(returning: .timeout(sequence: sequence))
+                }
+            }
+        }
+        guard await kernel.awaitAsyncExecution(process) else { throw SyscallError.interrupted }
+        return outcome
+    }
+
 }

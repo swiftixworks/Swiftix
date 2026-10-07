@@ -28,7 +28,8 @@ extension Kernel {
 
     /// Compute a tab-completion for `line` typed at `shellPID`'s prompt.
     ///
-    /// - The first word (or an empty line) completes against `commands`' names.
+    /// - The first word (or an empty line) completes against `commands`' names,
+    ///   the shell's builtins, and executables on the shell's `$PATH`.
     /// - A later word completes against VFS entries, resolved relative to the
     ///   shell process's current directory; matching directories carry a
     ///   trailing "/".
@@ -41,6 +42,9 @@ extension Kernel {
             let partial = endsWithSpace ? "" : (tokens.first ?? "")
             var names = Set(commands.names)
             names.formUnion(pathCommandNames(shellPID: shellPID))
+            // The shell's own builtins (`cd`, `export`, `umask`, …) are commands
+            // too; the punctuation ones (`:`, `.`) are not worth completing.
+            names.formUnion(Programs.ShellInterpreter.builtinNames.filter { $0.first?.isLetter == true })
             let candidates = names.filter { $0.hasPrefix(partial) }.sorted()
             return Self.finish(partial: partial, candidates: candidates)
         }

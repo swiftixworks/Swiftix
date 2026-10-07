@@ -57,6 +57,14 @@ extension ProcessContext {
         return true
     }
 
+    /// Whether Ctrl-C was pressed at this reader's prompt since the last call
+    /// (and clear it). A prompt-driven reader calls this when a terminal read
+    /// returns empty, to tell an interrupted line from end-of-file, and between
+    /// commands it runs in-process. `false` when `fd` is not a terminal.
+    func takeTerminalLineInterrupt(_ fd: Int) -> Bool {
+        (process.fileDescriptors.object(fd) as? TerminalControl)?.takeLineInterrupt() ?? false
+    }
+
     /// Wire `object` as this process's standard streams — stdin (0), stdout (1),
     /// and stderr (2) — so a program can use the fd 0/1/2 convention (and the
     /// `print`/`arguments` conveniences) without knowing how it was launched.
@@ -68,6 +76,7 @@ extension ProcessContext {
         process.fileDescriptors.install(object, at: 2)
         if let terminal = object as? TerminalControl {
             process.controllingTerminal = terminal
+            kernel.terminalIndex(for: terminal)   // reserve its stable pts number
         }
         return (stdin: 0, stdout: 1, stderr: 2)
     }

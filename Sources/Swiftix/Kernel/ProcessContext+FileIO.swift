@@ -43,7 +43,10 @@ extension ProcessContext {
         if existing == nil, !canMutateParent(of: resolved) {
             result = false
         } else if let node = kernel.vfs.createDirectory(resolved, mounts: mountNS) {
-            if existing == nil { applyCreationOwnership(to: node) }
+            if existing == nil {
+                applyCreationOwnership(to: node)
+                applyCreationMode(to: node, base: Self.directoryCreationMode)
+            }
             result = true
         } else {
             result = false
@@ -130,6 +133,7 @@ extension ProcessContext {
         guard canMutateParent(of: resolved),
               let node = kernel.vfs.createFifo(resolved, mounts: mountNS) else { return false }
         applyCreationOwnership(to: node)
+        applyCreationMode(to: node, base: .fifoDefault)
         return true
     }
 
@@ -167,13 +171,14 @@ extension ProcessContext {
     // MARK: - Timestamps
 
     /// Update the access and modification times of `path` to `now` (like `touch`).
-    /// If `atime`/`mtime` are provided they override `now`. Returns `false` if the
+    /// If `atime`/`mtime` are provided they override `now`. Times are seconds on
+    /// the kernel wall clock (see `realtimeSeconds`). Returns `false` if the
     /// path doesn't exist.
     @discardableResult
     public func utimes(_ path: String, atime: Double? = nil, mtime: Double? = nil) -> Bool {
         guard let node = lookupNode(absolute(path)) else { return false }
         guard process.uid == 0 || process.uid == node.uid || permits(node, .write) else { return false }
-        let now = kernel.loop.now
+        let now = kernel.vfs.clock()
         node.atime = atime ?? now
         node.mtime = mtime ?? now
         node.ctime = now
@@ -474,10 +479,15 @@ extension ProcessContext {
         var entries = node.children.map { name, child in
             child.kind == .directory ? name + "/" : name
         }
-        // Computed entries of a dynamic directory (e.g. live pids under /proc);
-        // they are directories, so they list with a trailing "/".
+        // Computed entries of a dynamic directory (e.g. live pids under /proc).
+        // Most are directories, but some are links or device nodes
+        // (/proc/self, /proc/<pid>/fd/<n>, /dev/pts/<n>), so ask each one.
         if let dynamic = node.dynamicChildNames?() {
-            entries += dynamic.map { $0 + "/" }
+            entries += dynamic.compactMap { name in
+                guard node.child(name) == nil else { return nil }
+                let isDirectory = node.resolveDynamicChild?(name)?.kind ?? .directory == .directory
+                return isDirectory ? name + "/" : name
+            }
         }
         let result = entries.sorted()
         recordSyscall("readdir", result: String(result.count), detail: "path=\(resolved)")
@@ -591,7 +601,12 @@ extension ProcessContext {
             FileSystemDirectoryEntry(name: name, type: child.fileType)
         }
         if let dynamic = node.dynamicChildNames?() {
-            entries += dynamic.map { FileSystemDirectoryEntry(name: $0, type: .directory) }
+            entries += dynamic.compactMap { name in
+                guard node.child(name) == nil else { return nil }
+                return FileSystemDirectoryEntry(
+                    name: name,
+                    type: node.resolveDynamicChild?(name)?.fileType ?? .directory)
+            }
         }
         return entries.sorted { $0.name < $1.name }
     }
@@ -612,6 +627,7 @@ extension ProcessContext {
             throw SyscallError.noSuchFileOrDirectory
         }
         applyCreationOwnership(to: node)
+        applyCreationMode(to: node, base: Self.directoryCreationMode)
     }
 
     /// Remove a file or empty directory relative to a filesystem capability.
@@ -755,6 +771,30 @@ extension ProcessContext {
         node.gid = process.gid
     }
 
+    /// Mode requested for a new regular file before the umask is applied (0666).
+    static let fileCreationMode: FileMode = [
+        .ownerRead, .ownerWrite, .groupRead, .groupWrite, .otherRead, .otherWrite,
+    ]
+
+    /// Mode requested for a new directory before the umask is applied (0777).
+    static let directoryCreationMode: FileMode = [
+        .ownerRead, .ownerWrite, .ownerExecute,
+        .groupRead, .groupWrite, .groupExecute,
+        .otherRead, .otherWrite, .otherExecute,
+    ]
+
+    /// Give a freshly created node `base & ~umask`, as `open(O_CREAT)`, `mkdir`,
+    /// and `mkfifo` do. With the default mask (022) this yields the historical
+    /// 0644 files and 0755 directories.
+    private func applyCreationMode(to node: VNode, base: FileMode) {
+        node.mode = base.subtracting(process.umask)
+    }
+
+    /// A per-open read allowance for an endless device; see `StepReadBudget`.
+    private func makeStepReadBudget() -> StepReadBudget {
+        StepReadBudget { [weak kernel] in kernel?.schedulerStepCount ?? 0 }
+    }
+
     private func openFileNode(existing: VNode?,
                               create: () -> VNode?,
                               flags: OpenFlags,
@@ -778,7 +818,7 @@ extension ProcessContext {
             let isWrite = access.canWrite && !access.canRead
             let endpoint = FifoEndpoint(buffer: buffer, isWriteEnd: isWrite, vnode: existing)
             let fd = process.fileDescriptors.allocate(endpoint, access: access)
-            existing.touchAccess(kernel.loop.now)
+            existing.touchAccess(kernel.vfs.clock())
             return fd
         }
         guard access.canWrite || flags.intersection([.create, .truncate, .append]).isEmpty else {
@@ -791,7 +831,10 @@ extension ProcessContext {
             if access.canRead, !permits(existing, .read) { throw SyscallError.permissionDenied }
             if access.canWrite, !permits(existing, .write) { throw SyscallError.permissionDenied }
         }
-        let node = flags.contains(.create) ? create() : existing
+        // An existing node wins even with `.create`: the path may have resolved
+        // through a symbolic link (`/dev/stdout`) or to a computed node, neither
+        // of which the creating walk would find again.
+        let node = existing ?? (flags.contains(.create) ? create() : nil)
         guard let node else {
             throw SyscallError.noSuchFileOrDirectory
         }
@@ -801,6 +844,7 @@ extension ProcessContext {
         if existing == nil {
             node.uid = process.uid
             node.gid = process.gid
+            applyCreationMode(to: node, base: Self.fileCreationMode)
         }
 
         var descriptorFlags: FileStatusFlags = []
@@ -811,17 +855,48 @@ extension ProcessContext {
         // A device file (e.g. /dev/null) gets its device backing instead of a
         // stored-bytes handle; truncation is meaningless for it.
         if let deviceKind = node.deviceKind {
+            let object: FileObject
             switch deviceKind {
             case .null:
-                return process.fileDescriptors.allocate(NullDeviceHandle(),
-                                                        flags: descriptorFlags,
-                                                        access: access)
+                object = NullDeviceHandle()
+            case .zero:
+                object = ZeroDeviceHandle(budget: makeStepReadBudget(), isFull: false)
+            case .full:
+                object = ZeroDeviceHandle(budget: makeStepReadBudget(), isFull: true)
+            case .random:
+                object = RandomDeviceHandle(budget: makeStepReadBudget()) { [weak kernel] count in
+                    kernel?.randomBytes(count) ?? []
+                }
+            case .controllingTerminal:
+                // ENXIO on Linux; ENODEV is the closest modeled errno.
+                guard let terminal = process.controllingTerminal as? FileObject else {
+                    throw SyscallError.noSuchDevice
+                }
+                object = terminal
+            case .terminal(let index):
+                guard let terminal = kernel.terminal(atIndex: index) as? FileObject else {
+                    throw SyscallError.noSuchDevice
+                }
+                object = terminal
+            case .descriptor(let pid, let fd):
+                // Same open-file description as the target's descriptor (dup
+                // semantics): the requested access cannot widen it.
+                // Reads and writes stay governed by the description's own mode.
+                guard let target = kernel.process(pid), target.isLive,
+                      let duplicate = process.fileDescriptors.duplicate(
+                          fd, from: target.fileDescriptors), duplicate >= 0 else {
+                    throw SyscallError.badFileDescriptor
+                }
+                return duplicate
             }
+            return process.fileDescriptors.allocate(object,
+                                                    flags: descriptorFlags,
+                                                    access: access)
         }
 
         if flags.contains(.truncate) {
             node.truncate()
-            node.touchModify(kernel.loop.now)
+            node.touchModify(kernel.vfs.clock())
         }
         let clock = kernel.vfs.clock
         return process.fileDescriptors.allocate(RegularFileHandle(vnode: node,
@@ -872,6 +947,10 @@ extension ProcessContext {
             kernel.kill(process.pid, signal: Signal.sigpipe.rawValue)
             recordSyscall("write", error: .brokenPipe, detail: "fd=\(fd),count=\(bytes.count)")
             throw SyscallError.brokenPipe
+        }
+        if !bytes.isEmpty, let rejection = (object as? WriteRejecting)?.writeRejection {
+            recordSyscall("write", error: rejection, detail: "fd=\(fd),count=\(bytes.count)")
+            throw rejection
         }
         let readiness = object.readiness
         if !bytes.isEmpty,

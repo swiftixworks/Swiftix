@@ -249,7 +249,7 @@ extension ProcessContext {
         guard let node = lookupNode(absolute(path)) else { return false }
         node.uid = uid
         node.gid = gid
-        node.touchChange(kernel.loop.now)
+        node.touchChange(kernel.vfs.clock())
         return true
     }
 
@@ -258,7 +258,7 @@ extension ProcessContext {
         guard let node = lookupNode(absolute(path)) else { return false }
         guard process.uid == 0 || process.uid == node.uid else { return false }
         node.mode = mode
-        node.touchChange(kernel.loop.now)
+        node.touchChange(kernel.vfs.clock())
         return true
     }
 
@@ -372,8 +372,13 @@ extension ProcessContext {
     }
 
     /// Send a signal to a process.
+    ///
+    /// A signal aimed at PID 1 of the caller's own PID namespace (or of an
+    /// ancestor of it) is discarded unless that process installed a handler for
+    /// it — including SIGKILL and SIGSTOP — matching Linux's protection of a
+    /// namespace's init. See `SignalDispatcher.kill(_:signal:sender:)`.
     public func kill(_ pid: PID, signal number: Int32) {
-        kernel.kill(pid, signal: number)
+        kernel.kill(pid, signal: number, from: process)
     }
 
     /// Mark `pids` as this terminal's foreground job (or clear with `[]`). The

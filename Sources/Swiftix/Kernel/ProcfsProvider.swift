@@ -77,9 +77,16 @@ enum ProcfsProvider {
     static func mountPerProcess(on vfs: VirtualFileSystem, processIntrospection: ProcessIntrospection) {
         guard let procDirectory = vfs.lookup("/proc") else { return }
         procDirectory.dynamicChildNames = {
-            processIntrospection.snapshotProcesses().map { String($0.pid) }
+            processIntrospection.snapshotProcesses().map { String($0.pid) } + ["self"]
         }
-        procDirectory.resolveDynamicChild = { name in
+        procDirectory.resolveDynamicChild = { [weak vfs] name in
+            // /proc/self: a link to the directory of whichever process is
+            // resolving the path (see `VirtualFileSystem.reader`).
+            if name == "self" {
+                guard let reader = vfs?.reader,
+                      processIntrospection.row(for: reader.pid) != nil else { return nil }
+                return VNode(symlink: "self", target: String(reader.pid))
+            }
             guard let pid = Int(name), let row = processIntrospection.row(for: PID(pid)) else { return nil }
             return makePidDirectory(row)
         }
@@ -107,6 +114,70 @@ enum ProcfsProvider {
         let syscalls = VNode(file: "syscalls")
         syscalls.provider = { Array(syscallText(row).utf8) }
         directory.addChild(name: "syscalls", node: syscalls)
+
+        let stat = VNode(file: "stat")
+        stat.provider = {
+            ProcfsSchema.render([ProcfsSchema.PidStat.line(
+                pid: row.pid, name: row.name, state: row.state,
+                ppid: row.ppid, pgid: row.pgid, sid: row.sid,
+                terminalIndex: row.terminalIndex,
+                foregroundGroup: row.terminalForegroundGroup)])
+        }
+        directory.addChild(name: "stat", node: stat)
+
+        let comm = VNode(file: "comm")
+        comm.provider = { Array((row.name + "\n").utf8) }
+        directory.addChild(name: "comm", node: comm)
+
+        // environ: NUL-terminated NAME=VALUE records in a stable (sorted) order,
+        // readable only by the process's owner and root, like Linux.
+        let environ = VNode(file: "environ")
+        environ.uid = row.uid
+        environ.gid = row.gid
+        environ.mode = [.ownerRead]
+        environ.provider = {
+            var bytes: [UInt8] = []
+            for (name, value) in row.environment.sorted(by: { $0.key < $1.key }) {
+                bytes.append(contentsOf: Array("\(name)=\(value)".utf8))
+                bytes.append(0)
+            }
+            return bytes
+        }
+        directory.addChild(name: "environ", node: environ)
+
+        // cwd: a link to the process's working directory. It usually points at
+        // an ancestor of /proc; the built-in tree walkers (`find`, `du`, `tree`,
+        // `ls -R`, `grep -r`, `rm -r`, `cp -r`, `tar`) do not follow links met
+        // during a walk, so a whole-tree traversal still terminates. A zombie
+        // has no working directory. `exe` stays absent: a Swiftix process is a
+        // native closure, not a file-backed image.
+        if row.state != "Z" {
+            let cwd = VNode(symlink: "cwd", target: row.workingDirectory)
+            cwd.uid = row.uid
+            cwd.gid = row.gid
+            directory.addChild(name: "cwd", node: cwd)
+        }
+
+        // fd/: one node per open descriptor. Opening one duplicates that
+        // open-file description into the opener, so only the owner and root may.
+        let descriptors = VNode(directory: "fd")
+        descriptors.uid = row.uid
+        descriptors.gid = row.gid
+        descriptors.mode = [.ownerRead, .ownerExecute]
+        let globalPID = row.globalPID
+        let owner = (uid: row.uid, gid: row.gid)
+        let numbers = row.descriptorNumbers
+        descriptors.dynamicChildNames = { numbers.map(String.init) }
+        descriptors.resolveDynamicChild = { name in
+            guard let fd = Int(name), String(fd) == name, numbers.contains(fd) else { return nil }
+            let node = VNode(file: name)
+            node.deviceKind = .descriptor(pid: globalPID, fd: fd)
+            node.uid = owner.uid
+            node.gid = owner.gid
+            node.mode = [.ownerRead, .ownerWrite]
+            return node
+        }
+        directory.addChild(name: "fd", node: descriptors)
 
         return directory
     }

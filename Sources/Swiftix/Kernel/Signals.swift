@@ -14,6 +14,11 @@
 /// Masked regular signals are kept pending until unmasked. SIGKILL and SIGSTOP
 /// are never maskable; SIGCONT always resumes a stopped process before any
 /// handler runs.
+///
+/// Init protection: PID 1 of a PID namespace ignores signals sent by a guest
+/// process (`ProcessContext.kill`) unless it installed a handler for them —
+/// including SIGKILL and SIGSTOP from inside its own namespace. Signals raised
+/// with host authority (`Kernel.kill`, terminal job-control keys) are exempt.
 public enum Signal: Int32, Sendable {
     case sigint = 2
     case sigkill = 9

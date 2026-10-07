@@ -137,6 +137,14 @@ final class Process {
     var gid: UInt32 = 0
     var supplementaryGroups: Set<UInt32> = []
 
+    /// File-mode creation mask (POSIX `umask`): permission bits cleared from the
+    /// mode of every file, directory, and FIFO this process creates. Inherited
+    /// across spawn; a top-level process starts with the conventional 022.
+    var umask: FileMode = [.groupWrite, .otherWrite]
+
+    /// Logical time (`EventLoop.now`) at which this process was created.
+    let startTime: Double
+
     /// The UTS namespace this process belongs to (hostname/domainname). Shared by
     /// reference with the parent on spawn, so a `hostname` change is visible
     /// machine-wide — until the process `unshare`s a private copy. The fresh
@@ -161,7 +169,9 @@ final class Process {
     /// `inherit`; `nil` only before that (never observed by a body).
     var mountNamespace: MountNamespace!
 
-    init(pid: PID, ppid: PID, name: String, workScope: EventLoop.CancellationScope) {
+    init(pid: PID, ppid: PID, name: String, workScope: EventLoop.CancellationScope,
+         startTime: Double = 0) {
+        self.startTime = startTime
         self.pid = pid
         self.ppid = ppid
         self.name = name

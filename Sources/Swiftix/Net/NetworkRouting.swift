@@ -16,6 +16,23 @@ final class NetworkRouteTable {
                                          interfaceIndex: configuration.interfaceIndex))
     }
 
+    /// Remove the first route to `destination/prefixLength`; a non-nil `gateway`
+    /// or `interfaceIndex` narrows the match. Returns whether one was removed.
+    func remove(destination: IPv4Address,
+                prefixLength: Int,
+                gateway: IPv4Address?,
+                interfaceIndex: Int?) -> Bool {
+        let network = destination.raw & Self.mask(prefixLength)
+        guard let index = routes.firstIndex(where: { route in
+            route.network == network
+                && route.prefixLength == prefixLength
+                && (gateway == nil || route.gateway == gateway)
+                && (interfaceIndex == nil || route.interfaceIndex == interfaceIndex)
+        }) else { return false }
+        routes.remove(at: index)
+        return true
+    }
+
     func lookup(destination: IPv4Address) -> NetworkStack.Route? {
         routes
             .filter { (destination.raw & Self.mask($0.prefixLength)) == $0.network }

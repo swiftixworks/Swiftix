@@ -12,17 +12,34 @@ extension BuiltinCommands {
         [
             // test EXPR / [ EXPR ] — evaluate a predicate; exit 0 if true, 1 if
             // false, 2 on a malformed expression.
-            Command(name: "test", summary: "evaluate a conditional expression", category: .system) { ctx, argv in
+            Command(name: "test", summary: "evaluate a conditional expression", category: .system,
+                    usage: """
+                    test EXPRESSION
+                      -z STRING / -n STRING       the string is empty / not empty
+                      S1 = S2, S1 != S2           string comparison
+                      N1 -eq|-ne|-lt|-le|-gt|-ge N2  integer comparison
+                      -e FILE, -f FILE, -d FILE   exists / is a regular file / is a directory
+                      ! EXPRESSION                negation
+                    """) { ctx, argv in
                 ctx.exit(evaluateTest(Array(argv.dropFirst()), ctx: ctx, bracket: false))
             },
-            Command(name: "[", summary: "evaluate a conditional expression (bracket form)", category: .system) { ctx, argv in
+            Command(name: "[", summary: "evaluate a conditional expression (bracket form)", category: .system,
+                    usage: """
+                    [ EXPRESSION
+                      -z STRING / -n STRING       the string is empty / not empty
+                      S1 = S2, S1 != S2           string comparison
+                      N1 -eq|-ne|-lt|-le|-gt|-ge N2  integer comparison
+                      -e FILE, -f FILE, -d FILE   exists / is a regular file / is a directory
+                      ! EXPRESSION                negation
+                    """) { ctx, argv in
                 ctx.exit(evaluateTest(Array(argv.dropFirst()), ctx: ctx, bracket: true))
             },
 
             // expr A OP B — integer arithmetic (+ - * / %) or comparison
             // (= != < <= > >=). Prints the result; exits 1 when the result is 0
             // or the empty string (like GNU expr), 2 on a usage/parse error.
-            Command(name: "expr", summary: "evaluate an integer/comparison expression", category: .system) { ctx, argv in
+            Command(name: "expr", summary: "evaluate an integer/comparison expression", category: .system,
+                    usage: "expr INTEGER OPERATOR INTEGER\nOperators: + - * / %  = != < <= > >=") { ctx, argv in
                 let args = Array(argv.dropFirst())
                 guard args.count == 3, let lhs = Int(args[0]), let rhs = Int(args[2]) else {
                     ctx.usage("expr", "expr <int> <op> <int>"); return

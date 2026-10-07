@@ -4,32 +4,58 @@
 //
 //  A small, self-contained regular-expression engine — pure standard library,
 //  no Foundation (matching the core's constraint) — used by the text tools
-//  (`grep` and `sed`) so they can teach real pattern matching
-//  instead of plain substring search.
+//  (`grep`, `sed`, `awk`, `find -regex`-style predicates) so they can teach real
+//  pattern matching instead of plain substring search.
 //
-//  It parses an ERE-flavored subset into an AST and matches with a
-//  continuation-passing backtracking matcher over `[Character]`. Supported
-//  syntax:
+//  It parses a POSIX-flavored pattern into an AST and matches with a
+//  continuation-passing backtracking matcher over `[Character]`. Two syntaxes
+//  share one AST:
+//
+//    - `.extended` (ERE, the default; `grep -E`, `sed -E`, `awk`): `|`, `( )`,
+//      `* + ?`, `{n}` / `{n,}` / `{n,m}` are operators.
+//    - `.basic` (BRE; plain `grep` and `sed`): only `*` is an operator; the
+//      others are literal unless backslashed (`\( \)`, `\{ \}`, and the GNU
+//      extensions `\|`, `\+`, `\?`). `^` anchors only at the start of a branch
+//      and `$` only at its end.
+//
+//  Both support:
 //    - literals and `.` (any character)
-//    - anchors `^` (start) and `$` (end) — matching is line-oriented, so a
-//      caller passes one line at a time
-//    - quantifiers `*`, `+`, `?`, and bounded `{n}` / `{n,}` / `{n,m}` (greedy)
-//    - groups `( … )` and alternation `a|b`
-//    - character classes `[abc]`, ranges `[a-z]`, negation `[^…]`
-//    - escapes `\d \w \s` (and negated `\D \W \S`) plus escaped metacharacters
+//    - anchors `^` and `$` — matching is line-oriented; a caller passes one line
+//    - bracket expressions `[abc]`, ranges `[a-z]`, negation `[^…]`, a leading
+//      `]`, and POSIX classes `[[:alpha:]]`, `[[:digit:]]`, `[[:space:]]`, …
+//    - escapes `\d \w \s` (and `\D \W \S`), word boundaries `\b \B \< \>`,
+//      `\n \t`, and escaped metacharacters
+//    - capture groups with back-references `\1`…`\9`
 //
-//  This is a teaching-grade engine, not a POSIX-complete one: there are no
-//  capture-group backreferences, no lazy quantifiers, and no locale collation.
-//  It runs on the single loop-bound executor like the rest of the core and is a
+//  This is a teaching-grade engine: greedy quantifiers only, leftmost match with
+//  greedy (not POSIX leftmost-longest) alternation, and no locale collation. It
+//  runs on the single loop-bound executor like the rest of the core and is a
 //  plain value type, so it holds no state between matches and needs no locks.
 //
 
 /// A compiled regular expression. Construction parses the pattern once; matching
-/// is then allocation-light and side-effect-free.
+/// is then side-effect-free.
 struct Regex {
+
+    /// Which POSIX dialect a pattern is written in.
+    enum Syntax {
+        case extended
+        case basic
+    }
+
+    /// A successful match: the overall range plus each capture group's range
+    /// (`groups[0]` is the whole match; an unmatched group is `nil`). Ranges
+    /// index the `[Character]` array that was searched.
+    struct Match {
+        let range: Range<Int>
+        let groups: [Range<Int>?]
+    }
 
     /// The parsed pattern tree.
     private let root: Node
+    private let ignoreCase: Bool
+    /// Number of capture groups in the pattern (not counting group 0).
+    let groupCount: Int
 
     /// The AST for the supported subset.
     private indirect enum Node {
@@ -45,6 +71,8 @@ struct Regex {
         case startAnchor
         /// `$` — the end of the (line) input.
         case endAnchor
+        /// `\b` (boundary), `\B` (not a boundary), `\<` (word start), `\>` (word end).
+        case wordBoundary(WordEdge)
         /// A sequence of nodes matched in order.
         case concat([Node])
         /// A set of alternatives; matches if any one matches.
@@ -52,6 +80,23 @@ struct Regex {
         /// A greedy quantifier over `node`, matching between `min` and `max`
         /// repetitions (`max == nil` means unbounded).
         case quantified(Node, min: Int, max: Int?)
+        /// A capture group with its 1-based index.
+        case group(Node, index: Int)
+        /// `\N` — the text captured by group N.
+        case backReference(Int)
+
+        /// Whether the node always consumes exactly one character (so a
+        /// quantifier over it can iterate instead of recursing).
+        var isSingleCharacter: Bool {
+            switch self {
+            case .literal, .anyChar, .charClass: return true
+            default: return false
+            }
+        }
+    }
+
+    private enum WordEdge {
+        case boundary, notBoundary, start, end
     }
 
     /// One member of a character class.
@@ -72,343 +117,558 @@ struct Regex {
         }
     }
 
-    /// A predefined class shorthand (`\d`, `\w`, `\s` and their negations).
+    /// A predefined class: the `\d \w \s` shorthands, their negations, and the
+    /// POSIX `[:name:]` classes.
     private enum Predefined {
         case digit, notDigit, word, notWord, space, notSpace
+        case alpha, alnum, upper, lower, punct, blank, xdigit, cntrl, print, graph
 
         func matches(_ character: Character) -> Bool {
             switch self {
             case .digit:    return character.isASCII && character.isNumber
             case .notDigit: return !(character.isASCII && character.isNumber)
-            case .word:     return character == "_" || (character.isASCII && (character.isLetter || character.isNumber))
-            case .notWord:  return !(character == "_" || (character.isASCII && (character.isLetter || character.isNumber)))
-            case .space:    return character == " " || character == "\t" || character == "\n" || character == "\r"
-            case .notSpace: return !(character == " " || character == "\t" || character == "\n" || character == "\r")
+            case .word:     return Regex.isWordCharacter(character)
+            case .notWord:  return !Regex.isWordCharacter(character)
+            case .space:    return Regex.isSpace(character)
+            case .notSpace: return !Regex.isSpace(character)
+            case .alpha:    return character.isLetter
+            case .alnum:    return character.isLetter || character.isNumber
+            case .upper:    return character.isUppercase
+            case .lower:    return character.isLowercase
+            case .punct:    return character.isASCII && (character.isPunctuation || character.isSymbol)
+            case .blank:    return character == " " || character == "\t"
+            case .xdigit:   return character.isHexDigit
+            case .cntrl:
+                guard let value = character.asciiValue else { return false }
+                return value < 0x20 || value == 0x7F
+            case .print:
+                guard let value = character.asciiValue else { return true }
+                return value >= 0x20 && value != 0x7F
+            case .graph:
+                guard let value = character.asciiValue else { return true }
+                return value > 0x20 && value != 0x7F
             }
         }
+
+        static func named(_ name: String) -> Predefined? {
+            switch name {
+            case "alpha": return .alpha
+            case "digit": return .digit
+            case "alnum": return .alnum
+            case "upper": return .upper
+            case "lower": return .lower
+            case "space": return .space
+            case "punct": return .punct
+            case "blank": return .blank
+            case "xdigit": return .xdigit
+            case "cntrl": return .cntrl
+            case "print": return .print
+            case "graph": return .graph
+            default: return nil
+            }
+        }
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character == "_" || character.isLetter || character.isNumber
+    }
+
+    private static func isSpace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
+            || character == "\u{0B}" || character == "\u{0C}"
     }
 
     // MARK: - Construction
 
     /// Compile `pattern`, or return `nil` if it is malformed. When
     /// `ignoreCase` is set, matching is case-insensitive.
-    init?(pattern: String, ignoreCase: Bool = false) {
-        var parser = Parser(pattern: Array(pattern), ignoreCase: ignoreCase)
+    init?(pattern: String, ignoreCase: Bool = false, syntax: Syntax = .extended) {
+        var parser = Parser(pattern: Array(pattern), ignoreCase: ignoreCase, syntax: syntax)
         guard let node = parser.parse() else { return nil }
         self.root = node
         self.ignoreCase = ignoreCase
+        self.groupCount = parser.groupCount
     }
 
     /// Build a regex that matches `text` literally (all metacharacters escaped)
     /// — the engine behind `grep -F`. Never fails.
     static func literal(_ text: String, ignoreCase: Bool = false) -> Regex {
-        let nodes = text.map { Node.literal(ignoreCase ? Character($0.lowercased()) : $0) }
+        let nodes = text.map { Node.literal(ignoreCase ? Regex.fold($0) : $0) }
         return Regex(root: .concat(nodes), ignoreCase: ignoreCase)
     }
 
     private init(root: Node, ignoreCase: Bool) {
         self.root = root
         self.ignoreCase = ignoreCase
+        self.groupCount = 0
     }
 
-    private let ignoreCase: Bool
+    private static func fold(_ character: Character) -> Character {
+        let lowered = character.lowercased()
+        return lowered.count == 1 ? Character(lowered) : character
+    }
 
     // MARK: - Matching
 
     /// Whether the pattern matches anywhere in `line` (an unanchored search, like
     /// `grep`). `^` still pins to the line start and `$` to the line end.
     func matches(_ line: String) -> Bool {
-        let characters = Array(ignoreCase ? line.lowercased() : line)
-        // Try every starting offset (including the end, so `a*`/`^$` can match an
-        // empty span). Anchors inside the pattern reject invalid start offsets.
-        for start in 0...characters.count {
-            if match(root, characters, start, { _ in true }) {
-                return true
-            }
-        }
-        return false
+        match(in: Array(line), from: 0) != nil
     }
 
     /// The leftmost match at or after `start`, as a half-open index range into
     /// `characters`, or `nil` if the pattern does not match there. The match is
-    /// greedy (longest at the leftmost start), matching `matches`' semantics.
-    /// Positions are relative to the *original* characters; case folding for an
-    /// ignore-case regex is applied 1:1 internally, so a caller can slice and
-    /// splice `characters` directly (this is what `sed`'s substitution needs).
+    /// greedy (longest at the leftmost start). Positions are relative to the
+    /// *original* characters; case folding for an ignore-case regex is applied
+    /// 1:1 internally, so a caller can slice and splice `characters` directly
+    /// (this is what `sed`'s substitution needs).
     func firstMatch(in characters: [Character], from start: Int) -> Range<Int>? {
-        let haystack = ignoreCase ? characters.map { Character($0.lowercased()) } : characters
-        guard start >= 0, start <= haystack.count else { return nil }
-        for begin in start...haystack.count {
+        match(in: characters, from: start)?.range
+    }
+
+    /// The leftmost match at or after `start`, with its capture groups.
+    func match(in characters: [Character], from start: Int) -> Match? {
+        guard start >= 0, start <= characters.count else { return nil }
+        let state = MatchState(input: ignoreCase ? characters.map(Regex.fold) : characters,
+                               groupCount: groupCount)
+        for begin in start...characters.count {
+            for index in state.captures.indices { state.captures[index] = nil }
             var matchEnd: Int?
             // The matcher is greedy, so the first end handed to the continuation
-            // is the longest match starting at `begin`.
-            _ = match(root, haystack, begin) { end in matchEnd = end; return true }
-            if let end = matchEnd { return begin..<end }
+            // is the preferred match starting at `begin`.
+            _ = match(root, state, begin) { end in matchEnd = end; return true }
+            if let end = matchEnd {
+                return Match(range: begin..<end, groups: [begin..<end] + state.captures)
+            }
         }
         return nil
     }
 
-    /// Core backtracking matcher. Attempts to match `node` at `position` in
-    /// `characters`, invoking `continuation` with the position just past the
-    /// match; returns whether some path (matching `node` then the continuation)
-    /// succeeds.
+    /// Whether the pattern matches the *whole* of `characters` (`grep -x`).
+    func matchesEntire(_ characters: [Character]) -> Bool {
+        let state = MatchState(input: ignoreCase ? characters.map(Regex.fold) : characters,
+                               groupCount: groupCount)
+        return match(root, state, 0) { $0 == characters.count }
+    }
+
+    /// Mutable per-search state: the (case-folded) input and the capture slots.
+    private final class MatchState {
+        let input: [Character]
+        var captures: [Range<Int>?]
+
+        init(input: [Character], groupCount: Int) {
+            self.input = input
+            self.captures = Array(repeating: nil, count: groupCount)
+        }
+    }
+
+    private func matchesSingle(_ node: Node, _ character: Character) -> Bool {
+        switch node {
+        case let .literal(expected):
+            return character == expected
+        case .anyChar:
+            return true
+        case let .charClass(negated, members):
+            var hit = members.contains { $0.matches(character) }
+            if !hit, ignoreCase {
+                // The input is folded to lowercase; a class such as `[A-Z]` or
+                // `[[:upper:]]` must still accept it.
+                let upper = character.uppercased()
+                if upper.count == 1 {
+                    let alternate = Character(upper)
+                    hit = members.contains { $0.matches(alternate) }
+                }
+            }
+            return hit != negated
+        default:
+            return false
+        }
+    }
+
+    /// Core backtracking matcher. Attempts to match `node` at `position`,
+    /// invoking `continuation` with the position just past the match; returns
+    /// whether some path (matching `node` then the continuation) succeeds.
     private func match(_ node: Node,
-                       _ characters: [Character],
+                       _ state: MatchState,
                        _ position: Int,
                        _ continuation: (Int) -> Bool) -> Bool {
+        let input = state.input
         switch node {
         case .empty:
             return continuation(position)
 
-        case let .literal(value):
-            guard position < characters.count, characters[position] == value else { return false }
-            return continuation(position + 1)
-
-        case .anyChar:
-            guard position < characters.count else { return false }
-            return continuation(position + 1)
-
-        case let .charClass(negated, members):
-            guard position < characters.count else { return false }
-            let isMember = members.contains { $0.matches(characters[position]) }
-            guard isMember != negated else { return false }
+        case .literal, .anyChar, .charClass:
+            guard position < input.count, matchesSingle(node, input[position]) else { return false }
             return continuation(position + 1)
 
         case .startAnchor:
-            return position == 0 ? continuation(position) : false
+            return position == 0 && continuation(position)
 
         case .endAnchor:
-            return position == characters.count ? continuation(position) : false
+            return position == input.count && continuation(position)
+
+        case let .wordBoundary(edge):
+            let before = position > 0 && Regex.isWordCharacter(input[position - 1])
+            let after = position < input.count && Regex.isWordCharacter(input[position])
+            let ok: Bool
+            switch edge {
+            case .boundary:    ok = before != after
+            case .notBoundary: ok = before == after
+            case .start:       ok = !before && after
+            case .end:         ok = before && !after
+            }
+            return ok && continuation(position)
 
         case let .concat(nodes):
-            return matchSequence(nodes, 0, characters, position, continuation)
+            return matchSequence(nodes[...], state, position, continuation)
 
         case let .alternation(options):
-            for option in options where match(option, characters, position, continuation) {
+            for option in options where match(option, state, position, continuation) {
                 return true
             }
             return false
 
         case let .quantified(inner, min, max):
-            return matchQuantified(inner, min: min, max: max, characters, position, matched: 0, continuation)
+            if inner.isSingleCharacter {
+                // Iterative fast path: count the run, then give back one at a time.
+                var count = 0
+                while position + count < input.count,
+                      max.map({ count < $0 }) ?? true,
+                      matchesSingle(inner, input[position + count]) {
+                    count += 1
+                }
+                guard count >= min else { return false }
+                var taken = count
+                while taken >= min {
+                    if continuation(position + taken) { return true }
+                    taken -= 1
+                }
+                return false
+            }
+            return matchQuantified(inner, min: min, max: max, count: 0,
+                                   state, position, continuation)
+
+        case let .group(inner, index):
+            let saved = state.captures[index - 1]
+            if match(inner, state, position, { end in
+                let previous = state.captures[index - 1]
+                state.captures[index - 1] = position..<end
+                if continuation(end) { return true }
+                state.captures[index - 1] = previous
+                return false
+            }) {
+                return true
+            }
+            state.captures[index - 1] = saved
+            return false
+
+        case let .backReference(index):
+            guard index >= 1, index <= state.captures.count,
+                  let captured = state.captures[index - 1] else { return false }
+            let length = captured.count
+            guard position + length <= input.count else { return false }
+            for offset in 0..<length where input[captured.lowerBound + offset] != input[position + offset] {
+                return false
+            }
+            return continuation(position + length)
         }
     }
 
-    /// Match a concatenation node-by-node, threading the continuation so a later
-    /// node's failure backtracks into an earlier node's choices.
-    private func matchSequence(_ nodes: [Node],
-                               _ index: Int,
-                               _ characters: [Character],
+    /// Match `nodes` in order, threading the position through each.
+    private func matchSequence(_ nodes: ArraySlice<Node>,
+                               _ state: MatchState,
                                _ position: Int,
                                _ continuation: (Int) -> Bool) -> Bool {
-        if index >= nodes.count { return continuation(position) }
-        return match(nodes[index], characters, position) { next in
-            matchSequence(nodes, index + 1, characters, next, continuation)
+        guard let first = nodes.first else { return continuation(position) }
+        let rest = nodes.dropFirst()
+        return match(first, state, position) { next in
+            matchSequence(rest, state, next, continuation)
         }
     }
 
-    /// Greedy quantifier match: consume as many repetitions as possible (up to
-    /// `max`), backtracking toward `min` until the continuation succeeds. The
-    /// empty-progress guard prevents an infinite loop when `inner` can match
-    /// nothing (e.g. `(a?)*`).
+    /// Greedy repetition: try to match `inner` once more (up to `max`), then fall
+    /// back to the continuation once at least `min` repetitions are done. The
+    /// empty-progress guard prevents an infinite loop when `inner` can match the
+    /// empty string.
     private func matchQuantified(_ inner: Node,
                                  min: Int,
                                  max: Int?,
-                                 _ characters: [Character],
+                                 count: Int,
+                                 _ state: MatchState,
                                  _ position: Int,
-                                 matched: Int,
                                  _ continuation: (Int) -> Bool) -> Bool {
-        if max == nil || matched < max! {
-            let extended = match(inner, characters, position) { next in
-                guard next != position else { return false }   // no forward progress: stop
-                return matchQuantified(inner, min: min, max: max, characters, next,
-                                       matched: matched + 1, continuation)
+        if max.map({ count < $0 }) ?? true {
+            let advanced = match(inner, state, position) { next in
+                if next == position, count >= min { return false }
+                return matchQuantified(inner, min: min, max: max, count: count + 1,
+                                       state, next, continuation)
             }
-            if extended { return true }
+            if advanced { return true }
         }
-        // Greedy path exhausted (or blocked): accept here if we have met `min`.
-        return matched >= min ? continuation(position) : false
+        return count >= min && continuation(position)
     }
 
     // MARK: - Parser
 
-    /// A recursive-descent parser for the supported ERE subset. Produces a `Node`
-    /// tree, or `nil` on a syntax error (unbalanced `(`/`[`, bad `{n,m}`, …).
+    /// Recursive-descent parser over the pattern characters.
     private struct Parser {
-        let pattern: [Character]
-        let ignoreCase: Bool
-        var index = 0
+        private let pattern: [Character]
+        private let ignoreCase: Bool
+        private let syntax: Syntax
+        private var index = 0
+        private(set) var groupCount = 0
 
-        init(pattern: [Character], ignoreCase: Bool) {
+        init(pattern: [Character], ignoreCase: Bool, syntax: Syntax) {
             self.pattern = pattern
             self.ignoreCase = ignoreCase
+            self.syntax = syntax
         }
 
         mutating func parse() -> Node? {
             guard let node = parseAlternation() else { return nil }
-            guard index == pattern.count else { return nil }   // trailing junk (e.g. stray `)`)
-            return node
+            // Anything left over is an unbalanced `)`.
+            return index == pattern.count ? node : nil
         }
 
-        // alternation := concat ('|' concat)*
+        private var isBasic: Bool { syntax == .basic }
+
+        /// Whether the parser is positioned at `\` followed by `character`.
+        private func atEscaped(_ character: Character) -> Bool {
+            peek() == "\\" && peek(at: 1) == character
+        }
+
+        private func atAlternationBar() -> Bool {
+            isBasic ? atEscaped("|") : peek() == "|"
+        }
+
+        private func atGroupClose() -> Bool {
+            isBasic ? atEscaped(")") : peek() == ")"
+        }
+
         private mutating func parseAlternation() -> Node? {
+            var options: [Node] = []
             guard let first = parseConcat() else { return nil }
-            var options = [first]
-            while peek() == "|" {
-                index += 1
+            options.append(first)
+            while atAlternationBar() {
+                index += isBasic ? 2 : 1
                 guard let next = parseConcat() else { return nil }
                 options.append(next)
             }
-            return options.count == 1 ? first : .alternation(options)
+            return options.count == 1 ? options[0] : .alternation(options)
         }
 
-        // concat := repeat*
         private mutating func parseConcat() -> Node? {
             var nodes: [Node] = []
-            while let character = peek(), character != "|", character != ")" {
-                guard let node = parseRepeat() else { return nil }
+            var atBranchStart = true
+            while index < pattern.count, !atAlternationBar(), !atGroupClose() {
+                guard let node = parseRepeat(atBranchStart: atBranchStart) else { return nil }
                 nodes.append(node)
+                atBranchStart = false
             }
             if nodes.isEmpty { return .empty }
             return nodes.count == 1 ? nodes[0] : .concat(nodes)
         }
 
-        // repeat := atom quantifier?
-        private mutating func parseRepeat() -> Node? {
-            guard let atom = parseAtom() else { return nil }
-            guard let character = peek() else { return atom }
-            switch character {
-            case "*": index += 1; return .quantified(atom, min: 0, max: nil)
-            case "+": index += 1; return .quantified(atom, min: 1, max: nil)
-            case "?": index += 1; return .quantified(atom, min: 0, max: 1)
-            case "{": return parseBrace(atom)
-            default:  return atom
+        private mutating func parseRepeat(atBranchStart: Bool) -> Node? {
+            // A quantifier with nothing to repeat is a literal in both dialects
+            // (`*` leading a BRE; tolerated in an ERE the way GNU does).
+            if atBranchStart, let c = peek(), c == "*" || (!isBasic && (c == "+" || c == "?")) {
+                index += 1
+                return .literal(fold(c))
             }
+            guard var node = parseAtom(atBranchStart: atBranchStart) else { return nil }
+            while index < pattern.count {
+                if peek() == "*" {
+                    index += 1
+                    node = .quantified(node, min: 0, max: nil)
+                } else if !isBasic, peek() == "+" {
+                    index += 1
+                    node = .quantified(node, min: 1, max: nil)
+                } else if !isBasic, peek() == "?" {
+                    index += 1
+                    node = .quantified(node, min: 0, max: 1)
+                } else if isBasic, atEscaped("+") {
+                    index += 2
+                    node = .quantified(node, min: 1, max: nil)
+                } else if isBasic, atEscaped("?") {
+                    index += 2
+                    node = .quantified(node, min: 0, max: 1)
+                } else if !isBasic, peek() == "{" {
+                    if let bounds = parseBounds(openLength: 1) {
+                        node = .quantified(node, min: bounds.min, max: bounds.max)
+                    } else if let next = peek(at: 1), next.isASCII, next.isNumber {
+                        return nil                       // `{3,2}` and the like: a malformed bound
+                    } else {
+                        break                            // a `{` that starts no bound is a literal
+                    }
+                } else if isBasic, atEscaped("{") {
+                    guard let bounds = parseBounds(openLength: 2) else { return nil }
+                    node = .quantified(node, min: bounds.min, max: bounds.max)
+                } else {
+                    break
+                }
+            }
+            return node
         }
 
-        // Parse `{n}`, `{n,}`, or `{n,m}` following `atom`. A `{` that is not a
-        // valid bound is treated as a literal brace (lenient, like grep).
-        private mutating func parseBrace(_ atom: Node) -> Node? {
-            let save = index
-            index += 1   // consume '{'
-            var lowDigits = ""
-            while let character = peek(), character.isNumber { lowDigits.append(character); index += 1 }
-            guard !lowDigits.isEmpty, let low = Int(lowDigits) else {
-                index = save
-                return .literal("{")   // not a real bound: literal brace
+        /// Parse `{n}`, `{n,}`, or `{n,m}` (or the `\{…\}` BRE spelling). Leaves
+        /// the position untouched and returns `nil` when the text is not a valid
+        /// bound, so an ERE `{` can then be taken literally.
+        private mutating func parseBounds(openLength: Int) -> (min: Int, max: Int?)? {
+            let start = index
+            index += openLength
+            func fail(_ parser: inout Parser) -> (min: Int, max: Int?)? {
+                parser.index = start
+                return nil
             }
-            var high: Int? = low
+            var minText = ""
+            while let c = peek(), c.isASCII, c.isNumber { minText.append(c); index += 1 }
+            guard let minimum = Int(minText) else { return fail(&self) }
+            var maximum: Int? = minimum
             if peek() == "," {
                 index += 1
-                var highDigits = ""
-                while let character = peek(), character.isNumber { highDigits.append(character); index += 1 }
-                high = highDigits.isEmpty ? nil : Int(highDigits)
+                var maxText = ""
+                while let c = peek(), c.isASCII, c.isNumber { maxText.append(c); index += 1 }
+                if maxText.isEmpty {
+                    maximum = nil
+                } else {
+                    guard let value = Int(maxText), value >= minimum else { return fail(&self) }
+                    maximum = value
+                }
             }
-            guard peek() == "}" else { index = save; return .literal("{") }
-            index += 1   // consume '}'
-            if let high, high < low { return nil }
-            return .quantified(atom, min: low, max: high)
+            if isBasic {
+                guard atEscaped("}") else { return fail(&self) }
+                index += 2
+            } else {
+                guard peek() == "}" else { return fail(&self) }
+                index += 1
+            }
+            return (minimum, maximum)
         }
 
-        // atom := '(' alternation ')' | '[' class ']' | '.' | '^' | '$'
-        //       | '\' escape | literal
-        private mutating func parseAtom() -> Node? {
-            guard let character = peek() else { return nil }
-            switch character {
-            case "(":
+        private mutating func parseAtom(atBranchStart: Bool) -> Node? {
+            guard let c = peek() else { return nil }
+            switch c {
+            case "(" where !isBasic:
                 index += 1
-                guard let inner = parseAlternation() else { return nil }
-                guard peek() == ")" else { return nil }
-                index += 1
-                return inner
+                return parseGroupBody(closeLength: 1)
+            case ")" where !isBasic:
+                return nil
             case "[":
+                index += 1
                 return parseCharClass()
             case ".":
                 index += 1
                 return .anyChar
             case "^":
                 index += 1
-                return .startAnchor
+                // In a BRE `^` is an anchor only at the start of a branch.
+                return (!isBasic || atBranchStart) ? .startAnchor : .literal("^")
             case "$":
                 index += 1
+                // In a BRE `$` is an anchor only at the end of a branch.
+                if isBasic, index < pattern.count, !atAlternationBar(), !atGroupClose() {
+                    return .literal("$")
+                }
                 return .endAnchor
-            case ")", "|":
-                return nil   // handled by the caller; not a valid atom start
-            case "*", "+", "?":
-                return nil   // a quantifier with nothing to quantify
             case "\\":
+                index += 1
                 return parseEscape()
             default:
                 index += 1
-                return .literal(fold(character))
+                return .literal(fold(c))
             }
         }
 
-        // Parse a backslash escape: a predefined class (\d \w \s …) or an escaped
-        // literal metacharacter.
+        private mutating func parseGroupBody(closeLength: Int) -> Node? {
+            groupCount += 1
+            let number = groupCount
+            guard let inner = parseAlternation(), atGroupClose() else { return nil }
+            index += closeLength
+            return .group(inner, index: number)
+        }
+
         private mutating func parseEscape() -> Node? {
-            index += 1   // consume '\'
-            guard let character = peek() else { return nil }   // dangling backslash
+            guard let c = peek() else { return nil }   // trailing backslash
             index += 1
-            switch character {
+            switch c {
             case "d": return .charClass(negated: false, members: [.predefined(.digit)])
             case "D": return .charClass(negated: false, members: [.predefined(.notDigit)])
             case "w": return .charClass(negated: false, members: [.predefined(.word)])
             case "W": return .charClass(negated: false, members: [.predefined(.notWord)])
             case "s": return .charClass(negated: false, members: [.predefined(.space)])
             case "S": return .charClass(negated: false, members: [.predefined(.notSpace)])
+            case "b": return .wordBoundary(.boundary)
+            case "B": return .wordBoundary(.notBoundary)
+            case "<": return .wordBoundary(.start)
+            case ">": return .wordBoundary(.end)
             case "n": return .literal("\n")
             case "t": return .literal("\t")
-            case "r": return .literal("\r")
-            default:  return .literal(fold(character))   // escaped metacharacter → literal
+            case "(" where isBasic:
+                return parseGroupBody(closeLength: 2)
+            case ")" where isBasic:
+                return nil
+            case "1"..."9":
+                guard let number = c.wholeNumberValue, number <= groupCount else { return nil }
+                return .backReference(number)
+            default:
+                return .literal(fold(c))   // escaped metacharacter → literal
             }
         }
 
-        // Parse a `[...]` character class (after the opening `[`).
         private mutating func parseCharClass() -> Node? {
-            index += 1   // consume '['
             var negated = false
             if peek() == "^" { negated = true; index += 1 }
             var members: [ClassMember] = []
-            // A `]` immediately after `[` or `[^` is a literal `]`.
-            if peek() == "]" { members.append(.single("]")); index += 1 }
-            while let character = peek(), character != "]" {
-                if character == "\\" {
-                    index += 1
-                    guard let escaped = peek() else { return nil }
-                    index += 1
-                    switch escaped {
-                    case "d": members.append(.predefined(.digit))
-                    case "D": members.append(.predefined(.notDigit))
-                    case "w": members.append(.predefined(.word))
-                    case "W": members.append(.predefined(.notWord))
-                    case "s": members.append(.predefined(.space))
-                    case "S": members.append(.predefined(.notSpace))
-                    case "n": members.append(.single("\n"))
-                    case "t": members.append(.single("\t"))
-                    case "r": members.append(.single("\r"))
-                    default:  members.append(.single(fold(escaped)))
+            var first = true
+            while let c = peek(), first || c != "]" {
+                first = false
+                // POSIX class `[:name:]`.
+                if c == "[", peek(at: 1) == ":" {
+                    var name = ""
+                    var cursor = index + 2
+                    while cursor < pattern.count, pattern[cursor] != ":" {
+                        name.append(pattern[cursor])
+                        cursor += 1
                     }
+                    guard cursor + 1 < pattern.count, pattern[cursor + 1] == "]",
+                          let kind = Predefined.named(name) else { return nil }
+                    members.append(.predefined(kind))
+                    if ignoreCase, kind == .upper || kind == .lower {
+                        members.append(.predefined(.alpha))
+                    }
+                    index = cursor + 2
                     continue
                 }
-                // A range `a-z`: a `-` between two literals (not first/last).
-                if let next = peek(at: 1), next == "-", let after = peek(at: 2), after != "]" {
-                    let low = fold(character)
-                    index += 2   // consume the low char and '-'
-                    let highChar = pattern[index]
+                var low = c
+                index += 1
+                if c == "\\", let escaped = peek() {
+                    // Shorthand escapes are accepted inside a class as a
+                    // convenience (`[\d_]`); any other escape is the character.
                     index += 1
-                    members.append(.range(low, fold(highChar)))
+                    switch escaped {
+                    case "d": members.append(.predefined(.digit)); continue
+                    case "w": members.append(.predefined(.word)); continue
+                    case "s": members.append(.predefined(.space)); continue
+                    case "n": low = "\n"
+                    case "t": low = "\t"
+                    default: low = escaped
+                    }
+                }
+                // A range `low-high` (a trailing `-` is a literal dash).
+                if peek() == "-", let high = peek(at: 1), high != "]" {
+                    index += 2
+                    let lo = fold(low), hi = fold(high)
+                    guard lo <= hi else { return nil }
+                    members.append(.range(lo, hi))
                 } else {
-                    members.append(.single(fold(character)))
-                    index += 1
+                    members.append(.single(fold(low)))
                 }
             }
             guard peek() == "]" else { return nil }   // unterminated class
             index += 1
             return .charClass(negated: negated, members: members)
         }
-
-        // MARK: Parser helpers
 
         private func peek() -> Character? {
             index < pattern.count ? pattern[index] : nil
@@ -419,10 +679,10 @@ struct Regex {
             return target < pattern.count ? pattern[target] : nil
         }
 
-        /// Case-fold a literal when the regex is case-insensitive (the input side
-        /// is lowercased in `matches`, so the pattern side must match).
+        /// Lowercase a literal when compiling an ignore-case pattern, so it
+        /// compares against the lowercased input.
         private func fold(_ character: Character) -> Character {
-            ignoreCase ? Character(character.lowercased()) : character
+            ignoreCase ? Regex.fold(character) : character
         }
     }
 }

@@ -85,6 +85,21 @@ are not prerequisites for duplicating a complete Linux container stack.
 - The Go VM uses an instruction quantum so ready kernel work cannot be starved indefinitely.
 - `Kernel.pause/resume/shutdown` manages process work and network timers together, and node destruction cancels owned work.
 
+### Host-Owned Machine State
+
+Real time and power belong to the host, so the core exposes them as small
+`Kernel` seams instead of reading a platform clock or ending its own lifecycle.
+`Kernel.wallClock` (set with `setWallClock(epochSeconds:utcOffsetSeconds:zoneAbbreviation:)`)
+maps logical time to epoch time and a fixed zone; its default is the
+deterministic "logical zero is the Unix epoch, UTC", and file timestamps are
+stamped with it. `Kernel.onPowerRequest` receives `.shutdown`/`.reboot` when a
+uid-0 guest calls `ProcessContext.requestPower` (`shutdown`, `reboot`,
+`poweroff`, `halt`); it runs on the kernel executor from a kernel-owned job, the
+core never acts on the request itself, and without a handler the commands fail
+with "not supported by this host". `Kernel.seedRandom(_:)` seeds the
+deterministic, non-cryptographic generator behind `/dev/random` and
+`/dev/urandom`.
+
 ### Process State Model
 
 Swiftix models Linux-visible process behavior without copying Linux's internal
@@ -115,7 +130,9 @@ becomes their owner.
 `SIGSTOP`/`SIGKILL` are unmaskable, `SIGTSTP` uses its default job-control stop,
 and `SIGCONT` resumes before optional handler delivery. Parents can observe
 stopped and continued transitions with `WUNTRACED` and `WCONTINUED`-style
-`ProcessWaitOptions`.
+`ProcessWaitOptions`. PID 1 of a PID namespace discards guest signals it has no
+handler for, including `SIGKILL`/`SIGSTOP` sent from inside that namespace;
+signals raised through the host's `Kernel` API are never filtered.
 
 `Kernel.snapshotProcesses()` is the stable diagnostic seam. It includes
 zombies, exit results, queued steps, pending signals, descriptor counts, and
@@ -217,14 +234,14 @@ The observability surface includes interface counters, a trace hook, packet-path
 | Area | Contract |
 | --- | --- |
 | Processes and scheduling | Logical-time cooperative scheduling with spawn, wait, signals, job control, timers, and park/wake |
-| VFS and file descriptors | tmpfs, links, FIFOs, flock, positional I/O, mode permissions (including per-component directory search), mount snapshots, and poll/select |
+| VFS and file descriptors | tmpfs, links, FIFOs, flock, positional I/O, mode permissions (including per-component directory search) with a per-process umask, device nodes (`/dev/null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/N`, `fd`), per-process and system procfs entries, mount snapshots, and poll/select |
 | Storage volumes | Injectable asynchronous sector volumes with bounded geometry, typed failures, and an explicit flush barrier; RamDisk is the in-core implementation |
-| TTY and IPC | PTYs, pipes, signals, and the terminal controls used by the Swiftix shell and applications |
+| TTY and IPC | PTYs, pipes with writer backpressure, signals (including PID 1 protection), and the terminal controls used by the Swiftix shell and applications; Ctrl-C reaches the foreground job through the host's `onControlC` hook and the prompting shell through the terminal itself |
 | Namespaces and cgroups | UTS, PID, and mount namespaces plus the pids controller for teaching scenarios |
 | IPv4 networking | Virtual Ethernet, ARP, IPv4, ICMP, UDP, TCP, DNS, routing, forwarding, and observability |
 | TCP | Bounded sockets with RTO, Reno/CUBIC, fast recovery, window scaling, SACK, zero-window handling, and last-close FIN/RST teardown |
 | Uplink | Optional SLIRP-style TCP/UDP relay through the platform adapter |
-| Userland | Swiftix shell and command APIs, Swiftix Go runtime, `pkg`, and distribution-provided base packages |
+| Userland | POSIX-style shell (scripts, functions, `sh`, job control), a coreutils-like built-in command set with `awk`, `sed`, `tar`, and network tools, wall-clock and user-database (`/etc/passwd`, `/etc/group`) services, the command registration API, Swiftix Go runtime, `pkg`, and distribution-provided base packages |
 
 This contract supports network education and small-to-medium IPv4 simulations. Compatibility work outside it requires a concrete consumer, bounded API, and verification plan.
 

@@ -31,7 +31,15 @@ public final class ProcessContext {
     /// This process's mount-namespace view, passed to every VFS path operation so
     /// lookups and creations are redirected into whatever is mounted for *this*
     /// namespace (see `MountNamespace`).
-    var mountNS: MountNamespace { process.mountNamespace }
+    ///
+    /// Reading it also stamps this process as the VFS's current `reader`, so
+    /// per-reader synthetic nodes (`/proc/self`, `/dev/fd`, `/dev/tty`) resolve
+    /// for the caller. Every path syscall passes `mounts: mountNS`, which makes
+    /// this the one place that guarantee is established.
+    var mountNS: MountNamespace {
+        kernel.vfs.reader = process
+        return process.mountNamespace
+    }
 
     // MARK: - Helpers
 
@@ -250,11 +258,13 @@ public struct FileStat: Sendable, Equatable {
     public let gid: UInt32
     /// Number of hard links (directory entries) pointing to this inode.
     public let nlink: Int
-    /// Last access time (logical clock ticks).
+    /// Last access time, in seconds on the kernel's wall clock
+    /// (`Kernel.wallClock`): epoch seconds when the host injected a real epoch,
+    /// plain logical seconds with the deterministic default.
     public let atime: Double
-    /// Last modification time (logical clock ticks).
+    /// Last modification time (same clock as `atime`).
     public let mtime: Double
-    /// Last status-change time (logical clock ticks).
+    /// Last status-change time (same clock as `atime`).
     public let ctime: Double
 
     public var isDirectory: Bool { type == .directory }

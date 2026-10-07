@@ -42,6 +42,16 @@ final class VirtualFileSystem {
     /// Set by the kernel at construction.
     var clock: () -> Double = { 0 }
 
+    /// The process on whose behalf the VFS is currently being consulted. Every
+    /// `ProcessContext` path operation stamps this (through `mountNS`) just
+    /// before it resolves a path, which lets per-reader synthetic nodes —
+    /// `/proc/self`, `/dev/fd`, `/proc/sys/kernel/hostname` — answer for the
+    /// caller. Resolution is synchronous on the single kernel executor, so the
+    /// stamp cannot be observed by another process mid-operation. Weak: it never
+    /// extends a process's lifetime, and reads `nil` for kernel-internal lookups
+    /// made before any process ran.
+    weak var reader: Process?
+
     /// Total number of VFS nodes (files + directories + symlinks). Used by
     /// resource accounting. Counts all nodes including synthetic (procfs) ones —
     /// they are still VFS nodes even if their content is computed.
@@ -525,8 +535,25 @@ final class VirtualFileSystem {
     func createDevice(_ path: String, kind: VNode.DeviceKind) -> VNode? {
         guard let node = createFile(path) else { return nil }
         node.deviceKind = kind
+        node.isKernelProvided = true
         node.mode = [.ownerRead, .ownerWrite, .groupRead, .groupWrite, .otherRead, .otherWrite]
         return node
+    }
+
+    /// Create (or replace) a kernel-provided symbolic link such as
+    /// `/dev/stdin -> /proc/self/fd/0`. Unlike `createSymlink`, an existing
+    /// non-directory entry at `path` is replaced, so a tree restored from an
+    /// older snapshot still ends up with the kernel's link. The link is flagged
+    /// `isKernelProvided` and therefore never persisted.
+    @discardableResult
+    func createKernelSymlink(_ path: String, target: String) -> VNode? {
+        if let existing = lookup(path, follow: false) {
+            guard existing.kind != .directory else { return nil }
+            remove(path)
+        }
+        guard let link = createSymlink(path, target: target) else { return nil }
+        link.isKernelProvided = true
+        return link
     }
 
     // MARK: - Hard links

@@ -83,6 +83,12 @@ public struct Command {
 
     let body: Body
 
+    /// Optional long help: the synopsis on the first line (without the leading
+    /// `Usage: `, e.g. `ls [-alh] [FILE]...`) followed by one line per option.
+    /// `cmd --help` and `man cmd` render it; `nil` falls back to a generic
+    /// synopsis built from the name and summary.
+    public let usage: String?
+
     /// A synchronous program. It does its I/O through continuation-style syscalls
     /// and sets its exit status with `ctx.exit(_:)`; a body that simply returns is
     /// reaped with code 0.
@@ -90,10 +96,16 @@ public struct Command {
                 summary: String,
                 category: Category = .other,
                 run: @escaping (_ ctx: ProcessContext, _ argv: [String]) -> Void) {
-        self.name = name
-        self.summary = summary
-        self.category = category
-        self.body = .sync(run)
+        self.init(name: name, summary: summary, category: category, usage: nil, body: .sync(run))
+    }
+
+    /// A synchronous program with long help text (see `usage`).
+    public init(name: String,
+                summary: String,
+                category: Category = .other,
+                usage: String?,
+                run: @escaping (_ ctx: ProcessContext, _ argv: [String]) -> Void) {
+        self.init(name: name, summary: summary, category: category, usage: usage, body: .sync(run))
     }
 
     /// An `async` program, written in linear `await` style over the async syscall
@@ -104,10 +116,73 @@ public struct Command {
                 summary: String,
                 category: Category = .other,
                 asyncRun: @escaping (_ ctx: ProcessContext, _ argv: [String]) async -> Void) {
+        self.init(name: name, summary: summary, category: category, usage: nil, body: .async(asyncRun))
+    }
+
+    /// An `async` program with long help text (see `usage`).
+    public init(name: String,
+                summary: String,
+                category: Category = .other,
+                usage: String?,
+                asyncRun: @escaping (_ ctx: ProcessContext, _ argv: [String]) async -> Void) {
+        self.init(name: name, summary: summary, category: category, usage: usage, body: .async(asyncRun))
+    }
+
+    init(name: String, summary: String, category: Category, usage: String?, body: Body) {
         self.name = name
         self.summary = summary
         self.category = category
-        self.body = .async(asyncRun)
+        self.usage = usage
+        self.body = body
+    }
+
+    /// The same command with a different long help text (`nil` keeps it).
+    func withUsage(_ usage: String?) -> Command {
+        guard let usage else { return self }
+        return Command(name: name, summary: summary, category: category, usage: usage, body: body)
+    }
+
+    /// The first line of the help text: `Usage: <synopsis>`.
+    var synopsis: String {
+        let line = usage?.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init)
+        return line ?? "\(name) [OPTION]... [ARG]..."
+    }
+
+    /// The option lines of `usage` (everything after the synopsis), or `nil`.
+    var optionHelp: String? {
+        guard let usage, let newline = usage.firstIndex(of: "\n") else { return nil }
+        let rest = usage[usage.index(after: newline)...]
+        return rest.isEmpty ? nil : String(rest)
+    }
+
+    /// What `cmd --help` prints.
+    var helpText: String {
+        var text = "Usage: \(synopsis)\n\(summary)\n"
+        if let optionHelp { text += "\n" + optionHelp + (optionHelp.hasSuffix("\n") ? "" : "\n") }
+        return text
+    }
+
+    /// The same command with `--help` handled up front: when it is the first
+    /// argument the help text is printed and the command exits 0 without running.
+    /// Applied to the whole built-in set in one place (`CommandRegistry.builtins`)
+    /// so no command needs its own `--help` branch.
+    func answeringHelp() -> Command {
+        let help = helpText
+        func wantsHelp(_ argv: [String]) -> Bool { argv.count > 1 && argv[1] == "--help" }
+        let wrapped: Body
+        switch body {
+        case let .sync(run):
+            wrapped = .sync { ctx, argv in
+                if wantsHelp(argv) { ctx.print(help); ctx.exit(0); return }
+                run(ctx, argv)
+            }
+        case let .async(run):
+            wrapped = .async { ctx, argv in
+                if wantsHelp(argv) { ctx.print(help); ctx.exit(0); return }
+                await run(ctx, argv)
+            }
+        }
+        return Command(name: name, summary: summary, category: category, usage: usage, body: wrapped)
     }
 }
 
@@ -181,16 +256,21 @@ public final class CommandRegistry {
     public static var builtins: CommandRegistry {
         let registry = CommandRegistry()
         for command in BuiltinCommands.all() {
-            registry.register(command)
+            // `--help` is answered centrally. The few commands whose arguments
+            // are data rather than options (`echo --help` prints `--help`) opt out.
+            let literalArguments = BuiltinCommands.commandsWithoutHelpOption.contains(command.name)
+            registry.register(literalArguments ? command : command.answeringHelp())
         }
+        ShellCommands.register(in: registry)
         // `help` reflects the live registry (built-ins + anything registered
         // later). Weak capture avoids a retain cycle: the closure is stored in
         // `registry`, and the shell that owns `registry` keeps it alive while the
         // command runs.
-        registry.register(Command(name: "help", summary: "list available commands", category: .system) { [weak registry] ctx, _ in
+        registry.register(Command(name: "help", summary: "list available commands", category: .system,
+                                  usage: "help\nRun 'COMMAND --help' or 'man COMMAND' for one command.") { [weak registry] ctx, _ in
             ctx.print(registry?.helpText() ?? "")
             ctx.exit(0)
-        })
+        }.answeringHelp())
         return registry
     }
 }
@@ -209,189 +289,24 @@ enum BuiltinCommands {
     /// extended filesystem tools, process tools, and network diagnostics/clients
     /// defined in the sibling `*Commands.swift` files.
     static func all() -> [Command] {
-        base() + textFilters() + extendedFileSystem() + processCommands()
+        base() + textFilters() + sedCommands() + extendedFileSystem() + fileTreeCommands() + processCommands()
             + networkCommands() + metaCommands() + controlCommands()
             + controlGroupCommands() + mountCommands()
+            + binaryCommands() + calculatorCommands() + archiveCommands()
+            + systemCommands() + awkCommands()
     }
 
-    /// The original coreutils-like base (file I/O, environment/system info,
-    /// exit-code stubs, and the ping/tcpecho/httpd network programs).
+    /// Commands that treat every argument as data, so `--help` is not an option.
+    static let commandsWithoutHelpOption: Set<String> = ["echo", "test", "[", "expr"]
+
+    /// The original coreutils-like base (working directory, system info,
+    /// exit-code stubs, and the ping/tcpecho/httpd network programs). The file
+    /// and text tools that started here now live with their category
+    /// (`FileSystemCommands.swift`, `TextFilterCommands.swift`, `MetaCommands.swift`).
     static func base() -> [Command] {
         [
-            Command(name: "echo", summary: "print arguments", category: .text) { ctx, argv in
-                ctx.print(argv.dropFirst().joined(separator: " ") + "\n")
-                ctx.exit(0)
-            },
-
-            Command(name: "cat", summary: "print file contents (or stdin)", category: .fileSystem) { ctx, argv in
-                let paths = Array(argv.dropFirst())
-                // No file arguments: copy stdin (fd 0) to stdout (fd 1) until EOF.
-                // This is what makes `cat` usable as a pipeline/redirection filter
-                // (`echo hi | cat`, `cat < file`).
-                guard !paths.isEmpty else {
-                    func pump() {
-                        ctx.read(0) { bytes in
-                            if bytes.isEmpty { ctx.exit(0); return }   // EOF
-                            ctx.write(1, bytes)
-                            pump()
-                        }
-                    }
-                    pump()
-                    return
-                }
-                var status: Int32 = 0
-                for path in paths {
-                    guard let fd = ctx.open(path) else {
-                        ctx.error("cat: \(path): No such file or directory")
-                        status = 1
-                        continue
-                    }
-                    ctx.write(1, ctx.read(fd, max: 65535))
-                    ctx.close(fd)
-                }
-                ctx.exit(status)
-            },
-
-            Command(name: "mkdir", summary: "create a directory", category: .fileSystem) { ctx, argv in
-                let dirs = Array(argv.dropFirst())
-                guard !dirs.isEmpty else { ctx.fail("mkdir: missing operand"); return }
-                var status: Int32 = 0
-                for dir in dirs where !ctx.mkdir(dir) {
-                    ctx.error("mkdir: cannot create directory '\(dir)'")
-                    status = 1
-                }
-                ctx.exit(status)
-            },
-
-            Command(name: "rm", summary: "remove a file or empty directory", category: .fileSystem) { ctx, argv in
-                let paths = Array(argv.dropFirst())
-                guard !paths.isEmpty else { ctx.fail("rm: missing operand"); return }
-                var status: Int32 = 0
-                for path in paths where !ctx.remove(path) {
-                    ctx.error("rm: cannot remove '\(path)': No such file or directory")
-                    status = 1
-                }
-                ctx.exit(status)
-            },
-
-            Command(name: "touch", summary: "create an empty file", category: .fileSystem) { ctx, argv in
-                let paths = Array(argv.dropFirst())
-                guard !paths.isEmpty else { ctx.fail("touch: missing operand"); return }
-                var status: Int32 = 0
-                for path in paths {
-                    if let fd = ctx.open(path, create: true) { ctx.close(fd) } else { status = 1 }
-                }
-                ctx.exit(status)
-            },
-
-            Command(name: "stat", summary: "print file metadata", category: .fileSystem) { ctx, argv in
-                guard argv.count > 1 else {
-                    ctx.fail("stat: missing operand", code: 1); return
-                }
-                guard let info = ctx.stat(argv[1]) else {
-                    ctx.error("stat: cannot stat '\(argv[1])': No such file or directory")
-                    ctx.exit(1)
-                    return
-                }
-                let typeStr: String
-                switch info.type {
-                case .directory: typeStr = "directory"
-                case .symlink:   typeStr = "symbolic link"
-                case .regular:   typeStr = "regular file"
-                case .fifo:      typeStr = "fifo"
-                }
-                let octal = String(info.mode.rawValue, radix: 8)
-                let rwx = BuiltinCommands.modeString(info.mode)
-                var out = "  File: \(argv[1])\n"
-                out += "  Size: \(info.size)\tLinks: \(info.nlink)\tType: \(typeStr)\n"
-                out += "Access: (0\(octal)/\(rwx))\tUid: \(info.uid)\tGid: \(info.gid)\n"
-                out += "Access: \(info.atime)\n"
-                out += "Modify: \(info.mtime)\n"
-                out += "Change: \(info.ctime)\n"
-                ctx.print(out)
-                ctx.exit(0)
-            },
-
-            Command(name: "ls", summary: "list a directory", category: .fileSystem) { ctx, argv in
-                var args = Array(argv.dropFirst())
-                var longFormat = false
-                var showAll = false
-                // Parse leading option flags (combined `-la` allowed).
-                while let first = args.first, CommandArguments.isOptionToken(first) {
-                    for flag in first.dropFirst() {
-                        switch flag {
-                        case "l": longFormat = true
-                        case "a": showAll = true
-                        default:
-                            ctx.fail("ls: unknown option -\(flag)"); return
-                        }
-                    }
-                    args.removeFirst()
-                }
-                let path = args.first ?? "."
-                guard let entries = ctx.listDirectory(path) else {
-                    ctx.error("ls: cannot access '\(path)': No such file or directory")
-                    ctx.exit(2)
-                    return
-                }
-                // Filter dotfiles unless -a.
-                let visible = showAll ? entries : entries.filter { entry in
-                    let name = entry.hasSuffix("/") ? String(entry.dropLast()) : entry
-                    return !name.hasPrefix(".")
-                }
-                if longFormat {
-                    // Collect metadata for column-width calculation.
-                    struct Entry {
-                        let typeChar: Character
-                        let mode: String
-                        let nlink: String
-                        let uid: String
-                        let gid: String
-                        let size: String
-                        let name: String
-                    }
-                    var items: [Entry] = []
-                    var maxNlink = 0, maxUid = 0, maxGid = 0, maxSize = 0
-                    for entry in visible {
-                        let name = entry.hasSuffix("/") ? String(entry.dropLast()) : entry
-                        let full = path == "/" ? "/" + name : (path == "." ? name : path + "/" + name)
-                        let info = ctx.stat(full)
-                        let typeChar = info.map { BuiltinCommands.fileTypeChar($0.type) } ?? "-"
-                        let mode = info.map { BuiltinCommands.modeString($0.mode) } ?? "---------"
-                        let nlink = "\(info?.nlink ?? 1)"
-                        let uid = "\(info?.uid ?? 0)"
-                        let gid = "\(info?.gid ?? 0)"
-                        let size = "\(info?.size ?? 0)"
-                        items.append(Entry(typeChar: typeChar, mode: mode, nlink: nlink,
-                                           uid: uid, gid: gid, size: size, name: name))
-                        maxNlink = max(maxNlink, nlink.count)
-                        maxUid = max(maxUid, uid.count)
-                        maxGid = max(maxGid, gid.count)
-                        maxSize = max(maxSize, size.count)
-                    }
-                    ctx.print("total \(items.count)\n")
-                    for item in items {
-                        let line = "\(item.typeChar)\(item.mode) "
-                            + "\(BuiltinCommands.padLeft(item.nlink, maxNlink)) "
-                            + "\(BuiltinCommands.padLeft(item.uid, maxUid)) "
-                            + "\(BuiltinCommands.padLeft(item.gid, maxGid)) "
-                            + "\(BuiltinCommands.padLeft(item.size, maxSize)) "
-                            + "\(item.name)\n"
-                        ctx.print(line)
-                    }
-                } else {
-                    if !visible.isEmpty {
-                        // Strip trailing "/" from directory entries for plain listing.
-                        // Default ls separates names with two spaces on a single line
-                        // (matching the terminal-output behavior of Linux ls).
-                        let names = visible.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
-                        ctx.print(names.joined(separator: "  ") + "\n")
-                    }
-                }
-                ctx.exit(0)
-            },
-
-            Command(name: "pwd", summary: "print working directory", category: .fileSystem) { ctx, _ in
+            Command(name: "pwd", summary: "print working directory", category: .fileSystem,
+                    usage: "pwd") { ctx, _ in
                 ctx.print(ctx.currentDirectory + "\n")
                 ctx.exit(0)
             },
@@ -399,20 +314,52 @@ enum BuiltinCommands {
             // `cd` is also handled intrinsically by the shell (it must change the
             // shell's own cwd). Registered here so it appears in `help` and works
             // when a program invokes it in its own process.
-            Command(name: "cd", summary: "change working directory", category: .fileSystem) { ctx, argv in
-                let path = argv.count > 1 ? argv[1] : "/"
+            Command(name: "cd", summary: "change working directory", category: .fileSystem,
+                    usage: "cd [DIR]") { ctx, argv in
+                let path = argv.count > 1 ? argv[1] : (ctx.getenv("HOME") ?? "/")
                 if ctx.chdir(path) {
                     ctx.exit(0)
                 } else {
-                    ctx.error("cd: \(path): No such file or directory")
+                    let reason: String
+                    if let info = ctx.stat(path) {
+                        reason = info.isDirectory ? SyscallError.permissionDenied.message
+                                                  : SyscallError.notADirectory.message
+                    } else {
+                        reason = SyscallError.noSuchFileOrDirectory.message
+                    }
+                    ctx.error("cd: \(path): \(reason)")
                     ctx.exit(1)
                 }
             },
 
             // Async program: demonstrates a linear `await`-style body and the
             // `sleep` syscall. `sleep <seconds>` (default 1).
-            Command(name: "sleep", summary: "wait for N seconds", category: .system, asyncRun: { ctx, argv in
-                let seconds = argv.count > 1 ? (Double(argv[1]) ?? 1) : 1
+            Command(name: "sleep", summary: "wait for N seconds", category: .system,
+                    usage: "sleep NUMBER[smhd]...\nPause for the sum of the given durations (logical time).",
+                    asyncRun: { ctx, argv in
+                guard argv.count > 1 else {
+                    ctx.error("sleep: missing operand")
+                    ctx.fail("Try 'sleep --help' for more information.", code: 1); return
+                }
+                var seconds = 0.0
+                for token in argv.dropFirst() {
+                    var text = Substring(token)
+                    var scale = 1.0
+                    if let unit = text.last, unit.isLetter {
+                        switch unit {
+                        case "s": scale = 1
+                        case "m": scale = 60
+                        case "h": scale = 3600
+                        case "d": scale = 86400
+                        default: ctx.fail("sleep: invalid time interval '\(token)'", code: 1); return
+                        }
+                        text = text.dropLast()
+                    }
+                    guard let value = Double(text), value >= 0 else {
+                        ctx.fail("sleep: invalid time interval '\(token)'", code: 1); return
+                    }
+                    seconds += value * scale
+                }
                 do {
                     try await ctx.sleep(seconds)
                     ctx.exit(0)
@@ -423,44 +370,21 @@ enum BuiltinCommands {
                 }
             }),
 
-            // env [NAME=VALUE...] [CMD [args...]] — with no command, print the
-            // environment; otherwise apply the assignments and run CMD in the
-            // modified environment (the child inherits it), exiting with its code.
-            Command(name: "env", summary: "print env, or run a command in a modified env", category: .system) { ctx, argv in
-                var rest = Array(argv.dropFirst())
-                while let first = rest.first, let pair = envAssignment(first) {
-                    ctx.setenv(pair.name, pair.value)
-                    rest.removeFirst()
-                }
-                guard let name = rest.first else {
-                    for key in ctx.environment.keys.sorted() {
-                        ctx.print("\(key)=\(ctx.environment[key] ?? "")\n")
-                    }
-                    ctx.exit(0)
-                    return
-                }
-                guard let command = ctx.resolveCommand(name) else {
-                    ctx.error("env: \(name): command not found")
-                    ctx.exit(127)
-                    return
-                }
-                ctx.run(command, args: rest)
-                ctx.wait { result in
-                    switch result {
-                    case .success(let event):
-                        ctx.exit(event.status.code)
-                    case .failure:
-                        ctx.exit(1)
-                    }
-                }
-            },
-
             // `uname` prints system identity. `-s` kernel name (default), `-n`
             // node/hostname (read live from the UTS namespace), `-r` release,
             // `-m` machine, `-a` all. Honoring the UTS namespace means an
             // `unshare -u` + `hostname` change shows up in `uname -n`.
-            Command(name: "uname", summary: "print system information", category: .system) { ctx, argv in
-                let flags = Set(argv.dropFirst())
+            Command(name: "uname", summary: "print system information", category: .system,
+                    usage: """
+                    uname [-asnrm]
+                      -a  print all fields
+                      -s  kernel name (default)
+                      -n  network node hostname
+                      -r  kernel release
+                      -m  machine hardware name
+                    """) { ctx, argv in
+                guard let parsed = ctx.options("uname", Array(argv.dropFirst()), "asnrmvop") else { return }
+                let flags = Set(parsed.flags.keys.map { "-\($0)" })
                 let sysname = "Swiftix"
                 let release = Swiftix.version
                 let machine = "swiftvm"
@@ -480,11 +404,10 @@ enum BuiltinCommands {
                 ctx.exit(0)
             },
 
-            Command(name: "whoami", summary: "print current user", category: .system) { ctx, _ in
-                // Reflect the process's effective uid: root for 0, otherwise a
-                // synthetic user name (there is no /etc/passwd to map names).
-                let uid = ctx.getuid()
-                ctx.print(uid == 0 ? "root\n" : "user\(uid)\n")
+            Command(name: "whoami", summary: "print current user", category: .system,
+                    usage: "whoami") { ctx, _ in
+                // The login name of the effective uid, from the user database.
+                ctx.print(ctx.userName + "\n")
                 ctx.exit(0)
             },
 
@@ -492,9 +415,32 @@ enum BuiltinCommands {
             // namespace; `hostname NAME` sets it there. Under a plain shell that
             // is the machine-wide name; under `unshare -u` it changes only the
             // private namespace — the isolation lesson.
-            Command(name: "hostname", summary: "show or set the host name", category: .system) { ctx, argv in
-                let args = Array(argv.dropFirst())
-                if let newName = args.first {
+            Command(name: "hostname", summary: "show or set the host name", category: .system,
+                    usage: """
+                    hostname [-s|-f|-i|-I] [NAME]
+                      -s  short name (up to the first dot)
+                      -f  fully qualified name
+                      -i  the address the host name stands for
+                      -I  every configured non-loopback address
+                    With NAME, set the host name (in the caller's UTS namespace).
+                    """) { ctx, argv in
+                guard let parsed = ctx.options("hostname", Array(argv.dropFirst()), "sfiI",
+                                               long: ["short": "s", "fqdn": "f", "long": "f",
+                                                      "ip-address": "i", "all-ip-addresses": "I"]) else { return }
+                let addresses = ctx.snapshotNetworkLinks().filter { !$0.isLoopback }.map { "\($0.address)" }
+                if parsed.has("I") {
+                    // One trailing space per address, as net-tools prints it.
+                    ctx.print(addresses.map { $0 + " " }.joined() + "\n")
+                } else if parsed.has("i") {
+                    ctx.print((addresses.first ?? "127.0.0.1") + "\n")
+                } else if parsed.has("s") {
+                    ctx.print(ctx.hostname.split(separator: ".", omittingEmptySubsequences: false)[0] + "\n")
+                } else if parsed.has("f") {
+                    ctx.print(ctx.hostname + "\n")
+                } else if let newName = parsed.operands.first {
+                    guard parsed.operands.count == 1, !newName.isEmpty else {
+                        ctx.usage("hostname", "hostname [-s|-f|-i|-I] [NAME]"); return
+                    }
                     ctx.setHostname(newName)
                 } else {
                     ctx.print(ctx.hostname + "\n")
@@ -502,105 +448,22 @@ enum BuiltinCommands {
                 ctx.exit(0)
             },
 
-            Command(name: "clear", summary: "clear the screen", category: .system) { ctx, _ in
+            Command(name: "clear", summary: "clear the screen", category: .system,
+                    usage: "clear") { ctx, _ in
                 // Clear screen + home cursor (the minimal ANSI subset the terminal renders).
                 ctx.print("\u{1B}[2J\u{1B}[H")
                 ctx.exit(0)
             },
 
             // `true` / `false` as real programs with meaningful exit codes.
-            Command(name: "true", summary: "exit with status 0", category: .system) { ctx, _ in
+            Command(name: "true", summary: "exit with status 0", category: .system,
+                    usage: "true") { ctx, _ in
                 ctx.exit(0)
             },
 
-            Command(name: "false", summary: "exit with status 1", category: .system) { ctx, _ in
+            Command(name: "false", summary: "exit with status 1", category: .system,
+                    usage: "false") { ctx, _ in
                 ctx.exit(1)
-            },
-
-            // `ping [-c count] [-i interval] [-W timeout] [-s size] <ipv4> [count]`
-            // — the same program that ships as `Programs.ping`, now also runnable
-            // from the shell. It renders real-ping-style output: a header, one line
-            // per reply/timeout *as they arrive* (paced ~`interval` apart, not all
-            // at once), then a closing statistics block. The library program owns
-            // the pacing, RTT, and stats; this command only parses flags and
-            // formats text — a blocking network tool and `cat` are one kind of thing.
-            Command(name: "ping", summary: "send ICMP echo requests", category: .network) { ctx, argv in
-                func usage() {
-                    ctx.error("ping: usage: ping [-c count] [-i interval] [-W timeout] [-s size] <ipv4> [count]")
-                    ctx.exit(2)
-                }
-
-                var count = 1
-                var interval = 1.0
-                var timeout = 1.0
-                var payloadSize = 56
-                var explicitCount = false
-                var positional: [String] = []
-
-                // Parse `-c/-i/-W/-s <value>` flags; anything else is positional
-                // (host, then an optional legacy count).
-                var index = 1
-                while index < argv.count {
-                    let arg = argv[index]
-                    let next: String? = index + 1 < argv.count ? argv[index + 1] : nil
-                    switch arg {
-                    case "-c":
-                        guard let raw = next, let parsed = Int(raw), parsed >= 0 else { usage(); return }
-                        count = parsed; explicitCount = true; index += 2
-                    case "-i":
-                        guard let raw = next, let parsed = Double(raw), parsed >= 0 else { usage(); return }
-                        interval = parsed; index += 2
-                    case "-W":
-                        guard let raw = next, let parsed = Double(raw), parsed > 0 else { usage(); return }
-                        timeout = parsed; index += 2
-                    case "-s":
-                        guard let raw = next, let parsed = Int(raw), parsed >= 0 else { usage(); return }
-                        payloadSize = parsed; index += 2
-                    default:
-                        positional.append(arg); index += 1
-                    }
-                }
-
-                guard let host = positional.first, let address = IPv4Address(host) else { usage(); return }
-                // Backward-compatible positional count: `ping <ipv4> [count]`.
-                if !explicitCount, positional.count > 1, let parsed = Int(positional[1]), parsed >= 0 {
-                    count = parsed
-                }
-
-                // Linux header: "PING <ip> (<ip>) <data>(<total>) bytes of data.",
-                // where total = data + 8 (ICMP header) + 20 (IPv4 header).
-                ctx.print("PING \(address) (\(address)) \(payloadSize)(\(payloadSize + 28)) bytes of data.\n")
-
-                // Reuse the library program body: it reports each reply/timeout
-                // through the sink, delivers the summary via `onFinish`, and calls
-                // `ctx.exit()` once the run completes.
-                let body = Programs.ping(to: address,
-                                         count: count,
-                                         interval: interval,
-                                         timeout: timeout,
-                                         payloadSize: payloadSize,
-                                         onFinish: { stats in
-                    ctx.print("\n--- \(address) ping statistics ---\n")
-                    let loss = BuiltinCommands.fixedPoint(stats.lossFraction * 100, places: 1)
-                    let elapsedMs = Int((stats.elapsedSeconds * 1000).rounded())
-                    ctx.print("\(stats.transmitted) packets transmitted, \(stats.received) received, \(loss)% packet loss, time \(elapsedMs)ms\n")
-                    // The rtt line only appears when at least one reply arrived.
-                    if let low = stats.minSeconds,
-                       let avg = stats.averageSeconds,
-                       let high = stats.maxSeconds,
-                       let dev = stats.deviationSeconds {
-                        func ms(_ seconds: Double) -> String { BuiltinCommands.fixedPoint(seconds * 1000, places: 3) }
-                        ctx.print("rtt min/avg/max/mdev = \(ms(low))/\(ms(avg))/\(ms(high))/\(ms(dev)) ms\n")
-                    }
-                }) { outcome in
-                    switch outcome {
-                    case let .reply(from, sequence, ttl, bytes, rtt):
-                        ctx.print("\(bytes) bytes from \(from): icmp_seq=\(sequence) ttl=\(ttl) time=\(BuiltinCommands.fixedPoint(rtt * 1000, places: 3)) ms\n")
-                    case let .timeout(sequence):
-                        ctx.print("Request timeout for icmp_seq \(sequence)\n")
-                    }
-                }
-                body(ctx)
             },
 
             // An async TCP echo server: `tcpecho [port]` (default 7). Written in
@@ -612,7 +475,8 @@ enum BuiltinCommands {
             // An async TCP echo server built on the `serveTCP` scaffolding: it
             // only supplies the per-connection logic (echo until EOF); the accept
             // loop and per-connection concurrency come from the helper.
-            Command(name: "tcpecho", summary: "TCP echo server", category: .network, asyncRun: { ctx, argv in
+            Command(name: "tcpecho", summary: "TCP echo server", category: .network,
+                    usage: "tcpecho [PORT]\nEcho every TCP connection on PORT (default 7).", asyncRun: { ctx, argv in
                 let port = argv.count > 1 ? (UInt16(argv[1]) ?? 7) : 7
                 // Announce only once the socket is actually listening; a failed
                 // bind (port in use) prints an error from serveTCP and exits.
@@ -621,52 +485,6 @@ enum BuiltinCommands {
                 }) { conn, fd in
                     while let bytes = try? await conn.tcpRecv(fd), !bytes.isEmpty {
                         _ = conn.tcpSend(fd, bytes)
-                    }
-                }
-            }),
-
-            // A minimal static-file HTTP server, also on `serveTCP`: it serves
-            // files straight out of the VFS. `httpd [port]` (default 80); `GET /`
-            // maps to `/index.html`. Shows an application protocol as an ordinary
-            // user program over the TCP syscalls.
-            Command(name: "httpd", summary: "serve files over HTTP", category: .network, asyncRun: { ctx, argv in
-                let port = argv.count > 1 ? (UInt16(argv[1]) ?? 80) : 80
-                // Announce only once the socket is actually listening; a failed
-                // bind (port in use) prints an error from serveTCP and exits.
-                await Programs.serveTCP(ctx, port: port, onListening: {
-                    ctx.print("httpd: serving / on \(port)\n")
-                }) { conn, fd in
-                    var buffer: [UInt8] = []
-                    // One connection may carry several requests (keep-alive).
-                    while true {
-                        // Accumulate until a full header block has arrived.
-                        while HTTP.endOfHeaders(buffer) == nil {
-                            guard let chunk = try? await conn.tcpRecv(fd), !chunk.isEmpty else { return }
-                            buffer.append(contentsOf: chunk)
-                        }
-                        guard let request = HTTP.parseRequest(buffer) else {
-                            _ = conn.tcpSend(fd, HTTP.response(status: 400, reason: "Bad Request",
-                                                               body: Array("bad request\n".utf8)))
-                            return
-                        }
-                        // Consume the request's header block; keep any pipelined bytes.
-                        buffer.removeFirst(HTTP.endOfHeaders(buffer)!)
-
-                        let path = request.path == "/" ? "/index.html" : request.path
-                        let responseBytes: [UInt8]
-                        if let file = conn.open(path) {
-                            let body = conn.read(file, max: 1 << 20)
-                            conn.close(file)
-                            responseBytes = HTTP.response(status: 200, reason: "OK", body: body,
-                                                          contentType: HTTP.contentType(forPath: path),
-                                                          keepAlive: request.keepAlive)
-                        } else {
-                            responseBytes = HTTP.response(status: 404, reason: "Not Found",
-                                                          body: Array("not found\n".utf8),
-                                                          keepAlive: request.keepAlive)
-                        }
-                        _ = conn.tcpSend(fd, responseBytes)
-                        if !request.keepAlive { return }
                     }
                 }
             }),

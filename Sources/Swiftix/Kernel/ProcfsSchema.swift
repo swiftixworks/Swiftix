@@ -133,4 +133,74 @@ enum ProcfsSchema {
             }
         }
     }
+
+    /// `/proc/<pid>/stat`: the leading, Linux-ordered fields that have a real
+    /// source of truth here. Linux appends some forty further counters (fault
+    /// counts, CPU times, memory sizes) that Swiftix does not model; they are
+    /// omitted rather than filled with invented zeros, so consumers must parse
+    /// by position from the left and not assume the Linux field count.
+    enum PidStat {
+        static let fields = ["PID", "COMM", "STATE", "PPID", "PGRP", "SESSION", "TTY_NR", "TPGID"]
+
+        /// `ttyNumber` uses the Linux device-number encoding for a UNIX98 pty
+        /// (major 136), or 0 without a controlling terminal; `foregroundGroup`
+        /// is -1 without one.
+        static func line(pid: PID, name: String, state: String,
+                         ppid: PID, pgid: PID, sid: PID,
+                         terminalIndex: Int?, foregroundGroup: PID?) -> String {
+            let ttyNumber = terminalIndex.map { (136 << 8) | $0 } ?? 0
+            return "\(pid) (\(name)) \(state) \(ppid) \(pgid) \(sid)"
+                + " \(ttyNumber) \(foregroundGroup ?? -1)"
+        }
+    }
+
+    /// `/proc/loadavg`, in the Linux layout: three load averages, then
+    /// `runnable/total` scheduling entities and the most recent pid.
+    enum LoadAverage {
+        static let path = "/proc/loadavg"
+        static let fields = ["LOAD1", "LOAD5", "LOAD15", "RUNNABLE/TOTAL", "LAST_PID"]
+
+        static func line(running: Int, total: Int, lastPID: PID) -> String {
+            "0.00 0.00 0.00 \(running)/\(total) \(lastPID)"
+        }
+    }
+
+    /// `/proc/stat`: the subset of Linux's keys this kernel maintains.
+    enum Stat {
+        static let path = "/proc/stat"
+        static let keys = ["ctxt", "btime", "processes", "procs_running", "procs_blocked"]
+
+        static func lines(contextSwitches: UInt64, bootEpoch: Int64, processesCreated: Int,
+                          running: Int, blocked: Int) -> [String] {
+            [
+                "ctxt \(contextSwitches)",
+                "btime \(bootEpoch)",
+                "processes \(processesCreated)",
+                "procs_running \(running)",
+                "procs_blocked \(blocked)",
+            ]
+        }
+    }
+
+    /// `/proc/filesystems`: every type is virtual (`nodev`).
+    enum Filesystems {
+        static let path = "/proc/filesystems"
+        static let types = ["tmpfs", "proc"]
+        static var lines: [String] { types.map { "nodev\t\($0)" } }
+    }
+
+    /// `/proc/sys/kernel`: read-only kernel identity.
+    enum SysKernel {
+        static let hostnamePath = "/proc/sys/kernel/hostname"
+        static let ostypePath = "/proc/sys/kernel/ostype"
+        static let osreleasePath = "/proc/sys/kernel/osrelease"
+        /// Matches `uname -s`.
+        static let ostype = "Swiftix"
+    }
+
+    /// Names present in every `/proc/<pid>` directory.
+    enum PidDirectory {
+        static let entries = ["cmdline", "comm", "cwd", "environ", "fd", "fdinfo",
+                              "stat", "status", "syscalls"]
+    }
 }

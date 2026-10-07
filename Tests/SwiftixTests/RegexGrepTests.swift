@@ -138,7 +138,7 @@ struct RegexGrepTests {
 
     @Test func grepBraceRepetition() {
         let harness = ShellHarness()
-        harness.run("seq 20 | grep '.{2}' > /g")         // lines with at least two characters
+        harness.run("seq 20 | grep -E '.{2}' > /g")      // lines with at least two characters
         #expect(harness.contents(of: "/g") == "10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n")
     }
 

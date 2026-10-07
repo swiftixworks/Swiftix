@@ -18,6 +18,9 @@ protocol TerminalControl: AnyObject {
     var terminalWindowSize: WindowSize { get set }
     var foregroundProcessGroupID: PID? { get set }
     var linePrompt: [UInt8] { get set }
+    /// Consume a pending Ctrl-C aimed at the prompt reader; see
+    /// `PseudoTerminal.takeLineInterrupt()`.
+    func takeLineInterrupt() -> Bool
 }
 
 /// Ordered slave-side input. EOF is a record in the same queue as bytes so
@@ -47,6 +50,11 @@ private struct TerminalInputQueue {
     @discardableResult
     mutating func appendEndOfFile() -> Bool {
         elements.append(.endOfFile)
+    }
+
+    /// Discard everything queued (the input flush that accompanies Ctrl-C).
+    mutating func removeAll() {
+        while elements.popFirst() != nil {}
     }
 
     mutating func popFirst(_ maximumCount: Int) -> [UInt8] {
@@ -109,6 +117,16 @@ public final class PseudoTerminal {
     /// programs clear it through job-control handoff, so the PTY never invents
     /// shell UI for another reader.
     public var linePrompt: [UInt8] = []
+
+    /// Set by every cooked-mode Ctrl-C, for the session's prompt-driven reader
+    /// (the shell). The job signal path (`onControlC`) only reaches the
+    /// foreground job, never the shell itself, so the terminal also flushes its
+    /// unread input and — while a prompt is showing (`linePrompt`) — completes
+    /// the pending read empty. The shell consumes the flag with
+    /// `takeLineInterrupt()`: on an empty read (interrupt, not end-of-file),
+    /// between the commands it runs, and before it prompts. A reader that
+    /// publishes no prompt never observes it.
+    private var lineInterruptPending = false
 
     private var inputLine: [UInt8] = []
     private var slaveReadable = TerminalInputQueue(capacity: maximumSlaveInputBytes)
@@ -179,6 +197,12 @@ public final class PseudoTerminal {
                 }
                 inputLine.removeAll(); cursor = 0
                 resetHistoryBrowsing()
+                lineInterruptPending = true
+                slaveReadable.removeAll()
+                if !linePrompt.isEmpty {
+                    slaveReadWaiters.notifyOne()
+                    slaveReadinessBroadcaster.notify()
+                }
                 onControlC?()
                 continue
             }
@@ -493,7 +517,17 @@ public final class PseudoTerminal {
         return result
     }
 
-    fileprivate var slaveHasData: Bool { !slaveReadable.isEmpty }
+    fileprivate var slaveHasData: Bool {
+        !slaveReadable.isEmpty || (lineInterruptPending && !linePrompt.isEmpty)
+    }
+
+    /// Whether Ctrl-C was pressed at the reader's prompt since the last call.
+    /// Clears the flag, so the read that reported it empty is not taken for
+    /// end-of-file a second time.
+    fileprivate func takeLineInterrupt() -> Bool {
+        defer { lineInterruptPending = false }
+        return lineInterruptPending
+    }
 
     fileprivate func addSlaveReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {
         slaveReadinessBroadcaster.add(listener)
@@ -535,6 +569,8 @@ public final class PseudoTerminal {
             get { terminal.linePrompt }
             set { terminal.linePrompt = newValue }
         }
+
+        func takeLineInterrupt() -> Bool { terminal.takeLineInterrupt() }
 
         public func read(max: Int) -> [UInt8] { terminal.slaveRead(max: max) }
 

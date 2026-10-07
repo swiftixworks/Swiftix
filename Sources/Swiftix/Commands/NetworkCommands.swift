@@ -1,229 +1,332 @@
-/// Network built-ins: diagnostics/configuration tools that surface the stack's
-/// state, plus two TCP clients. They extend the base set in `Commands.swift` and join
-/// `CommandRegistry.builtins` through `BuiltinCommands.all()`.
+/// Network built-ins: the registration point for the whole network command set,
+/// plus the ICMP tools (`ping`, `traceroute`), the packet-path viewers
+/// (`tcpdump`, `trace`, `drops`) and the `dnsd` server. They extend the base set
+/// in `Commands.swift` and join `CommandRegistry.builtins` through
+/// `BuiltinCommands.all()`.
 ///
-/// Diagnostics (`ifconfig`, `route`, `arp`, `netstat`) read the synthetic
-/// `/proc/net/*` files the kernel already exposes. Mutating forms (`ifconfig add`,
-/// `route add`, `arp add`, and `ip ... add`) go through `ProcessContext`'s network
-/// configuration syscalls rather than reaching into `NetworkStack` directly. The
-/// clients (`nc`, `curl`) are `async` programs over the TCP syscall frontend -- the
-/// client-side counterparts to the `tcpecho`/`httpd` servers.
+/// The rest of the set lives beside this file, one feature area each:
+///
+///   - `NetworkConfigCommands.swift` — `ip`, `ifconfig`, `route`, `arp`
+///   - `NetworkSocketCommands.swift` — `netstat`, `ss`
+///   - `HTTPCommands.swift`          — `curl`, `wget`, `httpd`
+///   - `NetcatCommands.swift`        — `nc`, `telnet`
+///   - `DNSCommands.swift`           — `dig`, `nslookup`, `host`
+///   - `NetworkCommandSupport.swift` — the shared option scanner and formatters
+///
+/// `ping` and `httpd` are defined here although older definitions still sit in
+/// `Commands.swift`: `networkCommands()` is appended after `base()` in
+/// `BuiltinCommands.all()`, and the registry keeps the last command registered
+/// under a name, so these are the ones the shell runs.
+///
+/// Diagnostics read the synthetic `/proc/net/*` files or value snapshots obtained
+/// through `ProcessContext`; mutating forms go through its network configuration
+/// syscalls rather than reaching into `NetworkStack` directly.
 extension BuiltinCommands {
 
     static func networkCommands() -> [Command] {
+        let commands = icmpCommands()
+            + networkConfigCommands()
+            + networkSocketCommands()
+            + packetPathCommands()
+            + netcatCommands()
+            + dnsCommands()
+            + httpCommands()
+        // One synopsis per command, shared by `cmd --help` (the central
+        // mechanism) and the command's own usage-error diagnostics.
+        return commands.map { $0.withUsage(networkUsage[$0.name]) }
+    }
+
+    // MARK: - ping / traceroute
+
+    private static let pingUsage = networkSynopsis("ping")
+    private static let tracerouteUsage = networkSynopsis("traceroute")
+
+    private static func icmpCommands() -> [Command] {
         [
-            // traceroute [-q nqueries] [-m maxhops] <host> [maxhops] — trace the
-            // route to a destination by sending ICMP echo requests with increasing
-            // TTL. Each intermediate router decrements TTL to zero and replies with
-            // ICMP time-exceeded, revealing its address. Like real traceroute it
-            // sends `nqueries` probes per hop (default 3) and prints one line per
-            // hop with each probe's RTT (or `*` for a probe that timed out),
-            // repeating the gateway address only when it changes. Stops when the
-            // destination replies or `maxhops` (default 30) is reached.
-            Command(name: "traceroute", summary: "trace the route to a host", category: .network, asyncRun: { ctx, argv in
-                func usage() {
-                    ctx.error("traceroute: usage: traceroute [-q nqueries] [-m maxhops] <host> [maxhops]")
-                    ctx.exit(2)
-                }
-
-                var probesPerHop = 3
-                var maxHops = 30
-                var maxHopsSet = false
-                var positional: [String] = []
-
-                var index = 1
-                while index < argv.count {
-                    let arg = argv[index]
-                    let next: String? = index + 1 < argv.count ? argv[index + 1] : nil
-                    switch arg {
-                    case "-q":
-                        guard let raw = next, let n = Int(raw), n > 0 else { usage(); return }
-                        probesPerHop = n; index += 2
-                    case "-m":
-                        guard let raw = next, let n = Int(raw), n > 0 else { usage(); return }
-                        maxHops = n; maxHopsSet = true; index += 2
-                    default:
-                        positional.append(arg); index += 1
-                    }
-                }
-
-                guard let host = positional.first else { usage(); return }
-                // Backward-compatible positional maxhops: `traceroute <host> [maxhops]`.
-                if !maxHopsSet, positional.count > 1, let n = Int(positional[1]), n > 0 {
-                    maxHops = n
-                }
-                guard let address = await ctx.resolve(host) else {
-                    ctx.error("traceroute: cannot resolve \(host)")
-                    ctx.exit(1)
-                    return
-                }
-
-                let identifier = UInt16(truncatingIfNeeded: ctx.globalPID)
-                ctx.print("traceroute to \(address), \(maxHops) hops max\n")
-                // Every probe needs a unique sequence number: the stack matches echo
-                // replies by (identifier, sequence), so reusing a number across the
-                // hop's probes would cross the waiters.
-                var sequence: UInt16 = 0
-                for hop in 1...maxHops {
-                    let ttl = UInt8(clamping: hop)
-                    var line = " \(hop)"
-                    var lastPrinted: IPv4Address?
-                    var reachedDestination = false
-                    for _ in 0..<probesPerHop {
-                        sequence &+= 1
-                        let outcome: Programs.PingOutcome
-                        do {
-                            outcome = try await ctx.icmpEcho(to: address,
-                                                             identifier: identifier,
-                                                             sequence: sequence,
-                                                             ttl: ttl,
-                                                             timeout: 3.0)
-                        } catch {
-                            // Interrupted (signal); let the kernel handle exit status.
-                            return
-                        }
-                        switch outcome {
-                        case let .reply(from, _, _, _, rtt):
-                            let ms = BuiltinCommands.fixedPoint(rtt * 1000, places: 3)
-                            // Repeat the gateway only when it differs from the last
-                            // one printed on this line (real traceroute behavior).
-                            if from == lastPrinted {
-                                line += "  \(ms) ms"
-                            } else {
-                                line += "  \(from)  \(ms) ms"
-                                lastPrinted = from
-                            }
-                            if from == address { reachedDestination = true }
-                        case .timeout:
-                            line += "  *"
-                        }
-                    }
-                    ctx.print(line + "\n")
-                    if reachedDestination { ctx.exit(0); return }
-                }
-                ctx.exit(0)
+            // `ping [-c count] [-i interval] [-W timeout] [-w deadline] [-s size]
+            // [-t ttl] [-q] <host> [count]` — renders real-ping-style output: a
+            // header, one line per reply/timeout *as they arrive* (paced
+            // ~`interval` apart, not all at once), then a closing statistics
+            // block. `host` is resolved like every other client (literal,
+            // /etc/hosts, DNS). Exits 0 when at least one reply arrived, 1 when
+            // every request was lost, 2 on a usage or resolution error.
+            Command(name: "ping", summary: "send ICMP echo requests", category: .network, asyncRun: { ctx, argv in
+                await runPing(ctx, argv)
             }),
 
-            // ifconfig [add <ip>/<prefix> <mac>] — interface identities and counters.
-            Command(name: "ifconfig", summary: "show or add interfaces", category: .network) { ctx, argv in
-                runIfconfig(ctx, argv)
-            },
+            // traceroute [-q nqueries] [-m maxhops] [-w timeout] <host> [maxhops]
+            // — trace the route to a destination by sending ICMP echo requests
+            // with increasing TTL. Each intermediate router decrements TTL to zero
+            // and replies with ICMP time-exceeded, revealing its address. Like real
+            // traceroute it sends `nqueries` probes per hop (default 3) and prints
+            // one line per hop with each probe's RTT (or `*` for a probe that timed
+            // out), repeating the gateway address only when it changes. Stops when
+            // the destination replies or `maxhops` (default 30) is reached.
+            Command(name: "traceroute", summary: "trace the route to a host", category: .network, asyncRun: { ctx, argv in
+                await runTraceroute(ctx, argv)
+            }),
+        ]
+    }
 
-            // route [add <cidr> [via <gateway>] [dev ethN]] — IPv4 routes.
-            Command(name: "route", summary: "show or add routes", category: .network) { ctx, argv in
-                runRoute(ctx, argv)
-            },
+    private static func runPing(_ ctx: ProcessContext, _ argv: [String]) async {
+        guard let items = ctx.scanOptions(argv, command: "ping", usage: pingUsage,
+                                          flags: "qn4v", valued: "ciWwst") else { return }
+        var count = 1
+        var explicitCount = false
+        var interval = 1.0
+        var timeout = 1.0
+        var deadline: Double?
+        var payloadSize = 56
+        var ttl: UInt8 = 64
+        var quiet = false
+        var positional: [String] = []
 
-            // arp [add <ip> <mac>] — ARP cache: IP -> MAC bindings.
-            Command(name: "arp", summary: "show or add ARP entries", category: .network) { ctx, argv in
-                runARP(ctx, argv)
-            },
+        func bad(_ option: String, _ value: String) {
+            ctx.invalidArgument("ping", "invalid argument: '\(value)' for -\(option)", usage: pingUsage)
+        }
+        for item in items {
+            switch item {
+            case .operand(let value):
+                positional.append(value)
+            case .option("q", _):
+                quiet = true
+            case .option("c", let value?):
+                guard let parsed = Int(value), parsed >= 0 else { bad("c", value); return }
+                count = parsed; explicitCount = true
+            case .option("i", let value?):
+                guard let parsed = Double(value), parsed >= 0 else { bad("i", value); return }
+                interval = parsed
+            case .option("W", let value?):
+                guard let parsed = Double(value), parsed > 0 else { bad("W", value); return }
+                timeout = parsed
+            case .option("w", let value?):
+                guard let parsed = Double(value), parsed > 0 else { bad("w", value); return }
+                deadline = parsed
+            case .option("s", let value?):
+                guard let parsed = Int(value), (0...65_507).contains(parsed) else { bad("s", value); return }
+                payloadSize = parsed
+            case .option("t", let value?):
+                guard let parsed = UInt8(value), parsed > 0 else { bad("t", value); return }
+                ttl = parsed
+            case .option:
+                break   // -n / -4 / -v: accepted, nothing to change (output is numeric IPv4)
+            }
+        }
 
-            // ip — lightweight Linux-style network configuration frontend.
-            Command(name: "ip", summary: "configure addresses, routes, neighbors", category: .network) { ctx, argv in
-                runIP(ctx, argv)
-            },
+        guard let host = positional.first else { ctx.usage("ping", pingUsage); return }
+        // Backward-compatible positional count: `ping <host> [count]`.
+        if !explicitCount, positional.count > 1 {
+            guard let parsed = Int(positional[1]), parsed >= 0 else {
+                ctx.invalidArgument("ping", "invalid count: '\(positional[1])'", usage: pingUsage); return
+            }
+            count = parsed
+            explicitCount = true
+        }
+        // Like Linux, a deadline without a count means "until the deadline".
+        if deadline != nil, !explicitCount { count = Int.max }
 
+        guard let address = await ctx.resolve(host) else {
+            ctx.fail("ping: \(host): Name or service not known", code: 2); return
+        }
+
+        // Linux header: "PING <host> (<ip>) <data>(<total>) bytes of data.",
+        // where total = data + 8 (ICMP header) + 20 (IPv4 header).
+        ctx.print("PING \(host) (\(address)) \(payloadSize)(\(payloadSize + 28)) bytes of data.\n")
+
+        // Identify echoes by the global pid so concurrent pings (even across PID
+        // namespaces, where local pids repeat) don't collide on the (identifier,
+        // sequence) key the stack uses to match replies.
+        let identifier = UInt16(truncatingIfNeeded: ctx.globalPID)
+        // A deterministic filler keeps wire bytes stable; the peer echoes it back.
+        let payload = [UInt8](repeating: 0, count: payloadSize)
+        let start = ctx.logicalSeconds
+        var transmitted = 0
+        var roundTrips: [Double] = []
+        var sequence: UInt16 = 0
+
+        while transmitted < count {
+            let sentAt = ctx.logicalSeconds
+            var wait = timeout
+            if let deadline {
+                let left = deadline - (sentAt - start)
+                guard left > 0 else { break }
+                wait = min(wait, left)
+            }
+            sequence &+= 1
+            transmitted += 1
+            let outcome: Programs.PingOutcome
+            do {
+                outcome = try await ctx.icmpEcho(to: address, identifier: identifier, sequence: sequence,
+                                                 payload: payload, ttl: ttl, timeout: wait)
+            } catch {
+                return   // interrupted by a signal; the kernel owns the exit status
+            }
+            switch outcome {
+            case let .reply(from, replySequence, replyTTL, bytes, rtt):
+                roundTrips.append(rtt)
+                if !quiet {
+                    ctx.print("\(bytes) bytes from \(from): icmp_seq=\(replySequence) ttl=\(replyTTL) time=\(fixedPoint(rtt * 1000, places: 3)) ms\n")
+                }
+            case let .timeout(lostSequence):
+                if !quiet { ctx.print("Request timeout for icmp_seq \(lostSequence)\n") }
+            }
+            guard transmitted < count else { break }
+            // Pace send-to-send: sleep only what is left of the interval after
+            // this request's RTT (or its full timeout on a miss).
+            var pause = interval - (ctx.logicalSeconds - sentAt)
+            if let deadline { pause = min(pause, deadline - (ctx.logicalSeconds - start)) }
+            if pause > 0 {
+                do { try await ctx.sleep(pause) } catch { return }
+            }
+        }
+
+        let stats = Programs.PingStatistics(transmitted: transmitted,
+                                            received: roundTrips.count,
+                                            roundTripsSeconds: roundTrips,
+                                            elapsedSeconds: ctx.logicalSeconds - start)
+        ctx.print("\n--- \(host) ping statistics ---\n")
+        let loss = fixedPoint(stats.lossFraction * 100, places: 1)
+        let elapsedMs = Int((stats.elapsedSeconds * 1000).rounded())
+        ctx.print("\(stats.transmitted) packets transmitted, \(stats.received) received, \(loss)% packet loss, time \(elapsedMs)ms\n")
+        // The rtt line only appears when at least one reply arrived.
+        if let low = stats.minSeconds,
+           let avg = stats.averageSeconds,
+           let high = stats.maxSeconds,
+           let dev = stats.deviationSeconds {
+            func ms(_ seconds: Double) -> String { fixedPoint(seconds * 1000, places: 3) }
+            ctx.print("rtt min/avg/max/mdev = \(ms(low))/\(ms(avg))/\(ms(high))/\(ms(dev)) ms\n")
+        }
+        ctx.exit(stats.transmitted > 0 && stats.received == 0 ? 1 : 0)
+    }
+
+    private static func runTraceroute(_ ctx: ProcessContext, _ argv: [String]) async {
+        guard let items = ctx.scanOptions(argv, command: "traceroute", usage: tracerouteUsage,
+                                          flags: "nI4", valued: "qmw") else { return }
+        var probesPerHop = 3
+        var maxHops = 30
+        var maxHopsSet = false
+        var probeTimeout = 3.0
+        var positional: [String] = []
+
+        for item in items {
+            switch item {
+            case .operand(let value):
+                positional.append(value)
+            case .option("q", let value?):
+                guard let n = Int(value), n > 0 else {
+                    ctx.invalidArgument("traceroute", "invalid probe count: '\(value)'", usage: tracerouteUsage); return
+                }
+                probesPerHop = n
+            case .option("m", let value?):
+                guard let n = Int(value), n > 0 else {
+                    ctx.invalidArgument("traceroute", "invalid max hops: '\(value)'", usage: tracerouteUsage); return
+                }
+                maxHops = n; maxHopsSet = true
+            case .option("w", let value?):
+                guard let seconds = Double(value), seconds > 0 else {
+                    ctx.invalidArgument("traceroute", "invalid wait time: '\(value)'", usage: tracerouteUsage); return
+                }
+                probeTimeout = seconds
+            case .option:
+                break   // -n / -I / -4: already numeric, ICMP, IPv4
+            }
+        }
+
+        guard let host = positional.first else { ctx.usage("traceroute", tracerouteUsage); return }
+        // Backward-compatible positional maxhops: `traceroute <host> [maxhops]`.
+        if !maxHopsSet, positional.count > 1, let n = Int(positional[1]), n > 0 {
+            maxHops = n
+        }
+        guard let address = await ctx.resolve(host) else {
+            ctx.fail("traceroute: \(host): Name or service not known", code: 2); return
+        }
+
+        let identifier = UInt16(truncatingIfNeeded: ctx.globalPID)
+        ctx.print("traceroute to \(host) (\(address)), \(maxHops) hops max\n")
+        // Every probe needs a unique sequence number: the stack matches echo
+        // replies by (identifier, sequence), so reusing a number across the
+        // hop's probes would cross the waiters.
+        var sequence: UInt16 = 0
+        for hop in 1...maxHops {
+            let ttl = UInt8(clamping: hop)
+            var line = " \(hop)"
+            var lastPrinted: IPv4Address?
+            var reachedDestination = false
+            for _ in 0..<probesPerHop {
+                sequence &+= 1
+                let outcome: Programs.PingOutcome
+                do {
+                    outcome = try await ctx.icmpEcho(to: address,
+                                                     identifier: identifier,
+                                                     sequence: sequence,
+                                                     ttl: ttl,
+                                                     timeout: probeTimeout)
+                } catch {
+                    // Interrupted (signal); let the kernel handle exit status.
+                    return
+                }
+                switch outcome {
+                case let .reply(from, _, _, _, rtt):
+                    let ms = fixedPoint(rtt * 1000, places: 3)
+                    // Repeat the gateway only when it differs from the last
+                    // one printed on this line (real traceroute behavior).
+                    if from == lastPrinted {
+                        line += "  \(ms) ms"
+                    } else {
+                        line += "  \(from)  \(ms) ms"
+                        lastPrinted = from
+                    }
+                    if from == address { reachedDestination = true }
+                case .timeout:
+                    line += "  *"
+                }
+            }
+            ctx.print(line + "\n")
+            if reachedDestination { ctx.exit(0); return }
+        }
+        ctx.exit(0)
+    }
+
+    // MARK: - trace / drops / tcpdump
+
+    private static func packetPathCommands() -> [Command] {
+        [
             // trace — recent packet-path observations: ingress/L2/L3/route/forward/drop.
-            Command(name: "trace", summary: "show recent packet path events", category: .network) { ctx, _ in
-                catProcFile(ctx, cmd: "trace", path: "/proc/net/trace",
-                            header: "seq direction interface stage details\n")
+            Command(name: "trace", summary: "show recent packet path events", category: .network) { ctx, argv in
+                runPacketPath(ctx, argv, command: "trace", path: "/proc/net/trace")
             },
 
             // drops — recent packet-path observations that ended in a drop reason.
-            Command(name: "drops", summary: "show recent packet drops", category: .network) { ctx, _ in
-                catProcFile(ctx, cmd: "drops", path: "/proc/net/drop",
-                            header: "seq direction interface stage details\n")
+            Command(name: "drops", summary: "show recent packet drops", category: .network) { ctx, argv in
+                runPacketPath(ctx, argv, command: "drops", path: "/proc/net/drop")
             },
 
             // tcpdump — intentionally simplified: a snapshot of the recent packet
-            // path rather than a live sniffer.
-            Command(name: "tcpdump", summary: "show recent packet path events", category: .network) { ctx, _ in
-                catProcFile(ctx, cmd: "tcpdump", path: "/proc/net/trace",
-                            header: "seq direction interface stage details\n")
+            // path rather than a live sniffer. `-i IF`, `-c N` and a small filter
+            // language select from that snapshot.
+            Command(name: "tcpdump", summary: "show recent packet path events", category: .network) { ctx, argv in
+                runPacketPath(ctx, argv, command: "tcpdump", path: "/proc/net/trace")
             },
 
-            // netstat — active TCP connections and bound UDP ports. Reads both
-            // /proc/net/tcp and /proc/net/udp so one command shows the sockets.
-            Command(name: "netstat", summary: "show TCP connections and UDP ports", category: .network) { ctx, _ in
-                ctx.print("Active TCP connections:\n")
-                if let fd = ctx.open("/proc/net/tcp") {
-                    ctx.write(1, readFully(ctx, fd)); ctx.close(fd)
-                }
-                ctx.print("Bound UDP ports:\n")
-                if let fd = ctx.open("/proc/net/udp") {
-                    ctx.write(1, readFully(ctx, fd)); ctx.close(fd)
-                }
-                ctx.exit(0)
-            },
-
-            // nc <host> <port> — TCP client. Resolves `host` (literal, /etc/hosts,
-            // or DNS), connects, relays stdin to the socket in a child, and prints
-            // socket bytes to stdout until the peer closes. Pairs with servers that
-            // reply and then close (e.g. `httpd`).
-            Command(name: "nc", summary: "TCP client: relay stdin/stdout", category: .network, asyncRun: { ctx, argv in
-                guard argv.count >= 3, let port = UInt16(argv[2]) else {
-                    ctx.usage("nc", "nc <host> <port>"); return
-                }
-                guard let address = await ctx.resolve(argv[1]) else {
-                    ctx.fail("nc: cannot resolve \(argv[1])", code: 1); return
-                }
-                guard let fd = ctx.tcpSocket() else { ctx.fail("nc: socket failed", code: 1); return }
-                do {
-                    try await ctx.tcpConnect(fd, to: address, port: port)
-                } catch {
-                    ctx.fail("nc: connect to \(address):\(port) failed", code: 1); return
-                }
-                // Child pumps stdin -> socket (the accepted fd is inherited).
-                ctx.spawn("nc-tx", args: ["nc-tx"]) { (child: ProcessContext) async in
-                    while let bytes = try? await child.read(0), !bytes.isEmpty {
-                        _ = child.tcpSend(fd, bytes)
-                    }
-                    child.exit(0)
-                }
-                // Parent pumps socket -> stdout until the peer closes (EOF).
-                while let bytes = try? await ctx.tcpRecv(fd), !bytes.isEmpty {
-                    ctx.write(1, bytes)
-                }
-                ctx.tcpClose(fd)
-                ctx.exit(0)
-            }),
-
-            // nslookup <name> — resolve a name to an address (literal, /etc/hosts,
-            // or DNS via the NAMESERVER env var) and print it.
-            Command(name: "nslookup", summary: "resolve a hostname", category: .network, asyncRun: { ctx, argv in
-                guard argv.count > 1 else {
-                    ctx.usage("nslookup", "nslookup <name>"); return
-                }
-                if let address = await ctx.resolve(argv[1]) {
-                    if let server = ctx.getenv("NAMESERVER") { ctx.print("Server: \(server)\n") }
-                    ctx.print("Name:\t\(argv[1])\nAddress: \(address)\n")
-                    ctx.exit(0)
-                } else {
-                    ctx.print("** server can't find \(argv[1]): NXDOMAIN\n")
-                    ctx.exit(1)
-                }
-            }),
-
-            // host <name> — a terser resolver: "<name> has address <ipv4>".
-            Command(name: "host", summary: "resolve a hostname (terse)", category: .network, asyncRun: { ctx, argv in
-                guard argv.count > 1 else {
-                    ctx.usage("host", "host <name>"); return
-                }
-                if let address = await ctx.resolve(argv[1]) {
-                    ctx.print("\(argv[1]) has address \(address)\n")
-                    ctx.exit(0)
-                } else {
-                    ctx.print("Host \(argv[1]) not found: 3(NXDOMAIN)\n")
-                    ctx.exit(1)
-                }
-            }),
-
-            // dnsd [port] — a DNS server (UDP) answering A queries from the local
-            // /etc/hosts table. The server counterpart to the resolver: DNS as an
-            // ordinary user program over the UDP syscalls, mirroring httpd on TCP.
+            // dnsd [-p port] [port] — a DNS server (UDP) answering A queries from
+            // the local /etc/hosts table. The server counterpart to the resolver:
+            // DNS as an ordinary user program over the UDP syscalls, mirroring
+            // httpd on TCP.
             Command(name: "dnsd", summary: "serve DNS A records from /etc/hosts", category: .network, asyncRun: { ctx, argv in
-                let port = argv.count > 1 ? (UInt16(argv[1]) ?? DNS.port) : DNS.port
+                let usage = networkSynopsis("dnsd")
+                guard let items = ctx.scanOptions(argv, command: "dnsd", usage: usage, valued: "p") else { return }
+                var port = DNS.port
+                for item in items {
+                    let value: String
+                    switch item {
+                    case .operand(let operand): value = operand
+                    case .option(_, let optionValue): value = optionValue ?? ""
+                    }
+                    guard let parsed = UInt16(value), parsed != 0 else {
+                        ctx.invalidArgument("dnsd", "invalid port: '\(value)'", usage: usage); return
+                    }
+                    port = parsed
+                }
                 guard let fd = ctx.socket() else { ctx.fail("dnsd: socket failed", code: 1); return }
                 guard ctx.bind(fd, address: nil, port: port) else {
                     ctx.error("dnsd: cannot bind port \(port): address already in use")
@@ -233,7 +336,7 @@ extension BuiltinCommands {
                 while let query = try? await ctx.recvfrom(fd) {
                     guard let (id, name) = DNS.parseQuery(query.bytes) else { continue }
                     let reply: [UInt8]
-                    if let address = hostsLookup(ctx, name: name) {
+                    if let address = ctx.hostsFileLookup(name) {
                         reply = DNS.encodeResponse(id: id, name: name, address: address)
                     } else {
                         reply = DNS.encodeNotFound(id: id, name: name)
@@ -241,366 +344,122 @@ extension BuiltinCommands {
                     _ = ctx.sendto(fd, reply, to: query.address, port: query.port)
                 }
             }),
-
-            // curl <url> — fetch an http:// URL over TCP and print the body. The
-            // host may be an IPv4 literal or a name resolved via /etc/hosts or DNS.
-            // Use -i to include the response headers.
-            Command(name: "curl", summary: "fetch an http:// URL", category: .network, asyncRun: { ctx, argv in
-                var args = Array(argv.dropFirst())
-                var includeHeaders = false
-                if args.first == "-i" { includeHeaders = true; args.removeFirst() }
-                guard let urlString = args.first, let url = parseHTTPURL(urlString) else {
-                    ctx.usage("curl", "curl [-i] http://<host>[:port]/path"); return
-                }
-                guard let address = await ctx.resolve(url.host) else {
-                    ctx.fail("curl: cannot resolve \(url.host)", code: 1); return
-                }
-                guard let fd = ctx.tcpSocket() else { ctx.fail("curl: socket failed", code: 1); return }
-                do {
-                    try await ctx.tcpConnect(fd, to: address, port: url.port)
-                } catch {
-                    ctx.fail("curl: connect to \(url.host):\(url.port) failed", code: 1); return
-                }
-                let request = "GET \(url.path) HTTP/1.0\r\nHost: \(url.host)\r\nConnection: close\r\n\r\n"
-                _ = ctx.tcpSend(fd, Array(request.utf8))
-                var response: [UInt8] = []
-                while let bytes = try? await ctx.tcpRecv(fd), !bytes.isEmpty {
-                    response.append(contentsOf: bytes)
-                }
-                ctx.tcpClose(fd)
-                if includeHeaders {
-                    ctx.write(1, response)
-                } else if let bodyStart = headerBodySplit(response) {
-                    ctx.write(1, Array(response[bodyStart...]))
-                } else {
-                    ctx.write(1, response)   // no header terminator seen; print as-is
-                }
-                ctx.exit(0)
-            }),
-
-            // wget [-O file] <url> — fetch an http:// URL and save the body to a
-            // file (default: the last path component, or `index.html`). Uses the
-            // same TCP/HTTP path as `curl`, but writes to disk instead of stdout
-            // and prints a short progress line, like the real `wget`.
-            Command(name: "wget", summary: "download an http:// URL to a file", category: .network, asyncRun: { ctx, argv in
-                var args = Array(argv.dropFirst())
-                var output: String?
-                if args.first == "-O" {
-                    args.removeFirst()
-                    guard let name = args.first else {
-                        ctx.fail("wget: option -O requires an argument"); return
-                    }
-                    output = name; args.removeFirst()
-                }
-                guard let urlString = args.first, let url = parseHTTPURL(urlString) else {
-                    ctx.usage("wget", "wget [-O file] http://<host>[:port]/path"); return
-                }
-                // Default output file: the URL's last path component, or index.html.
-                let destination = output ?? {
-                    let component = url.path.split(separator: "/").last.map(String.init) ?? ""
-                    return component.isEmpty ? "index.html" : component
-                }()
-                guard let address = await ctx.resolve(url.host) else {
-                    ctx.fail("wget: cannot resolve \(url.host)", code: 1); return
-                }
-                guard let fd = ctx.tcpSocket() else { ctx.fail("wget: socket failed", code: 1); return }
-                do {
-                    try await ctx.tcpConnect(fd, to: address, port: url.port)
-                } catch {
-                    ctx.fail("wget: connect to \(url.host):\(url.port) failed", code: 1); return
-                }
-                let request = "GET \(url.path) HTTP/1.0\r\nHost: \(url.host)\r\nConnection: close\r\n\r\n"
-                _ = ctx.tcpSend(fd, Array(request.utf8))
-                var response: [UInt8] = []
-                while let bytes = try? await ctx.tcpRecv(fd), !bytes.isEmpty {
-                    response.append(contentsOf: bytes)
-                }
-                ctx.tcpClose(fd)
-                let body = headerBodySplit(response).map { Array(response[$0...]) } ?? response
-                guard let outFD = ctx.open(destination, create: true, truncate: true) else {
-                    ctx.fail("wget: cannot write to \(destination)", code: 1); return
-                }
-                ctx.write(outFD, body)
-                ctx.close(outFD)
-                ctx.error("wget: saved \(body.count) bytes to \(destination)")
-                ctx.exit(0)
-            }),
         ]
     }
 
-    // MARK: - Helpers
+    /// A parsed `tcpdump`-style selection over packet-path event lines.
+    struct PacketPathFilter: Equatable {
+        var interface: String?
+        /// `icmp` / `tcp` / `udp` / `arp` / `ip`; all listed must match (one per
+        /// event, so more than one distinct protocol matches nothing).
+        var protocols: [String] = []
+        var hosts: [IPv4Address] = []
+        var limit: Int?
 
-    private static func runIfconfig(_ ctx: ProcessContext, _ argv: [String]) {
-        if argv.count == 1 {
-            catProcFile(ctx, cmd: "ifconfig", path: "/proc/net/dev")
-            return
-        }
-        guard argv.count == 4,
-              argv[1] == "add",
-              let (address, prefixLength) = parseCIDR(argv[2]),
-              let mac = MACAddress(argv[3]) else {
-            usage(ctx, command: "ifconfig", text: "ifconfig [add <ip>/<prefix> <mac>]")
-            return
-        }
-        ctx.configureNetwork(.addInterface(NetworkInterfaceConfiguration(address: address,
-                                                                         mac: mac,
-                                                                         prefixLength: prefixLength)))
-        ctx.exit(0)
-    }
-
-    private static func runRoute(_ ctx: ProcessContext, _ argv: [String]) {
-        if argv.count == 1 {
-            catProcFile(ctx, cmd: "route", path: "/proc/net/route",
-                        header: "destination gateway interface\n")
-            return
-        }
-        guard argv.count >= 3,
-              argv[1] == "add",
-              let route = parseRouteArguments(Array(argv.dropFirst(2)), context: ctx) else {
-            usage(ctx, command: "route", text: "route [add <cidr|default> [via <gateway>] [dev ethN]]")
-            return
-        }
-        ctx.configureNetwork(.addRoute(route))
-        ctx.exit(0)
-    }
-
-    private static func runARP(_ ctx: ProcessContext, _ argv: [String]) {
-        if argv.count == 1 {
-            catProcFile(ctx, cmd: "arp", path: "/proc/net/arp",
-                        header: "address hwaddress\n")
-            return
-        }
-        guard argv.count == 4,
-              (argv[1] == "add" || argv[1] == "-s"),
-              let ip = IPv4Address(argv[2]),
-              let mac = MACAddress(argv[3]) else {
-            usage(ctx, command: "arp", text: "arp [add <ip> <mac>]")
-            return
-        }
-        ctx.configureNetwork(.addNeighbor(NetworkNeighborConfiguration(ip: ip, mac: mac)))
-        ctx.exit(0)
-    }
-
-    private static func runIP(_ ctx: ProcessContext, _ argv: [String]) {
-        guard argv.count >= 2 else {
-            ipUsage(ctx)
-            return
-        }
-
-        switch argv[1] {
-        case "addr", "address":
-            guard argv.count >= 6,
-                  argv[2] == "add",
-                  let (address, prefixLength) = parseCIDR(argv[3]),
-                  let mac = parseLinkLayerAddress(Array(argv.dropFirst(4))) else {
-                ipUsage(ctx)
-                return
+        /// Whether one `/proc/net/trace` line
+        /// (`seq direction interface stage key=value…`) passes the filter.
+        func matches(_ line: String) -> Bool {
+            let fields = line.split(separator: " ").map(String.init)
+            guard fields.count >= 4 else { return false }
+            if let interface, interface != "any", fields[2] != interface { return false }
+            for name in protocols {
+                let token: String
+                switch name {
+                case "arp": token = "ether=arp"
+                case "ip": token = "ether=ipv4"
+                default: token = "proto=\(name)"
+                }
+                if !fields.contains(token) { return false }
             }
-            ctx.configureNetwork(.addInterface(NetworkInterfaceConfiguration(address: address,
-                                                                             mac: mac,
-                                                                             prefixLength: prefixLength)))
-            ctx.exit(0)
-
-        case "route":
-            guard argv.count >= 4,
-                  argv[2] == "add",
-                  let route = parseRouteArguments(Array(argv.dropFirst(3)), context: ctx) else {
-                ipUsage(ctx)
-                return
+            for host in hosts {
+                // The only addresses a path event carries are its route decision's.
+                let wanted = ["route=\(host)", "via=\(host)", "gateway=\(host)"]
+                if !fields.contains(where: { wanted.contains($0) }) { return false }
             }
-            ctx.configureNetwork(.addRoute(route))
-            ctx.exit(0)
-
-        case "neigh", "neighbor":
-            guard argv.count >= 6,
-                  argv[2] == "add",
-                  let neighbor = parseNeighborArguments(Array(argv.dropFirst(3))) else {
-                ipUsage(ctx)
-                return
-            }
-            ctx.configureNetwork(.addNeighbor(neighbor))
-            ctx.exit(0)
-
-        case "forwarding":
-            if argv.count == 2 {
-                let enabled = ctx.snapshotNetworkConfiguration().ipForwardingEnabled
-                ctx.print("forwarding: \(enabled ? "on" : "off")\n")
-                ctx.exit(0)
-                return
-            }
-            guard argv.count == 3, let enabled = parseSwitch(argv[2]) else {
-                ipUsage(ctx)
-                return
-            }
-            ctx.configureNetwork(.setIPForwarding(enabled))
-            ctx.print("forwarding: \(enabled ? "on" : "off")\n")
-            ctx.exit(0)
-
-        default:
-            ipUsage(ctx)
-        }
-    }
-
-    private static func parseCIDR(_ value: String) -> (address: IPv4Address, prefixLength: Int)? {
-        let parts = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2,
-              let address = IPv4Address(String(parts[0])),
-              let prefixLength = Int(parts[1]),
-              (0...32).contains(prefixLength) else { return nil }
-        return (address, prefixLength)
-    }
-
-    private static func parseRouteDestination(_ value: String) -> (address: IPv4Address, prefixLength: Int)? {
-        if value == "default" {
-            return (IPv4Address(0, 0, 0, 0), 0)
-        }
-        return parseCIDR(value)
-    }
-
-    private static func parseRouteArguments(
-        _ args: [String],
-        context: ProcessContext
-    ) -> NetworkRouteConfiguration? {
-        guard let first = args.first,
-              let destination = parseRouteDestination(first) else { return nil }
-
-        var gateway: IPv4Address?
-        var interfaceIndex = 0
-        var index = 1
-        while index < args.count {
-            switch args[index] {
-            case "via":
-                guard index + 1 < args.count,
-                      let address = IPv4Address(args[index + 1]) else { return nil }
-                gateway = address
-                index += 2
-            case "dev":
-                guard index + 1 < args.count,
-                      let parsedIndex = parseInterfaceIndex(args[index + 1], context: context) else { return nil }
-                interfaceIndex = parsedIndex
-                index += 2
-            default:
-                return nil
-            }
-        }
-
-        return NetworkRouteConfiguration(destination: destination.address,
-                                         prefixLength: destination.prefixLength,
-                                         gateway: gateway,
-                                         interfaceIndex: interfaceIndex)
-    }
-
-    private static func parseNeighborArguments(_ args: [String]) -> NetworkNeighborConfiguration? {
-        guard let first = args.first,
-              let ip = IPv4Address(first),
-              let mac = parseLinkLayerAddress(Array(args.dropFirst())) else { return nil }
-        return NetworkNeighborConfiguration(ip: ip, mac: mac)
-    }
-
-    private static func parseLinkLayerAddress(_ args: [String]) -> MACAddress? {
-        guard args.count == 2,
-              ["lladdr", "mac", "ether"].contains(args[0]) else { return nil }
-        return MACAddress(args[1])
-    }
-
-    private static func parseInterfaceIndex(_ value: String, context: ProcessContext) -> Int? {
-        if let index = context.networkInterfaceIndex(named: value) { return index }
-        guard let index = Int(value), index >= 0 else { return nil }
-        return index
-    }
-
-    private static func parseSwitch(_ value: String) -> Bool? {
-        switch value {
-        case "on", "1", "true", "yes":
             return true
-        case "off", "0", "false", "no":
-            return false
-        default:
-            return nil
         }
     }
 
-    private static func usage(_ ctx: ProcessContext, command: String, text: String) {
-        ctx.error("\(command): usage: \(text)")
-        ctx.exit(2)
+    enum PacketPathFilterError: Error, Equatable {
+        case unsupported(String)
+        case malformed(String)
     }
 
-    private static func ipUsage(_ ctx: ProcessContext) {
-        let text = """
-        ip: usage: ip addr add <ip>/<prefix> lladdr <mac>
-                  ip route add <cidr|default> [via <gateway>] [dev ethN]
-                  ip neigh add <ip> lladdr <mac>
-                  ip forwarding [on|off]
-        """
-        ctx.fail(text)
-    }
-
-    /// Print a synthetic /proc file's contents to stdout, optionally prefixed with
-    /// a friendly header line. Exits 1 if the file cannot be opened.
-    private static func catProcFile(_ ctx: ProcessContext, cmd: String, path: String, header: String? = nil) {
-        guard let fd = ctx.open(path) else {
-            ctx.fail("\(cmd): \(path) unavailable", code: 1); return
+    /// Parse the filter expression after the options: protocol words, `host IP`
+    /// and `and` joiners. `port N` is rejected explicitly — packet-path events
+    /// record no port numbers, so pretending to filter on one would lie.
+    static func parsePacketPathExpression(_ words: [String],
+                                          into filter: inout PacketPathFilter) throws(PacketPathFilterError) {
+        var index = 0
+        while index < words.count {
+            let word = words[index]
+            index += 1
+            switch word {
+            case "icmp", "tcp", "udp", "arp", "ip":
+                filter.protocols.append(word)
+            case "and":
+                continue
+            case "host", "src", "dst":
+                var target = word
+                if word != "host", index < words.count, words[index] == "host" {
+                    index += 1
+                    target = "host"
+                }
+                guard index < words.count, let address = IPv4Address(words[index]) else {
+                    throw .malformed("expected an IPv4 address after '\(target)'")
+                }
+                index += 1
+                filter.hosts.append(address)
+            case "port":
+                throw .unsupported("'port' filters are not supported: packet path events carry no port numbers")
+            case "or", "not":
+                throw .unsupported("'\(word)' is not supported in filter expressions")
+            default:
+                throw .malformed("syntax error in filter expression near '\(word)'")
+            }
         }
-        if let header { ctx.print(header) }
-        ctx.write(1, readFully(ctx, fd))
-        ctx.close(fd)
+    }
+
+    private static func runPacketPath(_ ctx: ProcessContext, _ argv: [String], command: String, path: String) {
+        let usage = networkSynopsis(command)
+        guard let items = ctx.scanOptions(argv, command: command, usage: usage,
+                                          flags: "nvqeltX", valued: "ic") else { return }
+        var filter = PacketPathFilter()
+        var words: [String] = []
+        for item in items {
+            switch item {
+            case .operand(let word):
+                words.append(word)
+            case .option("i", let value?):
+                guard value == "any" || ctx.networkInterfaceIndex(named: value) != nil else {
+                    ctx.fail("\(command): \(value): No such device exists", code: 1); return
+                }
+                filter.interface = value
+            case .option("c", let value?):
+                guard let limit = Int(value), limit > 0 else {
+                    ctx.invalidArgument(command, "invalid packet count: '\(value)'", usage: usage); return
+                }
+                filter.limit = limit
+            case .option:
+                break   // -n and the verbosity/format flags change nothing here
+            }
+        }
+        do {
+            try parsePacketPathExpression(words, into: &filter)
+        } catch {
+            switch error {
+            case .unsupported(let message): ctx.fail("\(command): \(message)", code: 1)
+            case .malformed(let message): ctx.invalidArgument(command, message, usage: usage)
+            }
+            return
+        }
+        guard let text = readTextFile(ctx, path) else {
+            ctx.fail("\(command): \(path) unavailable", code: 1); return
+        }
+        var lines = text.split(separator: "\n").map(String.init).filter(filter.matches)
+        if let limit = filter.limit { lines = Array(lines.prefix(limit)) }
+        ctx.print("seq direction interface stage details\n")
+        if !lines.isEmpty { ctx.print(lines.joined(separator: "\n") + "\n") }
         ctx.exit(0)
-    }
-
-    /// Server-side `/etc/hosts` lookup for `dnsd`: find the first entry whose
-    /// name (or an alias) matches `name`. Lines are `<ip> <name> [aliases…]`;
-    /// blank lines and `#` comments are ignored.
-    private static func hostsLookup(_ ctx: ProcessContext, name: String) -> IPv4Address? {
-        guard let fd = ctx.open("/etc/hosts") else { return nil }
-        let data = readFully(ctx, fd)
-        ctx.close(fd)
-        for rawLine in String(decoding: data, as: UTF8.self).split(separator: "\n") {
-            let line = rawLine.split(separator: "#", maxSplits: 1)[0]
-            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\r" }).map(String.init)
-            guard fields.count >= 2, let ip = IPv4Address(fields[0]) else { continue }
-            if fields.dropFirst().contains(name) { return ip }
-        }
-        return nil
-    }
-
-    /// Parse an `http://<host>[:port]/path` URL. `host` may be a name (resolved
-    /// later) or an IPv4 literal. Defaults: port 80, path "/".
-    static func parseHTTPURL(_ string: String) -> (host: String, port: UInt16, path: String)? {
-        var rest = Substring(string)
-        if rest.hasPrefix("http://") { rest = rest.dropFirst("http://".count) }
-        // Split authority from path at the first "/".
-        let authority: Substring
-        let path: String
-        if let slash = rest.firstIndex(of: "/") {
-            authority = rest[rest.startIndex..<slash]
-            path = String(rest[slash...])
-        } else {
-            authority = rest
-            path = "/"
-        }
-        // Split host from optional ":port".
-        let host: String
-        var port: UInt16 = 80
-        if let colon = authority.firstIndex(of: ":") {
-            host = String(authority[authority.startIndex..<colon])
-            guard let p = UInt16(authority[authority.index(after: colon)...]) else { return nil }
-            port = p
-        } else {
-            host = String(authority)
-        }
-        guard !host.isEmpty else { return nil }
-        return (host, port, path)
-    }
-
-    /// Index of the response body: the byte just past the first CRLFCRLF header
-    /// terminator, or `nil` if none is present.
-    static func headerBodySplit(_ response: [UInt8]) -> Int? {
-        let terminator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]   // \r\n\r\n
-        guard response.count >= terminator.count else { return nil }
-        for start in 0...(response.count - terminator.count)
-        where Array(response[start..<start + terminator.count]) == terminator {
-            return start + terminator.count
-        }
-        return nil
     }
 }

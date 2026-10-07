@@ -25,8 +25,14 @@ final class SignalDispatcher {
 
     /// Deliver a signal. Masked regular signals are queued pending; SIGKILL
     /// always terminates; SIGCONT always resumes a stopped process.
-    func kill(_ pid: PID, signal: Int32) {
+    ///
+    /// `sender` is the guest process that issued the `kill`, or `nil` for a
+    /// signal raised with host authority (the public `Kernel` API, terminal
+    /// job-control keys, kernel-generated SIGCHLD/SIGPIPE). Guest signals are
+    /// subject to the PID-1 protection in `initDiscards`; host signals never are.
+    func kill(_ pid: PID, signal: Int32, sender: Process? = nil) {
         guard let process = processTable.process(pid), process.isLive else { return }
+        if let sender, initDiscards(signal, target: process, sender: sender) { return }
         if signal == Signal.sigcont.rawValue {
             let didContinue = resumeStopped(process)
             if isSignalBlocked(signal, in: process) {
@@ -78,6 +84,30 @@ final class SignalDispatcher {
             delivered = true
         }
         return delivered
+    }
+
+    /// Linux protects a PID namespace's init (its local pid 1): a signal sent
+    /// by a process is dropped unless init installed a handler for it.
+    ///
+    /// - From inside the namespace (the sender is in init's namespace or one
+    ///   nested below it) this covers SIGKILL and SIGSTOP too, so `kill -9 1`
+    ///   cannot take down the session it is typed into.
+    /// - From an ancestor namespace only SIGKILL and SIGSTOP are forced through;
+    ///   other signals still need a handler.
+    ///
+    /// SIGCONT is exempt: its resume effect is not a disposition and is always
+    /// applied.
+    private func initDiscards(_ signal: Int32, target: Process, sender: Process) -> Bool {
+        guard let namespace = target.pidNamespace,
+              namespace.localPID(forGlobal: target.pid) == 1,
+              signal != Signal.sigcont.rawValue else { return false }
+        let uncatchable = Self.unmaskableSignals.contains(signal)
+        // `contains(global:)` is true for members of this namespace and of every
+        // namespace nested below it.
+        if namespace.contains(global: sender.pid) {
+            return uncatchable || target.signalHandlers[signal] == nil
+        }
+        return !uncatchable && target.signalHandlers[signal] == nil
     }
 
     private static func isMaskableSignal(_ signal: Int32) -> Bool {
