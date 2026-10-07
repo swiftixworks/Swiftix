@@ -11,18 +11,18 @@ final class VirtualFileSystem {
     /// Set by the kernel at construction.
     var clock: () -> Double = { 0 }
 
-    /// Total number of VFS nodes (files + directories + symlinks), computed
-    /// recursively. Used by resource accounting. Counts all nodes including
-    /// synthetic (procfs) ones — they are still VFS nodes even if their content
-    /// is computed.
+    /// Total number of VFS nodes (files + directories + symlinks). Used by
+    /// resource accounting. Counts all nodes including synthetic (procfs) ones —
+    /// they are still VFS nodes even if their content is computed.
+    ///
+    /// Like every whole-tree helper here, the walk keeps its own worklist
+    /// instead of recursing, so its stack use does not grow with tree depth.
     var nodeCount: Int {
-        countNodes(root)
-    }
-
-    private func countNodes(_ node: VNode) -> Int {
-        var count = 1
-        for child in node.children.values {
-            count += countNodes(child)
+        var count = 0
+        var pending = [root]
+        while let node = pending.popLast() {
+            count += 1
+            pending.append(contentsOf: node.children.values)
         }
         return count
     }
@@ -32,13 +32,13 @@ final class VirtualFileSystem {
     /// what `free`/`df` compute. Synthetic (procfs) files are excluded — their
     /// content is computed on read, not stored.
     var totalFileBytes: Int {
-        func sum(_ node: VNode) -> Int {
-            var bytes = 0
+        var bytes = 0
+        var pending = [root]
+        while let node = pending.popLast() {
             if node.kind == .file, node.provider == nil { bytes += node.fileContents.count }
-            for child in node.children.values { bytes += sum(child) }
-            return bytes
+            pending.append(contentsOf: node.children.values)
         }
-        return sum(root)
+        return bytes
     }
 
     /// Maximum symlink hops before giving up (POSIX `ELOOP`), guarding against
@@ -257,9 +257,10 @@ final class VirtualFileSystem {
     }
 
     private func contains(_ root: VNode, node candidate: VNode) -> Bool {
-        if root === candidate { return true }
-        for child in root.children.values where contains(child, node: candidate) {
-            return true
+        var pending = [root]
+        while let node = pending.popLast() {
+            if node === candidate { return true }
+            pending.append(contentsOf: node.children.values)
         }
         return false
     }

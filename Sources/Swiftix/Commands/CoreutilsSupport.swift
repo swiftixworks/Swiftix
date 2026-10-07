@@ -5,22 +5,25 @@ extension BuiltinCommands {
 
     // MARK: - Shared helpers
 
-    /// Sum the bytes of every regular file under `path` (recursively). Synthetic
-    /// `/proc` is skipped by default so `df`/`free` report real disk content, not
-    /// computed procfs sizes.
+    /// Sum the bytes of every regular file under `path` (the whole subtree,
+    /// walked on an explicit worklist). Synthetic `/proc` is skipped by default
+    /// so `df`/`free` report real disk content, not computed procfs sizes.
     static func totalFileBytes(_ ctx: ProcessContext, under path: String, skipProc: Bool = true) -> Int64 {
         guard let entries = ctx.listDirectory(path) else {
             return Int64(ctx.stat(path)?.size ?? 0)
         }
         var total: Int64 = 0
-        for entry in entries {
-            let name = entry.hasSuffix("/") ? String(entry.dropLast()) : entry
-            let child = path == "/" ? "/" + name : path + "/" + name
-            if skipProc, child == "/proc" { continue }
-            if entry.hasSuffix("/") {
-                total += totalFileBytes(ctx, under: child, skipProc: skipProc)
-            } else {
-                total += Int64(ctx.stat(child)?.size ?? 0)
+        var pending = [(path: path, entries: entries)]
+        while let (path, entries) = pending.popLast() {
+            for entry in entries {
+                let name = entry.hasSuffix("/") ? String(entry.dropLast()) : entry
+                let child = path == "/" ? "/" + name : path + "/" + name
+                if skipProc, child == "/proc" { continue }
+                if entry.hasSuffix("/"), let listing = ctx.listDirectory(child) {
+                    pending.append((child, listing))
+                } else {
+                    total += Int64(ctx.stat(child)?.size ?? 0)
+                }
             }
         }
         return total

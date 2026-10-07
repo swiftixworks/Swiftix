@@ -6,7 +6,7 @@
 | --- | ---: | --- |
 | Swiftix package | 0.12.0 | Each pre-1.0 minor may break API; patches preserve their minor series |
 | Teaching procfs schema | 1 | Exact schema; independently packaged diagnostic tools must be rebuilt after a bump |
-| Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore |
+| Filesystem snapshot | 2 | Current writer emits v2; unsupported versions fail before restore. The legacy `root` projection is written to at most 256 directory levels (`legacyProjectionDepthLimit`); deeper levels are in the inode table only |
 | Rootfs image | 1 | Exact format; digest, target and resource limits validated |
 | Swiftix Go image / ABI | 10 / 10 | Exact format and ABI required before VM allocation |
 | `.pkg` archive | 2 | v1 is rejected; v2 is deterministic and bounded |

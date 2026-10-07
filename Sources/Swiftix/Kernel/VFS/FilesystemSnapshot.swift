@@ -7,6 +7,14 @@
 /// as a compatibility projection so archives written by older Swiftix releases
 /// still decode and older consumers can ignore the additive v2 keys.
 ///
+/// The inode table is flat, so it represents a tree of any depth. The legacy
+/// projection is a recursive value: the compiler-generated code that compares,
+/// encodes, and releases it uses one stack frame group per directory level. A
+/// capture therefore bounds the projection at `legacyProjectionDepthLimit`;
+/// deeper directories are present in full in the inode table only. Everything
+/// in this file that walks a whole tree keeps an explicit worklist rather than
+/// recursing, so directory depth never becomes host stack depth.
+///
 /// Only real (tmpfs) content is captured. Synthetic files and device nodes are
 /// re-created by the kernel after restore and are never persisted.
 public struct FilesystemSnapshot: Sendable, Codable, Equatable {
@@ -82,6 +90,13 @@ public struct FilesystemSnapshot: Sendable, Codable, Equatable {
     /// Current inode-table format. Optional on the value so root-only legacy
     /// archives decode without migration.
     public static let currentFormatVersion = 2
+
+    /// Deepest directory level the legacy `root` projection of a capture
+    /// describes, counting the root as level 0. A directory at this level is
+    /// projected as empty; its contents live in `inodes` only. Restoring from
+    /// the inode table is unaffected, so only a consumer that reads `root` alone
+    /// loses the levels below.
+    public static let legacyProjectionDepthLimit = 256
 
     /// The root directory ("/") in the legacy/source-compatible projection.
     public var root: Node
@@ -178,6 +193,8 @@ fileprivate extension FilesystemSnapshot {
 
         var reachable = Set<UInt64>()
         var visitingDirectories = Set<UInt64>()
+        // Directories whose entries are still being visited, innermost last.
+        var open: [(id: UInt64, entries: [DirectoryEntry], next: Int)] = []
         func visit(_ id: UInt64) -> Bool {
             guard let inode = records[id] else { return false }
             if reachable.contains(id) {
@@ -194,14 +211,23 @@ fileprivate extension FilesystemSnapshot {
             reachable.insert(id)
             guard case let .directory(entries) = inode.contents else { return true }
             guard visitingDirectories.insert(id).inserted else { return false }
-            for entry in entries where !visit(entry.inodeID) { return false }
-            visitingDirectories.remove(id)
+            open.append((id, entries, 0))
             return true
         }
 
-        guard visit(rootID), reachable.count == records.count,
-              let projectedRoot = Self.project(rootID, records: records),
-              projectedRoot == root else { return nil }
+        guard visit(rootID) else { return nil }
+        while let directory = open.last {
+            if directory.next < directory.entries.count {
+                open[open.count - 1].next += 1
+                guard visit(directory.entries[directory.next].inodeID) else { return nil }
+            } else {
+                visitingDirectories.remove(directory.id)
+                open.removeLast()
+            }
+        }
+
+        guard reachable.count == records.count,
+              Self.legacyRoot(root, agreesWith: rootID, records: records) else { return nil }
 
         return ValidatedFilesystemSnapshot(storage: .inodeTable(
             rootID: rootID,
@@ -215,10 +241,12 @@ fileprivate extension FilesystemSnapshot {
     }
 
     static func validateLegacyChildren(_ children: [String: Node]) -> Bool {
-        for (name, node) in children {
-            guard isValidEntryName(name) else { return false }
-            if case let .directory(descendants) = node,
-               !validateLegacyChildren(descendants) { return false }
+        var pending = [children]
+        while let children = pending.popLast() {
+            for (name, node) in children {
+                guard isValidEntryName(name) else { return false }
+                if case let .directory(descendants) = node { pending.append(descendants) }
+            }
         }
         return true
     }
@@ -228,13 +256,51 @@ fileprivate extension FilesystemSnapshot {
             && !name.contains("/") && !name.contains("\0")
     }
 
-    static func project(_ id: UInt64, records: [UInt64: Inode]) -> Node? {
+    /// Whether the legacy tree is the path projection of the inode graph. A
+    /// directory at or below `legacyProjectionDepthLimit` may be projected as
+    /// empty (what a capture writes); a full projection, as written by releases
+    /// that did not bound it, is accepted at any depth.
+    static func legacyRoot(_ root: Node,
+                           agreesWith rootID: UInt64,
+                           records: [UInt64: Inode]) -> Bool {
+        var pending: [(node: Node, id: UInt64, depth: Int)] = [(root, rootID, 0)]
+        while let (node, id, depth) = pending.popLast() {
+            guard let inode = records[id] else { return false }
+            switch (node, inode.contents) {
+            case let (.directory(children), .directory(entries)):
+                if children.isEmpty, depth >= legacyProjectionDepthLimit { continue }
+                guard children.count == entries.count else { return false }
+                for entry in entries {
+                    guard let child = children[entry.name] else { return false }
+                    pending.append((child, entry.inodeID, depth + 1))
+                }
+            case let (.file(projected), .file(bytes)):
+                guard projected == bytes else { return false }
+            case let (.symlink(projected), .symlink(target)):
+                guard projected == target else { return false }
+            case (.fifo, .fifo):
+                break
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// The legacy path projection of the inode graph, cut off at
+    /// `legacyProjectionDepthLimit`. The bound is what keeps this recursion,
+    /// and every later use of the recursive `Node` value, within a fixed stack
+    /// budget.
+    static func project(_ id: UInt64, records: [UInt64: Inode], depth: Int = 0) -> Node? {
         guard let inode = records[id] else { return nil }
         switch inode.contents {
         case let .directory(entries):
             var children: [String: Node] = [:]
+            guard depth < legacyProjectionDepthLimit else { return .directory(children: children) }
             for entry in entries {
-                guard let child = project(entry.inodeID, records: records) else { return nil }
+                guard let child = project(entry.inodeID, records: records, depth: depth + 1) else {
+                    return nil
+                }
                 children[entry.name] = child
             }
             return .directory(children: children)
@@ -258,31 +324,18 @@ extension VirtualFileSystem {
         var records: [UInt64: FilesystemSnapshot.Inode] = [:]
         var nextID: UInt64 = 1
 
-        func capture(_ node: VNode) -> UInt64 {
-            let identity = ObjectIdentifier(node)
-            if let existing = inodeIDs[identity] { return existing }
+        // Directories whose children are still being captured, innermost last.
+        // IDs are assigned on first visit, in sorted depth-first order.
+        struct OpenDirectory {
+            let node: VNode
+            let id: UInt64
+            let names: [String]
+            var next = 0
+            var entries: [FilesystemSnapshot.DirectoryEntry] = []
+        }
+        var open: [OpenDirectory] = []
 
-            let id = nextID
-            nextID += 1
-            inodeIDs[identity] = id
-
-            let contents: FilesystemSnapshot.InodeContents
-            switch node.kind {
-            case .directory:
-                var entries: [FilesystemSnapshot.DirectoryEntry] = []
-                for name in node.children.keys.sorted() {
-                    guard let child = node.children[name], shouldPersist(child) else { continue }
-                    entries.append(.init(name: name, inodeID: capture(child)))
-                }
-                contents = .directory(entries: entries)
-            case .file:
-                contents = .file(bytes: node.fileContents)
-            case .symlink:
-                contents = .symlink(target: node.linkTarget)
-            case .fifo:
-                contents = .fifo
-            }
-
+        func record(_ node: VNode, id: UInt64, contents: FilesystemSnapshot.InodeContents) {
             let metadata = FilesystemSnapshot.Metadata(
                 mode: node.mode.rawValue,
                 uid: node.uid,
@@ -291,10 +344,45 @@ extension VirtualFileSystem {
                 mtime: node.mtime,
                 ctime: node.ctime)
             records[id] = .init(id: id, metadata: metadata, contents: contents)
+        }
+
+        /// Assign `node` its inode ID. A directory is left open for the loop
+        /// below to fill in; anything else is recorded at once.
+        func capture(_ node: VNode) -> UInt64 {
+            let identity = ObjectIdentifier(node)
+            if let existing = inodeIDs[identity] { return existing }
+
+            let id = nextID
+            nextID += 1
+            inodeIDs[identity] = id
+
+            switch node.kind {
+            case .directory:
+                open.append(OpenDirectory(node: node, id: id, names: node.children.keys.sorted()))
+            case .file:
+                record(node, id: id, contents: .file(bytes: node.fileContents))
+            case .symlink:
+                record(node, id: id, contents: .symlink(target: node.linkTarget))
+            case .fifo:
+                record(node, id: id, contents: .fifo)
+            }
             return id
         }
 
         let rootID = capture(root)
+        while let directory = open.last {
+            let top = open.count - 1
+            guard directory.next < directory.names.count else {
+                record(directory.node, id: directory.id, contents: .directory(entries: directory.entries))
+                open.removeLast()
+                continue
+            }
+            open[top].next += 1
+            let name = directory.names[directory.next]
+            guard let child = directory.node.children[name], shouldPersist(child) else { continue }
+            let childID = capture(child)
+            open[top].entries.append(.init(name: name, inodeID: childID))
+        }
         let orderedRecords = records.keys.sorted().compactMap { records[$0] }
         let legacyRoot = FilesystemSnapshot.project(rootID, records: records)
             ?? .directory(children: [:])
@@ -327,8 +415,9 @@ extension VirtualFileSystem {
               case let .inodeTable(rootID, records, _) = validated.storage else { return }
 
         var visited = Set<ObjectIdentifier>()
-        func apply(_ id: UInt64, to node: VNode) {
-            guard let record = records[id] else { return }
+        var pending: [(id: UInt64, node: VNode)] = [(rootID, root)]
+        while let (id, node) = pending.popLast() {
+            guard let record = records[id] else { continue }
             let identity = ObjectIdentifier(node)
             if visited.insert(identity).inserted {
                 node.mode = FileMode(rawValue: record.metadata.mode)
@@ -338,13 +427,12 @@ extension VirtualFileSystem {
                 node.mtime = record.metadata.mtime
                 node.ctime = record.metadata.ctime
             }
-            guard case let .directory(entries) = record.contents else { return }
+            guard case let .directory(entries) = record.contents else { continue }
             for entry in entries {
                 guard let child = node.child(entry.name) else { continue }
-                apply(entry.inodeID, to: child)
+                pending.append((entry.inodeID, child))
             }
         }
-        apply(rootID, to: root)
     }
 
     private func buildCandidate(from snapshot: ValidatedFilesystemSnapshot) -> VNode? {
@@ -403,25 +491,31 @@ extension VirtualFileSystem {
     }
 
     private func buildLegacyNode(name: String, from node: FilesystemSnapshot.Node) -> VNode? {
-        switch node {
-        case let .directory(children):
-            let directory = VNode(directory: name)
-            for childName in children.keys.sorted() {
-                guard let childSnapshot = children[childName],
-                      let child = buildLegacyNode(name: childName, from: childSnapshot) else {
-                    return nil
-                }
-                directory.addChild(name: childName, node: child)
+        // Directories whose children are still to be built.
+        var pending: [(directory: VNode, children: [String: FilesystemSnapshot.Node])] = []
+        func build(_ name: String, _ node: FilesystemSnapshot.Node) -> VNode {
+            switch node {
+            case let .directory(children):
+                let directory = VNode(directory: name)
+                pending.append((directory, children))
+                return directory
+            case let .file(bytes):
+                let file = VNode(file: name)
+                file.setFileContents(bytes)
+                return file
+            case let .symlink(target):
+                return VNode(symlink: name, target: target)
+            case .fifo:
+                return VNode(fifo: name)
             }
-            return directory
-        case let .file(bytes):
-            let file = VNode(file: name)
-            file.setFileContents(bytes)
-            return file
-        case let .symlink(target):
-            return VNode(symlink: name, target: target)
-        case .fifo:
-            return VNode(fifo: name)
         }
+
+        let root = build(name, node)
+        while let (directory, children) = pending.popLast() {
+            for (childName, child) in children {
+                directory.addChild(name: childName, node: build(childName, child))
+            }
+        }
+        return root
     }
 }

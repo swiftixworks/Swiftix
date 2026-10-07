@@ -133,6 +133,26 @@ final class VNode {
         self.nlink = 1
     }
 
+    /// Release the subtree without recursion. Dropping `children` implicitly
+    /// would destroy each child from inside its parent's deinitializer, one
+    /// stack frame group per directory level, so a deep enough tree (which a
+    /// guest can build with `mkdir -p`) would overflow the host stack. Instead,
+    /// every descendant this node is the last owner of is moved onto an
+    /// explicit worklist and emptied before it is released, so each nested
+    /// deinitializer finds no children and returns at once. A node that is
+    /// still referenced elsewhere (a hard-linked file, an open or mounted
+    /// directory) is left intact; its last owner drains it the same way.
+    deinit {
+        guard !children.isEmpty else { return }
+        var pending = Array(children.values)
+        children = [:]
+        while var node = pending.popLast() {
+            guard isKnownUniquelyReferenced(&node), !node.children.isEmpty else { continue }
+            pending.append(contentsOf: node.children.values)
+            node.children = [:]
+        }
+    }
+
     func child(_ name: String) -> VNode? {
         children[name]
     }
