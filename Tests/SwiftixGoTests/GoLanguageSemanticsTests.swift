@@ -512,4 +512,24 @@ struct GoLanguageSemanticsTests: GoTestHarness {
 
         #expect(output == "6\n")
     }
+
+    @Test func blankIdentifierMayRepeatInAMultiValueDeclaration() throws {
+        let executable = try GoCompiler.compile(sources: [
+            GoSourceFile(path: "main.go", text: """
+                package main
+                import "fmt"
+                func three() (int, string, int) {
+                    return 1, "two", 3
+                }
+                func main() {
+                    _, _, last := three()
+                    _, middle, _ := three()
+                    fmt.Println(last, middle)
+                }
+                """)
+        ])
+        var output = ""
+        try GoVirtualMachine().run(executable) { output += $0 }
+        #expect(output == "3 two\n")
+    }
 }

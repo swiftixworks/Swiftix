@@ -29,12 +29,240 @@ public enum GoCompiler {
         try compile(sources: sources, importedPackages: [:])
     }
 
+    /// Compiles the package `root` together with every local package it
+    /// imports, directly or transitively, into one executable.
+    ///
+    /// `packages` holds the sources of each local package by import path; any
+    /// that `root` does not reach are ignored. Packages initialize dependencies
+    /// first, each exactly once: package-level variables, then `init`
+    /// functions. Cross-package references compile to the same code as
+    /// in-package ones.
+    public static func compile(
+        packages: [GoPackageSource],
+        root: String
+    ) throws -> GoExecutable {
+        let module = try GoModuleLinker.link(packages: packages, root: root)
+        do {
+            return try compile(
+                units: module.units,
+                fallbackPath: module.units.last?.files.first?.path ?? "<input>")
+        } catch let diagnostic as GoDiagnostic {
+            throw module.demangle(diagnostic)
+        }
+    }
+
+    /// Compiles the package `root`, asking `sources` for the files of each
+    /// local package the build reaches.
+    ///
+    /// `sources` is called once per imported path that is not a package the
+    /// runtime provides, and returns nil when it has no such package, which
+    /// is then reported as unavailable at the import that names it.
+    public static func compile(
+        root: String,
+        sources: (_ importPath: String) throws -> [GoSourceFile]?
+    ) throws -> GoExecutable {
+        var packages: [GoPackageSource] = []
+        var requested: Set<String> = [root]
+        var pending = [root]
+        while let importPath = pending.popLast() {
+            guard let files = try sources(importPath) else { continue }
+            packages.append(GoPackageSource(importPath: importPath, sources: files))
+            guard packages.count <= GoModuleLinker.maximumPackages else { break }
+            let imports = try files.flatMap { try GoParser.parse($0).imports.map(\.path) }
+            for dependency in imports.sorted().reversed()
+            where !GoStandardLibrary.supportedPackages.contains(dependency)
+                && requested.insert(dependency).inserted
+            {
+                pending.append(dependency)
+            }
+        }
+        return try compile(packages: packages, root: root)
+    }
+
+    /// Lowers linked units, in initialization order, into one executable. A
+    /// single-package program is one unit.
+    private static func compile(
+        units: [GoLinkedUnit],
+        fallbackPath: String
+    ) throws -> GoExecutable {
+        let files = units.flatMap(\.files)
+        let package = try GoTypeChecker.check(files)
+        guard package.name == "main" else {
+            let position =
+                files.first?.functions.first?.position
+                ?? GoSourcePosition(path: fallbackPath, offset: 0, line: 1, column: 1)
+            throw GoDiagnostic(position: position, message: "go run requires package main")
+        }
+        var functions = files.flatMap(\.functions)
+        functions.append(contentsOf: runtimeLiteralFunctions(in: functions))
+        guard functions.contains(where: { $0.name == "main" }) else {
+            let position = GoSourcePosition(path: fallbackPath, offset: 0, line: 1, column: 1)
+            throw GoDiagnostic(position: position, message: "function main is undeclared in the main package")
+        }
+
+        let globals = files.flatMap(\.globalDeclarations)
+        let globalInfos = Dictionary(
+            uniqueKeysWithValues: globals.enumerated().map { index, declaration in
+                (
+                    declaration.name,
+                    GlobalInfo(
+                        index: index,
+                        type: package.globalTypes[declaration.name] ?? .void)
+                )
+            })
+        let functionReturnCounts = Dictionary(
+            uniqueKeysWithValues: functions.compactMap {
+                $0.receiver == nil && $0.name != "init"
+                    ? ($0.name, $0.resultTypes.count)
+                    : nil
+            })
+        let functionResultTypes = Dictionary(
+            uniqueKeysWithValues: functions.compactMap { function -> (String, [GoType])? in
+                guard function.receiver == nil, !function.resultTypes.isEmpty else {
+                    return nil
+                }
+                return (function.name, function.resultTypes.map(compilerResolve))
+            })
+        let functionParameterTypes = Dictionary(
+            uniqueKeysWithValues: functions.compactMap { function -> (String, [GoType])? in
+                guard function.receiver == nil, function.name != "init" else {
+                    return nil
+                }
+                return (function.name, function.parameters.map { compilerResolve($0.type) })
+            })
+        let methodInfos = Dictionary(
+            uniqueKeysWithValues: functions.compactMap { function -> (String, MethodInfo)? in
+                guard let receiver = function.receiver,
+                    let identity = receiverIdentity(compilerResolve(receiver.type))
+                else { return nil }
+                let key = methodKey(
+                    baseName: identity.baseName,
+                    pointer: identity.isPointer,
+                    method: function.name)
+                return (
+                    key,
+                    MethodInfo(
+                        functionName: key,
+                        receiverType: compilerResolve(receiver.type),
+                        resultTypes: function.resultTypes.map(compilerResolve))
+                )
+            })
+        var initIndex = 0
+        let compiledFunctionNames = functions.map { function -> String in
+            if function.name == "init", function.receiver == nil {
+                defer { initIndex += 1 }
+                return "$init.\(initIndex)"
+            }
+            if let receiver = function.receiver,
+                let identity = receiverIdentity(compilerResolve(receiver.type))
+            {
+                return methodKey(
+                    baseName: identity.baseName,
+                    pointer: identity.isPointer,
+                    method: function.name)
+            }
+            return function.name
+        }
+        var nativeWrappers: [String: GoIRFunction] = [:]
+        var loweredFunctions = try zip(functions, compiledFunctionNames).map { function, name in
+            var lowerer = IRLowerer(
+                functionReturnCounts: functionReturnCounts,
+                functionResultTypes: functionResultTypes,
+                functionParameterTypes: functionParameterTypes,
+                methodInfos: methodInfos,
+                typeDefinitions: package.typeDefinitions,
+                globalInfos: globalInfos,
+                functionSymbolNames: [:])
+            let lowered = try lowerer.lower(function, compiledName: name)
+            nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
+            return lowered
+        }
+        loweredFunctions.append(
+            contentsOf: nativeWrappers.values.sorted { $0.name < $1.name })
+
+        // Each unit initializes its package-level variables in dependency
+        // order and then runs its `init` functions, after every unit it
+        // imports has done both.
+        var initializers: [String] = []
+        var globalInitializers: [GoIRFunction] = []
+        var functionCursor = 0
+        for unit in units {
+            let unitGlobals = unit.files.flatMap(\.globalDeclarations)
+            if !unitGlobals.isEmpty {
+                var lowerer = IRLowerer(
+                    functionReturnCounts: functionReturnCounts,
+                    functionResultTypes: functionResultTypes,
+                    functionParameterTypes: functionParameterTypes,
+                    methodInfos: methodInfos,
+                    typeDefinitions: package.typeDefinitions,
+                    globalInfos: globalInfos,
+                    functionSymbolNames: [:])
+                globalInitializers.append(
+                    try lowerer.lowerGlobals(
+                        try orderedGlobals(
+                            unitGlobals,
+                            functions: functions,
+                            globalTypes: package.globalTypes,
+                            typeDefinitions: package.typeDefinitions),
+                        name: unit.initializerName))
+                initializers.append(unit.initializerName)
+            }
+            let unitFunctionCount = unit.files.reduce(0) { $0 + $1.functions.count }
+            for index in functionCursor..<(functionCursor + unitFunctionCount)
+            where functions[index].name == "init" && functions[index].receiver == nil {
+                initializers.append(compiledFunctionNames[index])
+            }
+            functionCursor += unitFunctionCount
+        }
+        loweredFunctions.insert(contentsOf: globalInitializers, at: 0)
+
+        // Native error values have the dynamic type name `error`; give them
+        // the method that interface dispatch looks up for `err.Error()`.
+        let callsErrorMethod = loweredFunctions.contains { function in
+            function.operations.contains { operation in
+                if case .callInterface("Error", _, let arguments, _) = operation {
+                    return arguments.isEmpty
+                }
+                return false
+            }
+        }
+        if callsErrorMethod,
+            !loweredFunctions.contains(where: { $0.name == GoPredeclared.nativeErrorMethod })
+        {
+            loweredFunctions.append(
+                GoIRFunction(
+                    name: GoPredeclared.nativeErrorMethod,
+                    parameterCount: 1,
+                    returnCount: 1,
+                    registerCount: 1,
+                    operations: [.returnValues(sources: [0])]))
+        }
+
+        let program = try GoSinglePackageLinker.link(
+            entryPoint: "main",
+            initializers: initializers,
+            globalCount: globals.count,
+            functions: loweredFunctions)
+        return BytecodeEmitter.emit(program)
+    }
+
+    /// Links `sources` against separately compiled packages. This older path
+    /// resolves only single-result functions of an imported package; module
+    /// builds use ``compile(packages:root:)``.
     public static func compile(
         sources: [GoSourceFile],
         importedPackages: [String: GoCompiledPackage],
         packageOrder: [String] = []
     ) throws -> GoExecutable {
         let files = try sources.map(GoParser.parse)
+        if importedPackages.isEmpty {
+            return try compile(
+                units: [
+                    GoLinkedUnit(
+                        importPath: "main", initializerName: "$package.init", files: files)
+                ],
+                fallbackPath: sources.first?.path ?? "<input>")
+        }
         let availablePackageExports = Dictionary(
             uniqueKeysWithValues: importedPackages.map { ($0.key, $0.value.export) })
         let package = try GoTypeChecker.check(files, availablePackages: availablePackageExports)
@@ -134,6 +362,7 @@ public enum GoCompiler {
             }
             return function.name
         }
+        var nativeWrappers: [String: GoIRFunction] = [:]
         var loweredFunctions = try zip(functions, compiledFunctionNames).map { function, name in
             var lowerer = IRLowerer(
                 functionReturnCounts: functionReturnCountsMerged,
@@ -143,8 +372,12 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: [:])
-            return try lowerer.lower(function, compiledName: name)
+            let lowered = try lowerer.lower(function, compiledName: name)
+            nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
+            return lowered
         }
+        loweredFunctions.append(
+            contentsOf: nativeWrappers.values.sorted { $0.name < $1.name })
         var initializers: [String] = []
         if !globals.isEmpty {
             var lowerer = IRLowerer(
@@ -180,6 +413,35 @@ public enum GoCompiler {
             for function in pkg.functions {
                 externalSymbols.insert(function.name)
             }
+        }
+
+        // Native error values have the dynamic type name `error`; give them
+        // the method that interface dispatch looks up for `err.Error()`.
+        let callsErrorMethod =
+            loweredFunctions.contains { function in
+                function.operations.contains { operation in
+                    if case .callInterface("Error", _, let arguments, _) = operation {
+                        return arguments.isEmpty
+                    }
+                    return false
+                }
+            }
+            || orderedPackages.contains { package in
+                package.functions.contains {
+                    $0.instructions.contains(.callInterface("Error", argumentCount: 0))
+                }
+            }
+        if callsErrorMethod,
+            !externalSymbols.contains(GoPredeclared.nativeErrorMethod),
+            !loweredFunctions.contains(where: { $0.name == GoPredeclared.nativeErrorMethod })
+        {
+            loweredFunctions.append(
+                GoIRFunction(
+                    name: GoPredeclared.nativeErrorMethod,
+                    parameterCount: 1,
+                    returnCount: 1,
+                    registerCount: 1,
+                    operations: [.returnValues(sources: [0])]))
         }
 
         let program = try GoSinglePackageLinker.link(
@@ -277,6 +539,7 @@ public enum GoCompiler {
                 return (function.name, pkgName + "." + function.name)
             })
 
+        var nativeWrappers: [String: GoIRFunction] = [:]
         var loweredFunctions = try zip(functions, compiledFunctionNames).map { function, name in
             var lowerer = IRLowerer(
                 functionReturnCounts: functionReturnCounts,
@@ -286,8 +549,13 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: functionSymbolNames)
-            return try lowerer.lower(function, compiledName: name)
+            lowerer.wrapperNamespace = pkgName
+            let lowered = try lowerer.lower(function, compiledName: name)
+            nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
+            return lowered
         }
+        loweredFunctions.append(
+            contentsOf: nativeWrappers.values.sorted { $0.name < $1.name })
 
         var pkgInitializers: [String] = []
         if !globals.isEmpty {
@@ -370,7 +638,7 @@ private func compilerResolve(_ expression: GoTypeExpression) -> GoType {
         case "any": return .interface([])
         case "error": return compilerErrorType()
         case "testing.T": return .named("testing.T")
-        default: return .named(name)
+        default: return GoPredeclared.namedType(name) ?? .named(name)
         }
     case .structure(let fields, _):
         return .structure(
@@ -938,7 +1206,7 @@ private struct PackageDependencyAnalyzer {
             guard let baseType = type(of: base, localTypes: localTypes) else { return nil }
             switch underlying(baseType) {
             case .array(_, let element), .slice(let element): return element
-            case .string: return .int
+            case .string: return GoPredeclared.byte
             default: return nil
             }
         case .slicing(let base, _, _, _):
@@ -1007,9 +1275,10 @@ private struct PackageDependencyAnalyzer {
         var visited: Set<String> = []
         while case .named(let name) = current,
             visited.insert(name).inserted,
-            let definition = typeDefinitions[name]
+            let definition = typeDefinitions[name]?.underlying
+                ?? GoPredeclared.underlying(of: name)
         {
-            current = definition.underlying
+            current = definition
         }
         return current
     }
@@ -1031,6 +1300,10 @@ private struct IRLowerer {
     var continueLabels: [Int] = []
     var testAbortLabels: [Int] = []
     var resultRegisters: [Int] = []
+    /// Distinguishes the wrappers of separately compiled packages.
+    var wrapperNamespace = "main"
+    /// Functions synthesized for `go`/`defer` of a native library call.
+    var nativeWrappers: [String: GoIRFunction] = [:]
 
     mutating func lower(
         _ function: GoFunctionDeclaration,
@@ -1291,7 +1564,7 @@ private struct IRLowerer {
                     operator: incrementOperator == .increment ? .add : .subtract,
                     left: current,
                     right: one))
-            try store(result, to: target)
+            try store(wrapByte(result, type: try? type(of: target)), to: target)
 
         case .expression(let expression):
             try lowerExpressionStatement(expression)
@@ -1303,6 +1576,12 @@ private struct IRLowerer {
                 } else {
                     operations.append(.returnValues(sources: resultRegisters))
                 }
+            } else if values.count == 1, resultRegisters.count > 1,
+                case .call(let callee, let arguments, _) = values[0],
+                let results = try lowerMultiReturnCall(callee: callee, arguments: arguments)
+            {
+                // `return f()` forwards every result of a multi-result call.
+                operations.append(.returnValues(sources: results))
             } else {
                 let sources = try values.map { try lower($0) }
                 operations.append(.returnValues(sources: sources))
@@ -1324,7 +1603,10 @@ private struct IRLowerer {
             guard case .call(let callee, let arguments, _) = expression else {
                 throw GoDiagnostic(position: position, message: "defer requires function call")
             }
-            if case .identifier(let functionName, _) = callee {
+            if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
+                operations.append(.deferCall(
+                    function: wrapper.name, arguments: wrapper.registers))
+            } else if case .identifier(let functionName, _) = callee {
                 let registers = try arguments.map { try lower($0) }
                 operations.append(.deferCall(
                     function: functionSymbolNames[functionName] ?? functionName,
@@ -1387,7 +1669,10 @@ private struct IRLowerer {
             guard case .call(let callee, let arguments, _) = expression else {
                 throw GoDiagnostic(position: position, message: "go requires function call")
             }
-            if case .identifier(let functionName, _) = callee {
+            if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
+                operations.append(.spawn(
+                    function: wrapper.name, arguments: wrapper.registers))
+            } else if case .identifier(let functionName, _) = callee {
                 operations.append(.spawn(
                     function: functionSymbolNames[functionName] ?? functionName,
                     arguments: try arguments.map { try lower($0) }))
@@ -1768,6 +2053,17 @@ private struct IRLowerer {
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> Int? {
+        if let operation = GoExpression.call(
+            callee: callee, arguments: arguments, position: callee.position
+        ).bitwiseOperation {
+            return try lowerBitwise(operation.operator, operands: operation.operands)
+        }
+        if let target = conversionTarget(callee), let argument = arguments.first {
+            return try lowerConversion(to: target, argument: argument)
+        }
+        if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
+            return results.first
+        }
         if case .identifier(let functionName, _) = callee {
             if functionName == "len" || functionName == "cap" {
                 guard let argument = arguments.first else { return nil }
@@ -2260,6 +2556,9 @@ private struct IRLowerer {
     }
 
     func multiReturnTypes(callee: GoExpression) -> [GoType] {
+        if let native = nativeFunction(for: callee) {
+            return native.function.results
+        }
         if case .identifier(let name, _) = callee {
             return functionResultTypes[name] ?? []
         }
@@ -2317,6 +2616,9 @@ private struct IRLowerer {
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> [Int]? {
+        if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
+            return results
+        }
         // Handle context.WithCancel / context.WithTimeout as multi-return builtins
         if case .selector(let base, let member, _) = callee,
             case .identifier(let packageName, _) = base,
@@ -2522,7 +2824,7 @@ private struct IRLowerer {
                 let source = try lower(operand)
                 let destination = allocateRegister()
                 operations.append(.unary(destination: destination, operator: .negate, operand: source))
-                return destination
+                return wrapByte(destination, type: try? type(of: operand))
             case .not:
                 let source = try lower(operand)
                 let destination = allocateRegister()
@@ -2564,13 +2866,21 @@ private struct IRLowerer {
                     operator: map(binaryOperator),
                     left: leftRegister,
                     right: rightRegister))
-            return destination
+            switch binaryOperator {
+            case .add, .subtract, .multiply:
+                return wrapByte(destination, type: try? operandType(left, right))
+            default:
+                return destination
+            }
         case .selector(let base, let name, _):
             if case .identifier(let packageName, _) = base,
                 let value = GoStandardLibrary.integerConstant(
                     package: packageName, member: name)
             {
                 return constant(.int(value))
+            }
+            if let descriptor = standardFileDescriptor(base: base, member: name) {
+                return constant(.int(descriptor))
             }
             if case .identifier("os", _) = base, name == "Args" {
                 let destination = allocateRegister()
@@ -2803,7 +3113,7 @@ private struct IRLowerer {
             case "any": return .interface([])
             case "error": return compilerErrorType()
             case "testing.T": return .named("testing.T")
-            default: return .named(name)
+            default: return GoPredeclared.namedType(name) ?? .named(name)
             }
         case .structure(let fields, _):
             return .structure(
@@ -2833,11 +3143,12 @@ private struct IRLowerer {
     func underlying(_ type: GoType, visiting: Set<String> = []) -> GoType {
         guard case .named(let name) = type,
             !visiting.contains(name),
-            let definition = typeDefinitions[name]
+            let definition = typeDefinitions[name]?.underlying
+                ?? GoPredeclared.underlying(of: name)
         else { return type }
         var next = visiting
         next.insert(name)
-        return underlying(definition.underlying, visiting: next)
+        return underlying(definition, visiting: next)
     }
 
     func syncReceiverName(_ type: GoType) -> String? {
@@ -2906,6 +3217,10 @@ private struct IRLowerer {
             let destination = allocateRegister()
             operations.append(.makeWaitGroup(destination: destination))
             return destination
+        }
+        if type == GoPredeclared.time {
+            // An opaque timestamp; the zero time is 0.
+            return constant(.int(0))
         }
         switch underlying(type) {
         case .int: return constant(.int(0))
@@ -3002,6 +3317,9 @@ private struct IRLowerer {
             {
                 return .int
             }
+            if standardFileDescriptor(base: base, member: name) != nil {
+                return GoPredeclared.filePointer
+            }
             let baseType = try type(of: base)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 throw GoDiagnostic(position: position, message: "undefined selector")
@@ -3012,7 +3330,7 @@ private struct IRLowerer {
         case .index(let base, _, _):
             switch underlying(try type(of: base)) {
             case .array(_, let element), .slice(let element): return element
-            case .string: return .int
+            case .string: return GoPredeclared.byte
             default: return .void
             }
         case .slicing(let base, _, _, _):
@@ -3046,10 +3364,24 @@ private struct IRLowerer {
             case .equal, .notEqual, .less, .lessEqual, .greater, .greaterEqual:
                 return .bool
             default:
-                if case .binary(let left, _, _, _) = expression { return try type(of: left) }
+                if case .binary(let left, _, let right, _) = expression {
+                    return try operandType(left, right)
+                }
                 return .void
             }
         case .call(let callee, _, let position):
+            if let operation = expression.bitwiseOperation {
+                if operation.operator.isUnary || operation.operator.isShift {
+                    return try type(of: operation.operands[0])
+                }
+                return try operandType(operation.operands[0], operation.operands[1])
+            }
+            if let target = conversionTarget(callee) {
+                return target
+            }
+            if let native = nativeFunction(for: callee) {
+                return native.function.results.first ?? .void
+            }
             if case .identifier(let name, _) = callee,
                 name == "len" || name == "cap"
             {
@@ -3082,10 +3414,11 @@ private struct IRLowerer {
             {
                 return name == "Run" ? .bool : .void
             }
-            if case .selector(let base, "After", _) = callee,
-                case .identifier("time", _) = base
+            if case .selector(let base, let member, _) = callee,
+                case .identifier("time", _) = base,
+                member == "After" || member == "Tick"
             {
-                return .channel(direction: .receiveOnly, element: .int)
+                return .channel(direction: .receiveOnly, element: GoPredeclared.time)
             }
             if case .selector(let base, let member, _) = callee,
                 case .identifier("strings", _) = base,
@@ -3103,6 +3436,22 @@ private struct IRLowerer {
                 default: break
                 }
             }
+            if case .selector(let base, let member, _) = callee,
+                case .identifier(let packageName, _) = base,
+                lookup(packageName) == nil,
+                globalInfos[packageName] == nil,
+                let result = functionResultTypes[packageName + "." + member]?.first
+            {
+                // An imported package function.
+                return result
+            }
+            if case .selector(let base, let member, _) = callee,
+                let baseType = try? type(of: base),
+                case .interface(let methods) = underlying(baseType),
+                let method = methods.first(where: { $0.name == member })
+            {
+                return method.results.first ?? .void
+            }
             if case .selector(let base, let name, _) = callee,
                 syncReceiverName(try type(of: base)) != nil
             {
@@ -3116,6 +3465,187 @@ private struct IRLowerer {
             }
             throw GoDiagnostic(position: position, message: "no value used as value")
         }
+    }
+
+    // MARK: Bitwise operators, conversions, and native library calls
+
+    /// Type of an arithmetic or bitwise operation. The type checker has
+    /// already matched the operands, so an `int` side next to a named integer
+    /// type is an untyped constant that adopted that type.
+    func operandType(_ left: GoExpression, _ right: GoExpression) throws -> GoType {
+        let leftType = try type(of: left)
+        guard leftType == .int, let rightType = try? type(of: right) else { return leftType }
+        return underlying(rightType) == .int ? rightType : leftType
+    }
+
+    /// Reduces `register` modulo 256 when `type` is a byte type, so byte
+    /// arithmetic wraps the way Go's `uint8` does. A nil type is an operand
+    /// this pass cannot type; no such expression produces a byte.
+    mutating func wrapByte(_ register: Int, type: GoType?) -> Int {
+        guard let type, GoPredeclared.isByte(type, definitions: typeDefinitions) else {
+            return register
+        }
+        let mask = constant(.int(255))
+        let destination = allocateRegister()
+        operations.append(
+            .call(
+                function: GoBitwiseOperator.and.nativeName,
+                arguments: [register, mask],
+                destinations: [destination]))
+        return destination
+    }
+
+    mutating func lowerBitwise(
+        _ bitwiseOperator: GoBitwiseOperator,
+        operands: [GoExpression]
+    ) throws -> Int {
+        let registers = try operands.map { try lower($0) }
+        let destination = allocateRegister()
+        operations.append(
+            .call(
+                function: bitwiseOperator.nativeName,
+                arguments: registers,
+                destinations: [destination]))
+        switch bitwiseOperator {
+        case .shiftLeft, .complement:
+            return wrapByte(destination, type: try? type(of: operands[0]))
+        default:
+            return destination
+        }
+    }
+
+    /// The target type when `callee` names a type, making the call a conversion.
+    func conversionTarget(_ callee: GoExpression) -> GoType? {
+        switch callee {
+        case .typeExpression(let typeExpression, _):
+            return resolve(typeExpression)
+        case .identifier(let name, let position):
+            guard lookup(name) == nil, globalInfos[name] == nil,
+                functionReturnCounts[name] == nil, functionParameterTypes[name] == nil
+            else { return nil }
+            switch name {
+            case "int", "string", "bool", "byte", "uint8":
+                return resolve(.named(name, position: position))
+            default:
+                return typeDefinitions[name] == nil ? nil : .named(name)
+            }
+        default:
+            return nil
+        }
+    }
+
+    mutating func lowerConversion(to target: GoType, argument: GoExpression) throws -> Int {
+        let value = try lower(argument)
+        if underlying(target) == .int {
+            // Narrowing to a byte truncates; a byte source is already in range.
+            let isByteSource =
+                (try? type(of: argument)).map {
+                    GoPredeclared.isByte($0, definitions: typeDefinitions)
+                } ?? false
+            return isByteSource ? value : wrapByte(value, type: target)
+        }
+        let sourceShape = underlying(try type(of: argument))
+        let native: String
+        switch underlying(target) {
+        case .string:
+            if sourceShape == .int {
+                native = GoPredeclared.runeToString
+            } else if case .slice = sourceShape {
+                native = GoPredeclared.bytesToString
+            } else {
+                return value
+            }
+        case .slice where sourceShape == .string:
+            native = GoPredeclared.stringToBytes
+        default:
+            return value
+        }
+        let destination = allocateRegister()
+        operations.append(.call(function: native, arguments: [value], destinations: [destination]))
+        return destination
+    }
+
+    func standardFileDescriptor(base: GoExpression, member: String) -> Int64? {
+        guard case .identifier("os", _) = base, lookup("os") == nil, globalInfos["os"] == nil
+        else { return nil }
+        return GoStandardLibrary.standardFileDescriptor(member: member)
+    }
+
+    /// The native library function `callee` denotes, with the `*os.File`
+    /// receiver expression for file methods.
+    func nativeFunction(
+        for callee: GoExpression
+    ) -> (function: GoNativeFunction, receiver: GoExpression?)? {
+        guard case .selector(let base, let member, _) = callee else { return nil }
+        if case .identifier(let packageName, _) = base,
+            lookup(packageName) == nil,
+            globalInfos[packageName] == nil,
+            let function = GoStandardLibrary.nativeFunction(package: packageName, member: member)
+        {
+            return (function, nil)
+        }
+        if (try? type(of: base)) == GoPredeclared.filePointer,
+            let function = GoStandardLibrary.fileMethod(member)
+        {
+            return (function, base)
+        }
+        return nil
+    }
+
+    /// Lowers the receiver and arguments of a native call in evaluation order.
+    mutating func lowerNativeOperands(
+        receiver: GoExpression?,
+        arguments: [GoExpression]
+    ) throws -> [Int] {
+        var registers: [Int] = []
+        if let receiver { registers.append(try lower(receiver)) }
+        for argument in arguments { registers.append(try lower(argument)) }
+        return registers
+    }
+
+    /// Lowers a native library call and returns one register per result, or
+    /// nil when `callee` is not a native function.
+    mutating func lowerNativeCall(
+        callee: GoExpression,
+        arguments: [GoExpression]
+    ) throws -> [Int]? {
+        guard let native = nativeFunction(for: callee) else { return nil }
+        let registers = try lowerNativeOperands(receiver: native.receiver, arguments: arguments)
+        let destinations = native.function.results.map { _ in allocateRegister() }
+        operations.append(
+            .call(
+                function: native.function.symbol,
+                arguments: registers,
+                destinations: destinations))
+        return destinations
+    }
+
+    /// Lowers the operands of a `go` or `defer` native call. The VM can only
+    /// spawn or defer functions, so the call goes through a synthesized
+    /// wrapper that performs the native call and drops its results.
+    mutating func nativeWrapper(
+        callee: GoExpression,
+        arguments: [GoExpression]
+    ) throws -> (name: String, registers: [Int])? {
+        guard let native = nativeFunction(for: callee) else { return nil }
+        let registers = try lowerNativeOperands(receiver: native.receiver, arguments: arguments)
+        let count = registers.count
+        let resultCount = native.function.results.count
+        let name = "$native.\(wrapperNamespace).\(native.function.symbol).\(count)"
+        if nativeWrappers[name] == nil {
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: count,
+                registerCount: count + resultCount,
+                operations: [
+                    .call(
+                        function: native.function.symbol,
+                        arguments: Array(0..<count),
+                        destinations: Array(count..<(count + resultCount))),
+                    .return,
+                ])
+        }
+        return (name, registers)
     }
 
     func methodInfo(base: GoExpression, name: String) throws -> MethodInfo? {

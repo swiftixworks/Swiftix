@@ -12,6 +12,14 @@ public enum GoExecutableLoader {
         }
     }
 
+    /// Limits for a file-backed process. Text tools hold a whole input as one
+    /// string or one slice of lines, so strings and collections may grow to
+    /// the input ceiling; the heap ceiling still bounds the process.
+    static let processResourceLimits = GoRuntimeResourceLimits(
+        maximumStringBytes: 16 * 1_024 * 1_024,
+        maximumHeapBytes: 256 * 1_024 * 1_024,
+        maximumCollectionElements: 4 * 1_024 * 1_024)
+
     private static func executableCommand(
         _ context: ProcessContext,
         path: String
@@ -52,16 +60,13 @@ public enum GoExecutableLoader {
         }
 
         return Command(name: path, summary: "Swiftix Go executable") { child, arguments in
-            // Resumable so an interactive program can wait for terminal input
-            // across host turns; the process exits when the run completes.
-            GoVirtualMachine().startProgram(
+            // Cooperative: the program yields to the event loop every quantum
+            // and parks on sleep, input, and full pipes, so it has no total
+            // instruction cap; the process exits when the run completes.
+            GoVirtualMachine(resourceLimits: processResourceLimits).startProcess(
                 executable,
-                eventLoop: child.eventLoop,
                 processContext: child,
                 arguments: arguments,
-                write: { text in
-                    _ = child.write(1, Array(text.utf8))
-                },
                 completion: { outcome in
                     switch outcome {
                     case .success(let result):

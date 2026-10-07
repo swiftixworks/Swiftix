@@ -133,6 +133,9 @@ struct GoToolCommandTests: GoTestHarness {
     @Test func goRunAndBuiltImageExecuteM4StandardPackages() {
         let output = runShell(
             ["cd /m4-tool", "go run .", "go build -o app .", "./app"],
+            // `go run` completes synchronously; the built image is a process
+            // whose timer waits for logical time.
+            advancing: 1,
             seed: { context in
                 _ = context.mkdir("/m4-tool")
                 Self.write(

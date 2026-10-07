@@ -104,4 +104,34 @@ struct GoSchedulingQuantumTests {
         #expect(schedulerRan)
         #expect(schedulerRanBeforeOutput)
     }
+
+    /// A goroutine that parks on the instruction a quantum ends on must be
+    /// recorded as parked before the quantum's event-loop turn can wake it.
+    @Test func parkingOnAQuantumBoundaryIsSafeForEveryAlignment() throws {
+        for padding in 0..<6 {
+            for quantum in 1...8 {
+                var instructions = (0..<padding).map { GoInstruction.jump($0 + 1) }
+                instructions += [
+                    .push(.int(0)),
+                    .timeSleep,
+                    .push(.int(0)),
+                    .timeAfter,
+                    .push(.int(0)),
+                    .receiveChannel(commaOK: false),
+                    .store(0),
+                    .push(.string("woke")),
+                    .print(argumentCount: 1, newline: false),
+                    .return,
+                ]
+                let executable = GoExecutable(
+                    entryPoint: "main",
+                    functions: [
+                        GoBytecodeFunction(name: "main", localCount: 1, instructions: instructions)
+                    ])
+                var output = ""
+                try GoVirtualMachine(instructionQuantum: quantum).run(executable) { output += $0 }
+                #expect(output == "woke", "padding \(padding), quantum \(quantum)")
+            }
+        }
+    }
 }

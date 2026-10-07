@@ -309,8 +309,10 @@ public enum GoToolchain {
         let absoluteDirectory = directory == "."
             ? context.currentDirectory
             : join(context.currentDirectory, directory)
-        let graph = try loadPackageGraph(context, rootDirectory: absoluteDirectory)
-        let dependencyBuild = try compileDependencies(graph)
+        let graph = try loadPackageGraph(
+            context,
+            rootDirectory: absoluteDirectory,
+            additionalRootImports: parsed.flatMap(\.imports).map(\.path))
         var packageFailed = false
         for testFunction in testFunctions {
             let arguments = testFunction.parameters.isEmpty ? "" : "nil"
@@ -319,10 +321,8 @@ public enum GoToolchain {
                 text: "package main\nfunc main() {\n    \(testFunction.name)(\(arguments))\n}\n")
             var output = ""
             do {
-                let executable = try GoCompiler.compile(
-                    sources: mainSources + [runner],
-                    importedPackages: dependencyBuild.packages,
-                    packageOrder: dependencyBuild.order)
+                let executable = try compilePackageGraph(
+                    graph, rootSources: mainSources + [runner])
                 let exitCode = try context.runGoExecutable(
                     executable,
                     arguments: [testFunction.name]
@@ -458,7 +458,9 @@ public enum GoToolchain {
     ) throws -> GoExecutable {
         guard !arguments.isEmpty else { throw GoToolError.noGoFilesListed }
         let cacheRoot = try buildCacheRoot(context)
-        let graph = arguments == ["."] ? try loadPackageGraph(context) : nil
+        let graph = try packageDirectory(context, target: arguments).map {
+            try loadPackageGraph(context, rootDirectory: $0)
+        }
         let sources: [GoSourceFile]
         if let graph {
             sources = graph.order.flatMap { graph.packages[$0]?.sources ?? [] }
@@ -480,11 +482,14 @@ public enum GoToolchain {
         let moduleFile = try findModule(context).map {
             try readFile(context, path: $0, maximumBytes: maximumSourceBytes)
         }
+        // The key covers every package of the build, so editing an imported
+        // package misses the cache just like editing the main package.
         let key = GoBuildCache.key(
             toolVersion: toolVersion,
             languageVersion: languageVersion,
             sources: sources,
-            moduleFile: moduleFile)
+            moduleFile: moduleFile,
+            rootPackage: graph?.rootPath ?? "")
         if let executable = GoBuildCache.load(context, root: cacheRoot, key: key) {
             return executable
         }
@@ -497,9 +502,45 @@ public enum GoToolchain {
         return executable
     }
 
+    /// Whether `argument` names a package directory below the current one:
+    /// `.`, `./cmd/tool`, or `cmd/tool`.
+    private static func isPackageTarget(_ argument: String) -> Bool {
+        guard !argument.isEmpty, !argument.hasSuffix(".go"), !argument.hasPrefix("-"),
+            !argument.hasPrefix("/")
+        else { return false }
+        let components = argument.split(separator: "/", omittingEmptySubsequences: false)
+        return argument == "."
+            || components.enumerated().allSatisfy { index, component in
+                (component == "." && index == 0)
+                    || (!component.isEmpty && component != "." && component != ".."
+                        && component != "...")
+            }
+    }
+
+    /// The absolute directory of a single package target, or nil when the
+    /// build inputs are explicit `.go` files.
+    private static func packageDirectory(
+        _ context: any GoToolContext,
+        target arguments: [String]
+    ) throws -> String? {
+        guard arguments.count == 1, isPackageTarget(arguments[0]) else { return nil }
+        var directory = context.currentDirectory
+        for component in arguments[0].split(separator: "/") where component != "." {
+            directory = join(directory, String(component))
+        }
+        guard let status = context.stat(directory), status.isDirectory else {
+            throw GoToolError.invalidModule("go: directory \(arguments[0]) does not exist")
+        }
+        return directory
+    }
+
+    /// Loads the package in `rootDirectory` and every package it imports.
+    /// `additionalRootImports` adds imports that only the root's test files
+    /// make.
     private static func loadPackageGraph(
         _ context: any GoToolContext,
-        rootDirectory requestedRoot: String? = nil
+        rootDirectory requestedRoot: String? = nil,
+        additionalRootImports: [String] = []
     ) throws -> PackageGraph {
         guard let moduleFile = findModule(context) else {
             throw GoToolError.invalidModule(
@@ -532,6 +573,10 @@ public enum GoToolchain {
                     "package \(cycle.joined(separator: "\n\timports ")): import cycle not allowed")
             }
             if visited.contains(importPath) { return }
+            guard visiting.count < maximumImportDepth else {
+                throw GoToolError.invalidModule(
+                    "go: import chain is deeper than \(maximumImportDepth) packages")
+            }
             visiting.append(importPath)
             defer { _ = visiting.popLast() }
 
@@ -553,7 +598,10 @@ public enum GoToolchain {
                     path: path, text: String(decoding: bytes, as: UTF8.self))
             }
             let files = try sources.map(GoParser.parse)
-            let imports = Array(Set(files.flatMap(\.imports).map(\.path))).sorted()
+            let imports = Array(
+                Set(files.flatMap(\.imports).map(\.path))
+                    .union(importPath == rootPath ? additionalRootImports : [])
+            ).sorted()
             let localImports = try imports.compactMap { dependency -> (String, String)? in
                 if GoTypeChecker.supportedStandardPackages.contains(dependency) {
                     return nil
@@ -600,37 +648,17 @@ public enum GoToolchain {
             order: order)
     }
 
-    private static func compilePackageGraph(_ graph: PackageGraph) throws -> GoExecutable {
-        let dependencyBuild = try compileDependencies(graph)
-        guard let root = graph.packages[graph.rootPath] else {
-            throw GoToolError.invalidModule("go: root package is missing")
+    private static func compilePackageGraph(
+        _ graph: PackageGraph,
+        rootSources: [GoSourceFile]? = nil
+    ) throws -> GoExecutable {
+        let packages = graph.order.compactMap { path -> GoPackageSource? in
+            guard let node = graph.packages[path] else { return nil }
+            return GoPackageSource(
+                importPath: path,
+                sources: path == graph.rootPath ? rootSources ?? node.sources : node.sources)
         }
-        return try GoCompiler.compile(
-            sources: root.sources,
-            importedPackages: dependencyBuild.packages,
-            packageOrder: dependencyBuild.order)
-    }
-
-    private static func compileDependencies(
-        _ graph: PackageGraph
-    ) throws -> (packages: [String: GoCompiledPackage], order: [String]) {
-        var compiled: [String: GoCompiledPackage] = [:]
-        var globalOffset = 0
-        for path in graph.order where path != graph.rootPath {
-            guard let node = graph.packages[path] else { continue }
-            let dependencies = Dictionary(
-                uniqueKeysWithValues: node.imports.compactMap { dependency in
-                    compiled[dependency].map { (dependency, $0) }
-                })
-            let package = try GoCompiler.compilePackage(
-                sources: node.sources,
-                importedPackages: dependencies,
-                globalOffset: globalOffset)
-            compiled[path] = package
-            globalOffset += package.globalCount
-        }
-        let packageOrder = graph.order.filter { $0 != graph.rootPath }
-        return (compiled, packageOrder)
+        return try GoCompiler.compile(packages: packages, root: graph.rootPath)
     }
 
     private static func packagePathInModule(
@@ -1097,7 +1125,9 @@ public enum GoToolchain {
             index += 1
         }
         if inputs.isEmpty { inputs = ["."] }
-        guard inputs == ["."] || inputs.allSatisfy({ $0.hasSuffix(".go") }) else {
+        guard (inputs.count == 1 && isPackageTarget(inputs[0]))
+            || inputs.allSatisfy({ $0.hasSuffix(".go") })
+        else {
             throw GoToolError.invalidBuildArguments(
                 "go: unsupported build target \(inputs.joined(separator: " "))")
         }
@@ -1111,7 +1141,9 @@ public enum GoToolchain {
             throw GoToolError.invalidInstallArguments(
                 "go: unsupported install flag \(flag)")
         }
-        guard inputs == ["."] || inputs.allSatisfy({ $0.hasSuffix(".go") }) else {
+        guard (inputs.count == 1 && isPackageTarget(inputs[0]))
+            || inputs.allSatisfy({ $0.hasSuffix(".go") })
+        else {
             throw GoToolError.invalidInstallArguments(
                 "go: unsupported install target \(inputs.joined(separator: " "))")
         }
@@ -1130,7 +1162,7 @@ public enum GoToolchain {
         guard let first = arguments.first else {
             return RunOptions(inputs: ["."], arguments: [])
         }
-        if first == "." {
+        if isPackageTarget(first), first == "." || first.hasPrefix("./") {
             return RunOptions(inputs: [first], arguments: Array(arguments.dropFirst()))
         }
         var inputCount = 0
@@ -1150,8 +1182,10 @@ public enum GoToolchain {
         _ context: any GoToolContext,
         inputs: [String]
     ) -> String {
-        if inputs == ["."] {
-            return context.currentDirectory.split(separator: "/").last.map(String.init) ?? "main"
+        if inputs.count == 1, isPackageTarget(inputs[0]) {
+            let directory = inputs[0].split(separator: "/").last { $0 != "." }.map(String.init)
+            return directory
+                ?? context.currentDirectory.split(separator: "/").last.map(String.init) ?? "main"
         }
         let filename = inputs[0].split(separator: "/").last.map(String.init) ?? "main.go"
         return filename.hasSuffix(".go") ? String(filename.dropLast(3)) : filename
@@ -1201,6 +1235,8 @@ public enum GoToolchain {
     }
 
     private static let maximumSourceBytes = 1_048_576
+    /// Longest import chain the package loader follows.
+    private static let maximumImportDepth = 128
 
     private static let environmentOrder = [
         "GOHOSTOS", "GOHOSTARCH", "GOOS", "GOARCH", "GOVERSION", "GOMOD", "GOWORK", "GOPATH", "GOBIN",

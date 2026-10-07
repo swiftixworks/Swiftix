@@ -143,7 +143,9 @@ private struct Parser {
                 element: try parseTypeExpression(),
                 position: position)
         }
-        if case .identifier(let name) = current.kind {
+        if case .identifier(let name) = current.kind,
+            !GoBitwiseOperator.isOperatorSpelling(name)
+        {
             advance()
             if check(.period), case .identifier(let member) = lookahead(1).kind {
                 advance()
@@ -744,6 +746,22 @@ private struct Parser {
                 expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
                 position: position)
         }
+        if case .identifier(let spelling) = current.kind,
+            let compound = GoCompoundAssignment(spelling: spelling)
+        {
+            let operatorPosition = current.position
+            guard target.isRepeatable else {
+                throw GoDiagnostic(
+                    position: operatorPosition,
+                    message: "\(spelling) target must not contain a call or a channel receive")
+            }
+            advance()
+            let value = try parseExpression(allowCompositeLiteral: allowCompositeLiteral)
+            return .assignment(
+                target: target,
+                expression: compound.apply(to: target, value, position: operatorPosition),
+                position: position)
+        }
         if check(.arrow) {
             advance()
             return .sendStatement(
@@ -765,25 +783,43 @@ private struct Parser {
         allowCompositeLiteral: Bool = true
     ) throws -> GoExpression {
         var left = try parseUnary(allowCompositeLiteral: allowCompositeLiteral)
-        while let (precedence, binaryOperator) = binaryOperator(for: current.kind),
-            precedence >= minimumPrecedence
-        {
+        while true {
             let position = current.position
-            advance()
-            let right = try parseExpression(
-                minimumPrecedence: precedence + 1,
-                allowCompositeLiteral: allowCompositeLiteral)
-            left = .binary(
-                left: left,
-                operator: binaryOperator,
-                right: right,
-                position: position)
+            if let (precedence, binaryOperator) = binaryOperator(for: current.kind),
+                precedence >= minimumPrecedence
+            {
+                advance()
+                let right = try parseExpression(
+                    minimumPrecedence: precedence + 1,
+                    allowCompositeLiteral: allowCompositeLiteral)
+                left = .binary(
+                    left: left,
+                    operator: binaryOperator,
+                    right: right,
+                    position: position)
+            } else if let bitwiseOperator = bitwiseOperator(for: current.kind),
+                bitwiseOperator.precedence >= minimumPrecedence
+            {
+                advance()
+                let right = try parseExpression(
+                    minimumPrecedence: bitwiseOperator.precedence + 1,
+                    allowCompositeLiteral: allowCompositeLiteral)
+                left = .bitwise(bitwiseOperator, operands: [left, right], position: position)
+            } else {
+                return left
+            }
         }
-        return left
     }
 
     mutating func parseUnary(allowCompositeLiteral: Bool = true) throws -> GoExpression {
         let position = current.position
+        if current.kind == .identifier(GoBitwiseOperator.complement.spelling) {
+            advance()
+            return .bitwise(
+                .complement,
+                operands: [try parseUnary(allowCompositeLiteral: allowCompositeLiteral)],
+                position: position)
+        }
         let unaryOperator: GoUnaryOperator?
         switch current.kind {
         case .plus: unaryOperator = .plus
@@ -812,6 +848,15 @@ private struct Parser {
             {
                 expression = try parseCompositeLiteral(
                     type: .named(typeName, position: typePosition))
+                continue
+            }
+            if allowCompositeLiteral, check(.leftBrace),
+                case .selector(.identifier(let qualifier, let typePosition), let typeName, _) =
+                    expression
+            {
+                // A qualified type name: `pkg.Type{...}`.
+                expression = try parseCompositeLiteral(
+                    type: .named(qualifier + "." + typeName, position: typePosition))
                 continue
             }
             if allowCompositeLiteral, check(.leftBrace),
@@ -934,7 +979,7 @@ private struct Parser {
         case .string(let value):
             advance()
             return .string(value, position: token.position)
-        case .identifier(let name):
+        case .identifier(let name) where !GoBitwiseOperator.isOperatorSpelling(name):
             advance()
             return .identifier(name, position: token.position)
         case .leftParen:
@@ -1005,8 +1050,20 @@ private struct Parser {
         }
     }
 
+    /// Bitwise operators arrive as identifier tokens spelled like the operator,
+    /// except `&`, which shares its token with address-of.
+    func bitwiseOperator(for kind: GoTokenKind) -> GoBitwiseOperator? {
+        switch kind {
+        case .ampersand: return .and
+        case .identifier(let spelling): return GoBitwiseOperator.binary(spelling: spelling)
+        default: return nil
+        }
+    }
+
     mutating func expectIdentifier(message: String) throws -> String {
-        guard case .identifier(let name) = current.kind else { throw diagnostic(message) }
+        guard case .identifier(let name) = current.kind,
+            !GoBitwiseOperator.isOperatorSpelling(name)
+        else { throw diagnostic(message) }
         advance()
         return name
     }

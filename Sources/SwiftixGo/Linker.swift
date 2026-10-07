@@ -27,7 +27,10 @@ public enum GoSinglePackageLinker {
             for operation in function.operations {
                 switch operation {
                 case .call(let target, _, _):
-                    guard symbols.contains(target) else {
+                    // Reserved `$` names are resolved natively by the VM.
+                    guard symbols.contains(target)
+                        || GoStandardLibrary.isNativeCallName(target)
+                    else {
                         throw linkError("undefined symbol: \(target)")
                     }
                 case .loadGlobal(_, let index), .storeGlobal(let index, _),

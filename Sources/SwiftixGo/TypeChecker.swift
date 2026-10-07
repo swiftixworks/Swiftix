@@ -179,6 +179,11 @@ public enum GoTypeChecker {
             importedPathsByFile.append(importedPaths)
 
             for declaration in file.typeDeclarations {
+                guard GoPredeclared.namedType(declaration.name) == nil else {
+                    throw GoDiagnostic(
+                        position: declaration.position,
+                        message: "cannot redeclare predeclared type \(declaration.name)")
+                }
                 try reservePackageName(
                     declaration.name,
                     at: declaration.position,
@@ -266,6 +271,13 @@ public enum GoTypeChecker {
         }
 
         let globals = files.flatMap(\.globalDeclarations)
+        // A package-level initializer sees the imports of its own file.
+        var importedPathsByGlobal: [String: Set<String>] = [:]
+        for (file, importedPaths) in zip(files, importedPathsByFile) {
+            for declaration in file.globalDeclarations {
+                importedPathsByGlobal[declaration.name] = importedPaths
+            }
+        }
         var globalBindings: [String: Binding] = [:]
         for declaration in globals {
             if let explicitType = declaration.explicitType {
@@ -284,7 +296,7 @@ public enum GoTypeChecker {
                 }
                 do {
                     var checker = FunctionChecker(
-                        importedPaths: [],
+                        importedPaths: importedPathsByGlobal[declaration.name] ?? [],
                         functionSignatures: functionSignatures,
                         methodSignatures: methodSignatures,
                         typeDefinitions: typeDefinitions,
@@ -296,7 +308,9 @@ public enum GoTypeChecker {
                     }
                     globalBindings[declaration.name] = Binding(
                         type: inferred,
-                        isConstant: declaration.isConstant)
+                        isConstant: declaration.isConstant,
+                        constantValue: declaration.isConstant
+                            ? checker.untypedConstantValue(expression) : nil)
                     madeProgress = true
                 } catch let diagnostic as GoDiagnostic where diagnostic.message.hasPrefix("undefined:") {
                     next.append(declaration)
@@ -314,7 +328,7 @@ public enum GoTypeChecker {
                 let binding = globalBindings[declaration.name]
             else { continue }
             var checker = FunctionChecker(
-                importedPaths: [],
+                importedPaths: importedPathsByGlobal[declaration.name] ?? [],
                 functionSignatures: functionSignatures,
                 methodSignatures: methodSignatures,
                 typeDefinitions: typeDefinitions,
@@ -383,14 +397,20 @@ public enum GoTypeChecker {
             case "bool": return .bool
             case "any": return .interface([])
             case "error": return builtinErrorType()
+            case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
                 "context.Context", "context.CancelFunc",
                 "net.Conn", "net.Listener",
-                "http.Response", "http.ResponseWriter", "http.Request":
+                "http.Response", "http.ResponseWriter", "http.Request",
+                "time.Time", "os.File":
                 return .named(name)
             default:
                 guard availableTypes.contains(name) else {
-                    throw GoDiagnostic(position: position, message: "undefined: \(name)")
+                    throw GoDiagnostic(
+                        position: position,
+                        message: GoPredeclared.unsupportedNumericTypes.contains(name)
+                            ? GoPredeclared.unsupportedTypeMessage(name)
+                            : "undefined: \(name)")
                 }
                 return .named(name)
             }
@@ -527,6 +547,9 @@ private func builtinErrorType() -> GoType {
 private struct Binding {
     let type: GoType
     let isConstant: Bool
+    /// Value of a constant declared without a type from an untyped integer
+    /// constant expression. Such a name stays usable with any integer type.
+    var constantValue: Int64? = nil
 }
 
 private enum SwitchCaseConstant: Hashable {
@@ -657,9 +680,11 @@ private struct FunctionChecker {
             }
             let declared = try explicitType.map { try declaredType($0) }
             let expressionType = try expression.map { try type(of: $0) }
-            if let declared, let expressionType, !isAssignable(expressionType, to: declared) {
+            if let declared, let expression, let expressionType,
+                !(try isAssignable(expression, ofType: expressionType, to: declared))
+            {
                 throw GoDiagnostic(
-                    position: expression?.position ?? position,
+                    position: expression.position,
                     message: "cannot use \(expressionType) as \(declared) value")
             }
             guard let bindingType = declared ?? expressionType else {
@@ -670,12 +695,16 @@ private struct FunctionChecker {
                     position: expression?.position ?? position,
                     message: "no value used as value")
             }
-            scopes[scopes.count - 1][name] = Binding(type: bindingType, isConstant: isConstant)
+            scopes[scopes.count - 1][name] = Binding(
+                type: bindingType,
+                isConstant: isConstant,
+                constantValue: isConstant && declared == nil
+                    ? expression.flatMap { untypedConstantValue($0) } : nil)
 
         case .assignment(let target, let expression, _):
             let targetType = try assignableType(of: target)
             let expressionType = try type(of: expression)
-            guard isAssignable(expressionType, to: targetType) else {
+            guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
                 throw GoDiagnostic(
                     position: expression.position,
                     message: "cannot use \(expressionType) as \(targetType) value")
@@ -741,6 +770,8 @@ private struct FunctionChecker {
                     message: "assignment mismatch: \(names.count) variables but function returns \(resultTypes.count) values")
             }
             for (name, resultType) in zip(names, resultTypes) {
+                // The blank identifier declares nothing and may repeat.
+                if name == "_" { continue }
                 guard scopes[scopes.count - 1][name] == nil else {
                     throw GoDiagnostic(
                         position: position,
@@ -840,7 +871,7 @@ private struct FunctionChecker {
             }
 
         case .expression(let expression):
-            guard case .call = expression else {
+            guard case .call(let callee, let arguments, let callPosition) = expression else {
                 if case .unary(.receive, _, _) = expression {
                     _ = try type(of: expression)
                     return
@@ -848,6 +879,16 @@ private struct FunctionChecker {
                 throw GoDiagnostic(
                     position: expression.position,
                     message: "expression evaluated but not used")
+            }
+            if try isOperatorOrConversion(expression) {
+                _ = try type(of: expression)
+                throw GoDiagnostic(
+                    position: expression.position,
+                    message: "expression evaluated but not used")
+            }
+            // A native call may discard all of its results as a statement.
+            if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
+                return
             }
             _ = try type(of: expression)
 
@@ -861,6 +902,27 @@ private struct FunctionChecker {
             if values.isEmpty, namedResultCount == expectedResults.count {
                 return
             }
+            // `return f()` forwards every result of a multi-result call.
+            if values.count == 1, expectedResults.count > 1,
+                case .call(let callee, let arguments, let callPosition) = values[0]
+            {
+                let results = try callResultTypes(
+                    callee: callee, arguments: arguments, position: callPosition)
+                guard results.count >= expectedResults.count else {
+                    throw GoDiagnostic(position: position, message: "not enough return values")
+                }
+                guard results.count <= expectedResults.count else {
+                    throw GoDiagnostic(position: position, message: "too many return values")
+                }
+                for (actual, expected) in zip(results, expectedResults) {
+                    guard isAssignable(actual, to: expected) else {
+                        throw GoDiagnostic(
+                            position: values[0].position,
+                            message: "cannot use \(actual) as \(expected) value in return statement")
+                    }
+                }
+                return
+            }
             guard values.count >= expectedResults.count else {
                 throw GoDiagnostic(position: position, message: "not enough return values")
             }
@@ -869,7 +931,7 @@ private struct FunctionChecker {
             }
             for (value, expected) in zip(values, expectedResults) {
                 let actual = try type(of: value)
-                guard isAssignable(actual, to: expected) else {
+                guard try isAssignable(value, ofType: actual, to: expected) else {
                     throw GoDiagnostic(
                         position: value.position,
                         message: "cannot use \(actual) as \(expected) value in return statement")
@@ -888,19 +950,19 @@ private struct FunctionChecker {
                 throw GoDiagnostic(position: position, message: "continue is not in a loop")
             }
 
-        case .deferStatement(let expression, let position):
-            guard case .call = expression else {
+        case .deferStatement(let expression, let position),
+            .goStatement(let expression, let position):
+            let keyword: String
+            if case .deferStatement = statement { keyword = "defer" } else { keyword = "go" }
+            guard case .call(let callee, let arguments, let callPosition) = expression,
+                !(try isOperatorOrConversion(expression))
+            else {
                 throw GoDiagnostic(
                     position: position,
-                    message: "expression in defer must be function call")
+                    message: "expression in \(keyword) must be function call")
             }
-            _ = try type(of: expression)
-
-        case .goStatement(let expression, let position):
-            guard case .call = expression else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "expression in go must be function call")
+            if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
+                return
             }
             _ = try type(of: expression)
 
@@ -912,7 +974,7 @@ private struct FunctionChecker {
                 throw GoDiagnostic(position: channel.position, message: "cannot send to receive-only channel")
             }
             let valueType = try type(of: value)
-            guard isAssignable(valueType, to: elementType) else {
+            guard try isAssignable(value, ofType: valueType, to: elementType) else {
                 throw GoDiagnostic(
                     position: value.position,
                     message: "cannot send \(valueType) value on \(elementType) channel")
@@ -1014,7 +1076,11 @@ private struct FunctionChecker {
                 }
                 for caseExpression in switchCase.expressions {
                     let caseType = try type(of: caseExpression)
-                    guard caseType == switchType else {
+                    // An untyped constant case adopts an integer switch type.
+                    let matchesSwitch = try caseType == switchType
+                        || (isInteger(switchType)
+                            && isAssignable(caseExpression, ofType: caseType, to: switchType))
+                    guard matchesSwitch else {
                         throw GoDiagnostic(
                             position: caseExpression.position,
                             message: "invalid case \(caseType) in switch on \(switchType)")
@@ -1095,6 +1161,13 @@ private struct FunctionChecker {
             {
                 return .slice(.string)
             }
+            if case .identifier("os", _) = base,
+                importedPaths.contains("os"),
+                lookup("os") == nil,
+                GoStandardLibrary.standardFileDescriptor(member: name) != nil
+            {
+                return GoPredeclared.filePointer
+            }
             let baseType = try type(of: base)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 throw GoDiagnostic(
@@ -1173,10 +1246,10 @@ private struct FunctionChecker {
                 guard isInteger(try type(of: index)) else {
                     throw GoDiagnostic(position: index.position, message: "index must be integer")
                 }
-                return .int
+                return GoPredeclared.byte
             case .map(let keyType, let valueType):
                 let indexType = try type(of: index)
-                guard isAssignable(indexType, to: keyType) else {
+                guard try isAssignable(index, ofType: indexType, to: keyType) else {
                     throw GoDiagnostic(
                         position: index.position,
                         message: "cannot use \(indexType) as \(keyType) value in map index")
@@ -1244,6 +1317,31 @@ private struct FunctionChecker {
                     try require(argument, assignableTo: parameter)
                 }
                 return results.first ?? .void
+            }
+            if let operation = expression.bitwiseOperation {
+                return try bitwiseResultType(
+                    operation.operator, operands: operation.operands, position: position)
+            }
+            if let target = try conversionTarget(callee) {
+                return try conversionResultType(target, arguments: arguments, position: position)
+            }
+            if let native = try nativeCall(
+                callee: callee, arguments: arguments, position: position)
+            {
+                guard native.results.count <= 1 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "multiple-value \(native.goName)() in single-value context")
+                }
+                guard let result = native.results.first else {
+                    if native.goName.hasPrefix("fmt.Fprint") {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "\(native.goName) results are not supported; call it as a statement")
+                    }
+                    return .void
+                }
+                return result
             }
             if case .identifier(let name, let namePosition) = callee {
                 if name == "len" || name == "cap" {
@@ -1338,7 +1436,7 @@ private struct FunctionChecker {
                             message: "first argument to delete must be map")
                     }
                     let actualKeyType = try type(of: arguments[1])
-                    guard isAssignable(actualKeyType, to: keyType) else {
+                    guard try isAssignable(arguments[1], ofType: actualKeyType, to: keyType) else {
                         throw GoDiagnostic(
                             position: arguments[1].position,
                             message: "cannot use \(actualKeyType) as \(keyType) value in delete")
@@ -1383,7 +1481,7 @@ private struct FunctionChecker {
                 }
                 for (argument, parameterType) in zip(arguments, signature.parameters) {
                     let argumentType = try type(of: argument)
-                    guard isAssignable(argumentType, to: parameterType) else {
+                    guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
                         throw GoDiagnostic(
                             position: argument.position,
                             message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
@@ -1464,7 +1562,7 @@ private struct FunctionChecker {
                         message: "wrong number of arguments in call to time.After")
                 }
                 try require(arguments[0], assignableTo: .int)
-                return .channel(direction: .receiveOnly, element: .int)
+                return .channel(direction: .receiveOnly, element: GoPredeclared.time)
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "time",
@@ -1490,7 +1588,7 @@ private struct FunctionChecker {
                         message: "wrong number of arguments in call to time.Tick")
                 }
                 try require(arguments[0], assignableTo: .int)
-                return .channel(direction: .receiveOnly, element: .int)
+                return .channel(direction: .receiveOnly, element: GoPredeclared.time)
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "context",
@@ -1691,7 +1789,9 @@ private struct FunctionChecker {
                                 position: position,
                                 message: "wrong number of arguments in call to \(name)")
                         }
-                        try require(arguments[0], assignableTo: .slice(.int))
+                        if try type(of: arguments[0]) != .slice(GoPredeclared.byte) {
+                            try require(arguments[0], assignableTo: .slice(.int))
+                        }
                         return .int
                     case "Close":
                         guard arguments.isEmpty else {
@@ -1762,13 +1862,23 @@ private struct FunctionChecker {
                 }
                 for (argument, paramType) in zip(arguments, funcExport.parameters) {
                     let argType = try type(of: argument)
-                    guard isAssignable(argType, to: paramType) else {
+                    guard try isAssignable(argument, ofType: argType, to: paramType) else {
                         throw GoDiagnostic(
                             position: argument.position,
                             message: "cannot use \(argType) as \(paramType) value in argument to \(packageName).\(name)")
                     }
                 }
                 return funcExport.results.first ?? .void
+            }
+            if case .identifier(let packageName, _) = base,
+                lookup(packageName) == nil,
+                importedPaths.contains(packageName),
+                GoStandardLibrary.supportedPackages.contains(packageName)
+            {
+                // Name the missing member instead of reporting the package
+                // itself as undefined.
+                throw GoDiagnostic(
+                    position: callee.position, message: "undefined: \(packageName).\(name)")
             }
             let baseType = try type(of: base)
             let candidates: [String]
@@ -1843,6 +1953,7 @@ private struct FunctionChecker {
                 guard case .pointer(let pointee) = operandType else {
                     throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
                 }
+                try rejectOpaqueFile(pointee, at: position)
                 return pointee
             case .receive:
                 let operandType = underlying(try type(of: operand))
@@ -1855,8 +1966,15 @@ private struct FunctionChecker {
                 return elementType
             }
         case .binary(let left, let binaryOperator, let right, let position):
-            let leftType = try type(of: left)
-            let rightType = try type(of: right)
+            var leftType = try type(of: left)
+            var rightType = try type(of: right)
+            if leftType != rightType,
+                let common = try commonIntegerType(
+                    left: left, leftType: leftType, right: right, rightType: rightType)
+            {
+                leftType = common
+                rightType = common
+            }
             guard
                 leftType == rightType
                     || ((leftType == .nilType || rightType == .nilType)
@@ -1938,6 +2056,7 @@ private struct FunctionChecker {
             guard case .pointer(let pointee) = operandType else {
                 throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
             }
+            try rejectOpaqueFile(pointee, at: position)
             return pointee
         case .index(let base, let index, let position):
             let baseType = try type(of: base)
@@ -1955,7 +2074,7 @@ private struct FunctionChecker {
                 return element
             case .map(let keyType, let valueType):
                 let indexType = try type(of: index)
-                guard isAssignable(indexType, to: keyType) else {
+                guard try isAssignable(index, ofType: indexType, to: keyType) else {
                     throw GoDiagnostic(
                         position: index.position,
                         message: "cannot use \(indexType) as \(keyType) value in map index")
@@ -1971,7 +2090,7 @@ private struct FunctionChecker {
 
     mutating func require(_ expression: GoExpression, assignableTo expected: GoType) throws {
         let actual = try type(of: expression)
-        guard isAssignable(actual, to: expected) else {
+        guard try isAssignable(expression, ofType: actual, to: expected) else {
             throw GoDiagnostic(
                 position: expression.position,
                 message: "cannot use \(actual) as \(expected) value")
@@ -1996,14 +2115,20 @@ private struct FunctionChecker {
             case "bool": return .bool
             case "any": return .interface([])
             case "error": return builtinErrorType()
+            case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
                 "context.Context", "context.CancelFunc",
                 "net.Conn", "net.Listener",
-                "http.Response", "http.ResponseWriter", "http.Request":
+                "http.Response", "http.ResponseWriter", "http.Request",
+                "time.Time", "os.File":
                 return .named(name)
             default:
                 guard availableTypes.contains(name) else {
-                    throw GoDiagnostic(position: position, message: "undefined: \(name)")
+                    throw GoDiagnostic(
+                        position: position,
+                        message: GoPredeclared.unsupportedNumericTypes.contains(name)
+                            ? GoPredeclared.unsupportedTypeMessage(name)
+                            : "undefined: \(name)")
                 }
                 return .named(name)
             }
@@ -2045,11 +2170,260 @@ private struct FunctionChecker {
     func underlying(_ type: GoType, visiting: Set<String> = []) -> GoType {
         guard case .named(let name) = type,
             !visiting.contains(name),
-            let definition = typeDefinitions[name]
+            let definition = typeDefinitions[name]?.underlying
+                ?? GoPredeclared.underlying(of: name)
         else { return type }
         var next = visiting
         next.insert(name)
-        return underlying(definition.underlying, visiting: next)
+        return underlying(definition, visiting: next)
+    }
+
+    // MARK: Untyped integer constants
+
+    func isByte(_ type: GoType) -> Bool {
+        GoPredeclared.isByte(type, definitions: typeDefinitions)
+    }
+
+    /// Value of an untyped integer constant expression: literals, constants
+    /// declared without a type, and operators over them. Nil for a typed
+    /// operand or when folding would overflow `int`.
+    func untypedConstantValue(_ expression: GoExpression) -> Int64? {
+        switch expression {
+        case .integer(let value, _):
+            return value
+        case .identifier(let name, _):
+            return lookup(name)?.constantValue
+        case .unary(.plus, let operand, _):
+            return untypedConstantValue(operand)
+        case .unary(.minus, let operand, _):
+            guard let value = untypedConstantValue(operand), value != .min else { return nil }
+            return -value
+        case .binary(let left, let binaryOperator, let right, _):
+            guard let lhs = untypedConstantValue(left), let rhs = untypedConstantValue(right)
+            else { return nil }
+            let folded: (partialValue: Int64, overflow: Bool)
+            switch binaryOperator {
+            case .add: folded = lhs.addingReportingOverflow(rhs)
+            case .subtract: folded = lhs.subtractingReportingOverflow(rhs)
+            case .multiply: folded = lhs.multipliedReportingOverflow(by: rhs)
+            case .divide:
+                guard rhs != 0 else { return nil }
+                folded = lhs.dividedReportingOverflow(by: rhs)
+            case .remainder:
+                guard rhs != 0 else { return nil }
+                folded = lhs.remainderReportingOverflow(dividingBy: rhs)
+            default: return nil
+            }
+            return folded.overflow ? nil : folded.partialValue
+        case .call:
+            guard let operation = expression.bitwiseOperation,
+                let first = untypedConstantValue(operation.operands[0])
+            else { return nil }
+            if operation.operator == .complement { return ~first }
+            guard let second = untypedConstantValue(operation.operands[1]) else { return nil }
+            return operation.operator.fold(first, second)
+        default:
+            return nil
+        }
+    }
+
+    func requireConstant(
+        _ value: Int64,
+        representableAs type: GoType,
+        at position: GoSourcePosition
+    ) throws {
+        guard isByte(type), !(0...255).contains(value) else { return }
+        throw GoDiagnostic(position: position, message: "constant \(value) overflows \(type)")
+    }
+
+    /// Whether `expression`, whose type is `actual`, may be used where
+    /// `expected` is required. An untyped integer constant adopts any integer
+    /// type that can represent it.
+    func isAssignable(
+        _ expression: GoExpression,
+        ofType actual: GoType,
+        to expected: GoType
+    ) throws -> Bool {
+        if isAssignable(actual, to: expected) { return true }
+        guard isInteger(expected), let value = untypedConstantValue(expression) else {
+            return false
+        }
+        try requireConstant(value, representableAs: expected, at: expression.position)
+        return true
+    }
+
+    /// The operand type two integer operands share when one of them is an
+    /// untyped constant, or nil when neither side can adopt the other's type.
+    func commonIntegerType(
+        left: GoExpression,
+        leftType: GoType,
+        right: GoExpression,
+        rightType: GoType
+    ) throws -> GoType? {
+        if leftType == rightType { return leftType }
+        if isInteger(rightType), let value = untypedConstantValue(left) {
+            try requireConstant(value, representableAs: rightType, at: left.position)
+            return rightType
+        }
+        if isInteger(leftType), let value = untypedConstantValue(right) {
+            try requireConstant(value, representableAs: leftType, at: right.position)
+            return leftType
+        }
+        return nil
+    }
+
+    // MARK: Bitwise operators, conversions, and native library calls
+
+    mutating func bitwiseResultType(
+        _ bitwiseOperator: GoBitwiseOperator,
+        operands: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        let leftType = try type(of: operands[0])
+        if bitwiseOperator == .complement {
+            guard isInteger(leftType) else {
+                throw GoDiagnostic(
+                    position: position, message: "operator ^ not defined on \(leftType)")
+            }
+            return leftType
+        }
+        let rightType = try type(of: operands[1])
+        guard isInteger(leftType), isInteger(rightType) else {
+            throw GoDiagnostic(
+                position: position,
+                message: "operator \(bitwiseOperator.spelling) requires integer operands")
+        }
+        if bitwiseOperator.isShift {
+            if let count = untypedConstantValue(operands[1]), count < 0 {
+                throw GoDiagnostic(
+                    position: operands[1].position, message: "invalid negative shift count \(count)")
+            }
+            return leftType
+        }
+        guard
+            let common = try commonIntegerType(
+                left: operands[0], leftType: leftType, right: operands[1], rightType: rightType)
+        else {
+            throw GoDiagnostic(
+                position: position, message: "mismatched types \(leftType) and \(rightType)")
+        }
+        return common
+    }
+
+    /// The target type when `callee` names a type, making the call a conversion.
+    func conversionTarget(_ callee: GoExpression) throws -> GoType? {
+        switch callee {
+        case .typeExpression(let typeExpression, _):
+            return try declaredType(typeExpression)
+        case .identifier(let name, let position):
+            guard lookup(name) == nil, functionSignatures[name] == nil else { return nil }
+            switch name {
+            case "int", "string", "bool", "byte", "uint8":
+                break
+            default:
+                guard availableTypes.contains(name)
+                    || GoPredeclared.unsupportedNumericTypes.contains(name)
+                else { return nil }
+            }
+            return try declaredType(.named(name, position: position))
+        default:
+            return nil
+        }
+    }
+
+    func isOperatorOrConversion(_ expression: GoExpression) throws -> Bool {
+        guard case .call(let callee, _, _) = expression else { return false }
+        return try expression.bitwiseOperation != nil || conversionTarget(callee) != nil
+    }
+
+    mutating func conversionResultType(
+        _ target: GoType,
+        arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        guard arguments.count == 1 else {
+            throw GoDiagnostic(
+                position: position,
+                message: "conversion to \(target) requires exactly one argument")
+        }
+        let argument = arguments[0]
+        let source = try type(of: argument)
+        let failure = GoDiagnostic(
+            position: argument.position, message: "cannot convert \(source) to type \(target)")
+        let sourceShape = underlying(source)
+        switch underlying(target) {
+        case .int:
+            if let value = untypedConstantValue(argument) {
+                try requireConstant(value, representableAs: target, at: argument.position)
+                return target
+            }
+            guard sourceShape == .int else { throw failure }
+            return target
+        case .string:
+            if sourceShape == .string || sourceShape == .int { return target }
+            if case .slice(let element) = sourceShape, isByte(element) { return target }
+            throw failure
+        case .slice(let element) where isByte(element) && sourceShape == .string:
+            return target
+        case .bool, .slice, .map, .pointer, .channel:
+            // Named types convert to and from their identical underlying type.
+            // Struct and array values carry their type name at run time, so
+            // those conversions are not supported.
+            guard source != .nilType, sourceShape == underlying(target) else { throw failure }
+            return target
+        default:
+            throw failure
+        }
+    }
+
+    func rejectOpaqueFile(_ pointee: GoType, at position: GoSourcePosition) throws {
+        guard pointee == .named("os.File") else { return }
+        throw GoDiagnostic(
+            position: position,
+            message: "os.File is opaque; a *os.File cannot be dereferenced")
+    }
+
+    /// Checks a call to a native library function or `*os.File` method and
+    /// returns it, or nil when `callee` is not one.
+    mutating func nativeCall(
+        callee: GoExpression,
+        arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoNativeFunction? {
+        guard case .selector(let base, let name, _) = callee else { return nil }
+        let function: GoNativeFunction
+        var parameters: ArraySlice<GoType>
+        if case .identifier(let packageName, _) = base,
+            lookup(packageName) == nil,
+            importedPaths.contains(packageName),
+            let native = GoStandardLibrary.nativeFunction(package: packageName, member: name)
+        {
+            function = native
+            parameters = native.parameters[...]
+        } else if (try? type(of: base)) == GoPredeclared.filePointer,
+            let native = GoStandardLibrary.fileMethod(name)
+        {
+            function = native
+            parameters = native.parameters.dropFirst()
+        } else {
+            return nil
+        }
+        guard function.isVariadic
+            ? arguments.count >= parameters.count
+            : arguments.count == parameters.count
+        else {
+            throw GoDiagnostic(
+                position: position,
+                message: "wrong number of arguments in call to \(function.goName)")
+        }
+        for (argument, parameter) in zip(arguments, parameters) {
+            try require(argument, assignableTo: parameter)
+        }
+        for argument in arguments.dropFirst(parameters.count)
+        where try type(of: argument) == .void {
+            throw GoDiagnostic(position: argument.position, message: "no value used as value")
+        }
+        return function
     }
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {
@@ -2301,13 +2675,26 @@ private struct FunctionChecker {
             }
             for (argument, parameterType) in zip(arguments, signature.parameters) {
                 let argumentType = try type(of: argument)
-                guard isAssignable(argumentType, to: parameterType) else {
+                guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
                     throw GoDiagnostic(
                         position: argument.position,
                         message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
                 }
             }
             return signature.results
+        }
+        if try isOperatorOrConversion(
+            .call(callee: callee, arguments: arguments, position: position))
+        {
+            return [try type(of: .call(callee: callee, arguments: arguments, position: position))]
+        }
+        if let native = try nativeCall(callee: callee, arguments: arguments, position: position) {
+            if native.results.isEmpty, native.goName.hasPrefix("fmt.Fprint") {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "\(native.goName) results are not supported; call it as a statement")
+            }
+            return native.results
         }
         if case .selector(let base, let name, _) = callee {
             if case .identifier(let packageName, _) = base,

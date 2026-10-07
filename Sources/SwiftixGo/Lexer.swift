@@ -97,15 +97,76 @@ private struct Scanner {
         tokens.append(GoToken(kind: kind, position: start))
     }
 
+    /// Scans a decimal, hexadecimal (`0x1f`), octal (`0o644` or `0644`), or
+    /// binary (`0b101`) integer literal. `_` may separate digits.
     mutating func scanInteger() throws {
         let start = position()
-        let begin = index
-        while index < bytes.count, isDigit(bytes[index]) { advance() }
-        let text = String(decoding: bytes[begin..<index], as: UTF8.self)
-        guard let value = Int64(text) else {
+        var radix: UInt64 = 10
+        var name = "decimal"
+        var requiresDigit = false
+        if bytes[index] == 0x30, let prefix = peek(1) {
+            switch prefix {
+            case 0x78, 0x58: (radix, name) = (16, "hexadecimal")
+            case 0x6F, 0x4F: (radix, name) = (8, "octal")
+            case 0x62, 0x42: (radix, name) = (2, "binary")
+            default: break
+            }
+            if radix != 10 {
+                advance()
+                advance()
+                requiresDigit = true
+            } else if isDigit(prefix) || prefix == 0x5F {
+                // A leading zero selects octal: 0644.
+                (radix, name) = (8, "octal")
+                advance()
+            }
+        }
+        var value: UInt64 = 0
+        var digitCount = 0
+        var overflowed = false
+        var lastWasSeparator = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x5F {
+                guard !lastWasSeparator, digitCount > 0 || radix != 10 else {
+                    throw GoDiagnostic(
+                        position: start, message: "'_' must separate successive digits")
+                }
+                lastWasSeparator = true
+                advance()
+                continue
+            }
+            guard let digit = escapeDigitValue(byte).map(UInt64.init) else {
+                if isIdentifierStart(byte) {
+                    throw GoDiagnostic(
+                        position: start,
+                        message: "invalid digit '\(String(decoding: [byte], as: UTF8.self))' in \(name) literal")
+                }
+                break
+            }
+            guard digit < radix else {
+                throw GoDiagnostic(
+                    position: start,
+                    message: "invalid digit '\(String(decoding: [byte], as: UTF8.self))' in \(name) literal")
+            }
+            let (scaled, scaleOverflow) = value.multipliedReportingOverflow(by: radix)
+            let (sum, sumOverflow) = scaled.addingReportingOverflow(digit)
+            overflowed = overflowed || scaleOverflow || sumOverflow
+            value = sum
+            digitCount += 1
+            lastWasSeparator = false
+            advance()
+        }
+        guard !lastWasSeparator else {
+            throw GoDiagnostic(position: start, message: "'_' must separate successive digits")
+        }
+        guard !requiresDigit || digitCount > 0 else {
+            throw GoDiagnostic(position: start, message: "\(name) literal has no digits")
+        }
+        guard !overflowed, let signed = Int64(exactly: value) else {
             throw GoDiagnostic(position: start, message: "integer literal overflows int64")
         }
-        tokens.append(GoToken(kind: .integer(value), position: start))
+        tokens.append(GoToken(kind: .integer(signed), position: start))
     }
 
     mutating func scanString() throws {
@@ -242,6 +303,21 @@ private struct Scanner {
         case 0x2D where peek(1) == 0x2D:
             kind = .decrement
             advance()
+        case 0x2B where peek(1) == 0x3D:
+            kind = .identifier("+=")
+            advance()
+        case 0x2D where peek(1) == 0x3D:
+            kind = .identifier("-=")
+            advance()
+        case 0x2A where peek(1) == 0x3D:
+            kind = .identifier("*=")
+            advance()
+        case 0x2F where peek(1) == 0x3D:
+            kind = .identifier("/=")
+            advance()
+        case 0x25 where peek(1) == 0x3D:
+            kind = .identifier("%=")
+            advance()
         case 0x2B: kind = .plus
         case 0x2D: kind = .minus
         case 0x2A: kind = .star
@@ -262,13 +338,52 @@ private struct Scanner {
         case 0x3E where peek(1) == 0x3D:
             kind = .greaterEqual
             advance()
+        case 0x3C where peek(1) == 0x3C:
+            advance()
+            if peek(1) == 0x3D {
+                kind = .identifier("<<=")
+                advance()
+            } else {
+                kind = .identifier(GoBitwiseOperator.shiftLeft.spelling)
+            }
+        case 0x3E where peek(1) == 0x3E:
+            advance()
+            if peek(1) == 0x3D {
+                kind = .identifier(">>=")
+                advance()
+            } else {
+                kind = .identifier(GoBitwiseOperator.shiftRight.spelling)
+            }
         case 0x26 where peek(1) == 0x26:
             kind = .logicalAnd
+            advance()
+        case 0x26 where peek(1) == 0x5E:
+            advance()
+            if peek(1) == 0x3D {
+                kind = .identifier("&^=")
+                advance()
+            } else {
+                kind = .identifier(GoBitwiseOperator.andNot.spelling)
+            }
+        case 0x26 where peek(1) == 0x3D:
+            kind = .identifier("&=")
             advance()
         case 0x26: kind = .ampersand
         case 0x7C where peek(1) == 0x7C:
             kind = .logicalOr
             advance()
+        case 0x7C where peek(1) == 0x3D:
+            kind = .identifier("|=")
+            advance()
+        case 0x7C: kind = .identifier(GoBitwiseOperator.or.spelling)
+        case 0x5E where peek(1) == 0x3D:
+            kind = .identifier("^=")
+            advance()
+        case 0x5E: kind = .identifier(GoBitwiseOperator.xor.spelling)
+        case 0x27:
+            throw GoDiagnostic(
+                position: start,
+                message: "rune literals are not supported; use the integer code point")
         case 0x3D: kind = .assign
         case 0x21: kind = .bang
         case 0x3C: kind = .less

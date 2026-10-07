@@ -87,7 +87,12 @@ public enum GoSourceRewriter {
                 if let expression { consider(expression) }
             case .assignment(let target, let expression, _):
                 consider(target)
-                consider(expression)
+                if let value = compoundAssignmentValue(target: target, expression: expression) {
+                    // `x += y` is parsed as `x = x + y`; only `y` has source text.
+                    consider(value)
+                } else {
+                    consider(expression)
+                }
             case .multiDeclaration(_, let expression, _):
                 consider(expression)
             case .multiAssignment(let targets, let expression, _):
@@ -135,6 +140,25 @@ public enum GoSourceRewriter {
         }
     }
 
+    /// The right operand when `expression` is the synthesized operation of a
+    /// compound assignment, which shares the target node as its left operand.
+    private static func compoundAssignmentValue(
+        target: GoExpression,
+        expression: GoExpression
+    ) -> GoExpression? {
+        if case .binary(let left, _, let right, _) = expression,
+            left.position == target.position
+        {
+            return right
+        }
+        if let operation = expression.bitwiseOperation, operation.operands.count == 2,
+            operation.operands[0].position == target.position
+        {
+            return operation.operands[1]
+        }
+        return nil
+    }
+
     private static func visit(_ statement: GoStatement, consider: (GoExpression) -> Void) {
         visit(
             GoBlock(statements: [statement], position: statementPosition(statement)),
@@ -158,6 +182,7 @@ public enum GoSourceRewriter {
     }
 
     private static func children(of expression: GoExpression) -> [GoExpression] {
+        if let operation = expression.bitwiseOperation { return operation.operands }
         switch expression {
         case .selector(let base, _, _): return [base]
         case .typeAssertion(let base, _, _): return [base]
@@ -176,8 +201,11 @@ public enum GoSourceRewriter {
         }
     }
 
+    /// Identifiers a pattern matches literally. Every other identifier is a
+    /// wildcard, so the predeclared type names used in conversions are listed.
     private static let literalIdentifiers: Set<String> = [
         "true", "false", "nil", "len", "cap", "append", "make",
+        "int", "byte", "uint8", "string", "bool",
     ]
 
     private static func matches(
@@ -186,6 +214,18 @@ public enum GoSourceRewriter {
         source: [UInt8],
         captures: inout [String: String]
     ) -> Bool {
+        // Bitwise operators are call-shaped nodes whose callee names the
+        // operator, so the callee must match exactly instead of capturing.
+        if let patternOperation = pattern.bitwiseOperation {
+            guard let targetOperation = target.bitwiseOperation,
+                patternOperation.operator == targetOperation.operator
+            else { return false }
+            return matchesList(
+                patternOperation.operands,
+                targetOperation.operands,
+                source: source,
+                captures: &captures)
+        }
         if case .identifier(let name, _) = pattern, !literalIdentifiers.contains(name) {
             guard let range = expressionRange(target, bytes: source) else { return false }
             let text = String(decoding: source[range], as: UTF8.self)
@@ -193,6 +233,8 @@ public enum GoSourceRewriter {
             captures[name] = text
             return true
         }
+        // An operator is never an ordinary call, whatever the pattern's callee.
+        if target.bitwiseOperation != nil { return false }
         switch (pattern, target) {
         case (.integer(let lhs, _), .integer(let rhs, _)): return lhs == rhs
         case (.string(let lhs, _), .string(let rhs, _)): return lhs == rhs
@@ -279,6 +321,18 @@ public enum GoSourceRewriter {
     ) -> Range<Int>? {
         let start: Int
         let end: Int
+        if let operation = expression.bitwiseOperation {
+            // The node's position is the operator; its text spans the operands.
+            guard let first = operation.operands.first,
+                let last = operation.operands.last,
+                let lastRange = expressionRange(last, bytes: bytes)
+            else { return nil }
+            if operation.operator.isUnary {
+                return expression.position.offset..<lastRange.upperBound
+            }
+            guard let firstRange = expressionRange(first, bytes: bytes) else { return nil }
+            return firstRange.lowerBound..<lastRange.upperBound
+        }
         switch expression {
         case .integer(let value, let position):
             start = position.offset
@@ -424,6 +478,21 @@ public enum GoSourceRewriter {
     }
 
     private static func render(_ expression: GoExpression, captures: [String: String]) -> String {
+        if let operation = expression.bitwiseOperation {
+            // Print the operator syntax back, parenthesizing operands that
+            // would otherwise regroup under Go's precedence.
+            func operand(_ index: Int, minimumPrecedence: Int) -> String {
+                let text = render(operation.operands[index], captures: captures)
+                return precedence(of: operation.operands[index]) < minimumPrecedence
+                    ? "(" + text + ")" : text
+            }
+            let level = operation.operator.precedence
+            if operation.operator.isUnary {
+                return operation.operator.spelling + operand(0, minimumPrecedence: level)
+            }
+            return operand(0, minimumPrecedence: level) + " " + operation.operator.spelling
+                + " " + operand(1, minimumPrecedence: level + 1)
+        }
         switch expression {
         case .integer(let value, _): return String(value)
         case .string(let value, _): return quote(value)
@@ -458,6 +527,25 @@ public enum GoSourceRewriter {
             return render(left, captures: captures) + " " + binaryText(operation) + " "
                 + render(right, captures: captures)
         case .typeExpression(let type, _): return typeText(type)
+        }
+    }
+
+    /// Binding strength of an expression's outermost operator on the parser's
+    /// scale; operands and postfix forms bind tightest.
+    private static func precedence(of expression: GoExpression) -> Int {
+        if let operation = expression.bitwiseOperation { return operation.operator.precedence }
+        switch expression {
+        case .binary(_, let operation, _, _):
+            switch operation {
+            case .logicalOr: return 1
+            case .logicalAnd: return 2
+            case .equal, .notEqual: return 3
+            case .less, .lessEqual, .greater, .greaterEqual: return 4
+            case .add, .subtract: return 5
+            case .multiply, .divide, .remainder: return 6
+            }
+        case .unary: return 7
+        default: return 8
         }
     }
 

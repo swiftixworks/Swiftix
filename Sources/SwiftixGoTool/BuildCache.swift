@@ -11,10 +11,12 @@ enum GoBuildCache {
         toolVersion: String,
         languageVersion: String,
         sources: [GoSourceFile],
-        moduleFile: [UInt8]?
+        moduleFile: [UInt8]?,
+        rootPackage: String = ""
     ) -> String {
         var digest = StableSHA256()
-        digest.updateField(Array("swiftix-go-build-cache-v1".utf8))
+        digest.updateField(Array("swiftix-go-build-cache-v2".utf8))
+        digest.updateField(Array(rootPackage.utf8))
         digest.updateField(Array(toolVersion.utf8))
         digest.updateField(Array(languageVersion.utf8))
         digest.updateField(Array(GoExecutableImage.targetOS.utf8))

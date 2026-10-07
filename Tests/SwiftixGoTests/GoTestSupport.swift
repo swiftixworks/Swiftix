@@ -11,6 +11,8 @@
 /// contract. Nothing is shared between suites, so tests stay parallel-safe and
 /// nothing here is (or needs to be) `Sendable`.
 
+import SwiftixGo
+import SwiftixGoRuntime
 import Testing
 
 @testable import Swiftix
@@ -26,9 +28,12 @@ extension GoTestHarness {
     /// `seed` runs first as its own process, which is how a test populates the VFS
     /// (Go sources, `go.mod`, module caches) before the shell starts. The loop is
     /// driven to idle after the seed and after every line, so the returned output
-    /// is complete for each command.
+    /// is complete for each command. A file-backed Go program parks on
+    /// `time.Sleep` and timers, so a test that runs one passes the logical time
+    /// to let pass after each line as `advancing`.
     func runShell(
         _ lines: [String],
+        advancing seconds: Double = 0,
         seed: ((ProcessContext) -> Void)? = nil
     ) -> String {
         let loop = EventLoop()
@@ -54,8 +59,59 @@ extension GoTestHarness {
         for line in lines {
             terminal.writeFromApp(Array((line + "\n").utf8))
             loop.runUntilIdle()
+            if seconds > 0 { loop.advance(by: seconds) }
         }
         return String(decoding: output, as: UTF8.self)
+    }
+
+    /// Compiles `body` as the body of `func main`, after one `import` line per
+    /// entry of `imports` and the package-level `declarations`, and returns
+    /// everything the program printed when run on `machine`.
+    func runGoMain(
+        _ body: String,
+        imports: [String] = ["fmt"],
+        declarations: String = "",
+        machine: GoVirtualMachine = GoVirtualMachine()
+    ) throws -> String {
+        let executable = try GoCompiler.compile(sources: [
+            GoSourceFile(
+                path: "main.go",
+                text: goMainSource(body, imports: imports, declarations: declarations))
+        ])
+        var output = ""
+        try machine.run(executable) { output += $0 }
+        return output
+    }
+
+    /// The program text ``runGoMain(_:imports:declarations:machine:)`` compiles.
+    func goMainSource(
+        _ body: String,
+        imports: [String] = ["fmt"],
+        declarations: String = ""
+    ) -> String {
+        (["package main"] + imports.map { "import \"\($0)\"" }
+            + [declarations, "func main() {", body, "}", ""]).joined(separator: "\n")
+    }
+
+    /// The message of the diagnostic that compiling `body` inside `func main`
+    /// produces, or nil when the program compiles.
+    func goMainDiagnostic(
+        _ body: String,
+        imports: [String] = ["fmt"],
+        declarations: String = ""
+    ) -> String? {
+        do {
+            _ = try GoCompiler.compile(sources: [
+                GoSourceFile(
+                    path: "main.go",
+                    text: goMainSource(body, imports: imports, declarations: declarations))
+            ])
+            return nil
+        } catch let diagnostic as GoDiagnostic {
+            return diagnostic.message
+        } catch {
+            return "unexpected error: \(error)"
+        }
     }
 
     /// Lines emitted by commands, excluding the dynamic interactive prompt and

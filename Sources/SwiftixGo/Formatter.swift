@@ -105,8 +105,11 @@ private struct FormatScanner {
     }
 
     mutating func scanInteger(leadingNewlines: Int) -> FormatToken {
+        // Keeps a prefixed or separated literal (`0x1f`, `0o644`, `1_000`) whole.
         let start = index
-        while index < bytes.count, isDigit(bytes[index]) { index += 1 }
+        while index < bytes.count, isIdentifierContinue(bytes[index]), bytes[index] < 0x80 {
+            index += 1
+        }
         return token(.literal, from: start, leadingNewlines: leadingNewlines)
     }
 
@@ -132,7 +135,16 @@ private struct FormatScanner {
 
     mutating func scanSymbol(leadingNewlines: Int) -> FormatToken {
         let start = index
-        let pairs = [":=", "++", "--", "==", "!=", "<=", ">=", "&&", "||", "<-"]
+        let pairs = [
+            ":=", "++", "--", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<", ">>", "&^",
+        ]
+        for spelling in GoCompoundAssignment.spellings {
+            let end = index + spelling.utf8.count
+            if end <= bytes.count, bytes[index..<end].elementsEqual(spelling.utf8) {
+                index = end
+                return token(.symbol, from: start, leadingNewlines: leadingNewlines)
+            }
+        }
         if index + 1 < bytes.count {
             let pair = String(decoding: bytes[index...(index + 1)], as: UTF8.self)
             if pairs.contains(pair) { index += 2 }
@@ -259,7 +271,8 @@ private struct FormatPrinter {
         }
 
         let tokenIsUnaryOperator =
-            token.text == "!" || token.text == "&"
+            token.text == "!"
+            || ((token.text == "&" || token.text == "^") && isUnaryOperator)
             || (token.text == "<-" && previous?.text != "chan" && isUnaryOperator)
             || (token.text == "*" && (isUnaryOperator || isPointerTypeContext))
             || ((token.text == "+" || token.text == "-") && isUnaryOperator)
@@ -286,6 +299,8 @@ private struct FormatPrinter {
             append("else")
         case "(":
             if previous?.text == "func" { ensureSpace() }
+            // The result list of a function signature: `func f() (int, error)`.
+            if previous?.text == ")", pendingFunction, parenthesisDepth == 0 { ensureSpace() }
             append("(")
             parenthesisDepth += 1
         case ")":
@@ -357,9 +372,11 @@ private struct FormatPrinter {
         case "!":
             if needsSpaceBeforeUnary() { ensureSpace() }
             append("!")
-        case "&":
+        case "&" where isUnaryOperator,
+            "^" where isUnaryOperator:
+            // Address-of and bitwise complement; the binary forms fall through.
             if needsSpaceBeforeUnary() { ensureSpace() }
-            append("&")
+            append(token.text)
         case "<-" where previous?.text == "chan":
             trimTrailingWhitespace()
             append("<-")
@@ -381,7 +398,9 @@ private struct FormatPrinter {
             "-" where isUnaryOperator:
             if needsSpaceBeforeUnary() { ensureSpace() }
             append(token.text)
-        case "=", ":=", "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "&&", "||":
+        case "=", ":=", "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "&&", "||",
+            "&", "|", "^", "<<", ">>", "&^",
+            "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^=":
             ensureSpace()
             append(token.text)
             append(" ")
@@ -476,18 +495,21 @@ private struct FormatPrinter {
         if current.isEmpty { return true }
         guard let previous else { return true }
         if previous.kind == .word {
-            return ["return", "case", "if", "for", "switch", "select"].contains(previous.text)
+            return ["return", "case", "if", "for", "switch", "select", "range"]
+                .contains(previous.text)
         }
         return [
-            "(", ",", "{", ":", ";", "=", ":=", "+", "-", "*", "/", "%", "==",
-            "!=", "<", "<=", ">", ">=", "&&", "||", "!",
+            "(", "[", ",", "{", ":", ";", "=", ":=", "+", "-", "*", "/", "%", "==",
+            "!=", "<", "<=", ">", ">=", "&&", "||", "!", "<-",
+            "&", "|", "^", "<<", ">>", "&^",
         ].contains(previous.text)
     }
 
     func needsSpaceBeforeUnary() -> Bool {
         guard let previous else { return false }
         return previous.kind == .word
-            && ["return", "case", "if", "for", "switch", "select"].contains(previous.text)
+            && ["return", "case", "if", "for", "switch", "select", "range"]
+                .contains(previous.text)
     }
 
     func canEndLine(_ token: FormatToken?) -> Bool {

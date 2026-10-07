@@ -53,9 +53,42 @@ signals behave the way a Linux user expects. Public API changes are additive.
   prompts again; at a continuation prompt (`> `) it abandons the pending
   command; it stops a running shell loop; and a nested interactive shell
   survives it. `$?` is 130 afterwards.
+- Swiftix Go: `os.Stdin`/`os.Stdout`/`os.Stderr`, `fmt.Fprint`/`fmt.Fprintln`,
+  `(*os.File).Read`/`Write`/`WriteString`, `os.ReadFile`/`os.WriteFile`,
+  `sort.Strings`/`sort.Ints`, `strconv.Itoa`, the bitwise operators, the
+  `byte`/`uint8` type, and conversions among `int`, `byte`, `string`, and
+  `[]byte`. `GoVirtualMachine.startProcess` runs an executable cooperatively
+  as the body of a process.
+- Swiftix Go links the local packages of a module into one program:
+  `GoCompiler.compile(packages:root:)` and
+  `GoCompiler.compile(root:sources:)` (with `GoPackageSource`) compile a
+  `package main` together with every package it imports, directly or
+  transitively. Across packages a program may call functions with any number
+  of results, use exported constants, read and assign exported variables, and
+  use exported types, struct fields, and methods; packages initialize
+  dependencies first, each exactly once. A cross-package reference compiles to
+  the same instructions as the in-package form. Unexported and undefined
+  names, import cycles, unused local imports, imports of a `package main`, and
+  `internal/` packages imported from outside their tree are diagnosed.
+  `go build`, `go run`, and `go install` accept a package directory such as
+  `./cmd/tool`.
+- Swiftix Go language: compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`,
+  `&=`, `|=`, `^=`, `&^=`, `<<=`, `>>=`); hexadecimal, octal (`0o644` and
+  `0644`), and binary integer literals with `_` separators; `return f()`
+  forwarding every result of a multi-result call; qualified composite
+  literals (`pkg.Type{...}`); and package-level initializers that call
+  imported packages.
 
 ### Changed
 
+- Swiftix Go: the `go` tool builds multi-package modules through the module
+  linker, so a main package is no longer limited to single-result functions
+  of the packages it imports. The build cache key now also names the root
+  package (entries written by earlier builds are simply not reused), and an
+  import chain deeper than 128 packages is refused. A leading zero now selects
+  octal (`010` is 8), `12ab` is an invalid literal instead of two tokens, and
+  `gofmt` writes a space before a parenthesized result list
+  (`func f() (int, error)`).
 - Unquoted expansions are split into fields on `$IFS` and then globbed;
   quote an expansion (`"$v"`) to keep it as one word.
 - Shell variables are no longer exported by default: `v=1` is visible to
@@ -104,6 +137,15 @@ signals behave the way a Linux user expects. Public API changes are additive.
 - A connected TCP socket is closed by its last descriptor: `tcpClose` on one
   of several descriptors sharing a connection (a `dup`, or a socket inherited
   by a child) no longer sends a FIN; the last close does.
+- Swiftix Go conformance: `s[i]` on a string is a `byte` and `time.After`/
+  `time.Tick` return `<-chan time.Time`, as in Go. Source that used a string
+  byte as an `int` needs `int(s[i])`.
+- File-backed Swiftix Go programs are scheduled cooperatively. They yield to
+  the event loop every instruction quantum instead of stopping at 1,000,000
+  instructions, `time.Sleep` and timers park the process until logical time
+  advances instead of fast-forwarding the clock, and reads of standard input
+  no longer run the upstream pipeline stage nested inside the reader. A host
+  that runs such a program must advance logical time for its timers to fire.
 
 ### Fixed
 
@@ -116,6 +158,13 @@ signals behave the way a Linux user expects. Public API changes are additive.
   `FilesystemSnapshot.legacyProjectionDepthLimit` (256) directory levels;
   the inode table still holds every level, and images whose `root` carries
   the full tree remain valid.
+- Swiftix Go programs no longer lose output beyond a pipe's 64 KiB: a write
+  parks until the reader makes room.
+- A goroutine that sleeps or reads standard input exactly on an instruction
+  quantum boundary no longer aborts the run with `bytecode operand type
+  mismatch`.
+- The Go heap no longer scans every cell after each instruction, and a slice
+  element store or `append` no longer copies the whole backing array.
 
 - A process that exits or is killed with a connected TCP socket open now
   closes the connection: Ctrl-C on `nc` or `curl` no longer leaves the server
@@ -290,6 +339,7 @@ This pre-1.0 minor intentionally changes the public kernel API described in the
 ### Added
 
 - Single-node kernel, VFS, process/fd/signal/pty model and IPv4 TCP/IP stack.
+- Swiftix Go compiler, bytecode runtime and macOS/Linux host tools.
 - Deterministic root filesystem images and Debian-style package management.
 - Public topology, terminal, uplink and observability seams.
 

@@ -99,7 +99,11 @@ public enum GoTokenKind: Sendable, Equatable {
 
     var canEndStatement: Bool {
         switch self {
-        case .identifier, .integer, .string, .rightParen, .rightBrace, .rightBracket, .return,
+        case .identifier(let name):
+            // Bitwise operators are lexed as identifiers with their spelling;
+            // a line may continue after one.
+            return !GoBitwiseOperator.isOperatorSpelling(name)
+        case .integer, .string, .rightParen, .rightBrace, .rightBracket, .return,
             .breakKeyword, .continueKeyword, .increment, .decrement:
             return true
         default:

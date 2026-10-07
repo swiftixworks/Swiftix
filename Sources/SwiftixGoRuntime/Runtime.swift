@@ -754,17 +754,79 @@ public struct GoVirtualMachine: Sendable {
         }
     }
 
+    /// Run `executable` as the body of a Swiftix process, scheduled
+    /// cooperatively on the process's event loop.
+    ///
+    /// Unlike ``runProgram(_:eventLoop:processContext:arguments:write:)`` and
+    /// ``startProgram(_:eventLoop:processContext:arguments:write:completion:)``,
+    /// this run never drives the event loop itself:
+    ///
+    /// - After every `instructionQuantum` instructions the process yields to
+    ///   the event loop and continues in a later step, so other processes run
+    ///   in between and a signal can end a runaway program.
+    /// - `time.Sleep`, timers, channel waits on them, standard-input reads, and
+    ///   network waits park the process on the kernel until they complete.
+    /// - Output goes to the process's descriptors (`fmt.Print` to fd 1). A write
+    ///   that a full pipe accepts only partly parks the writing goroutine until
+    ///   the reader makes room, so no output is dropped.
+    ///
+    /// `instructionBudget` bounds the instructions of the whole run; `nil`
+    /// leaves CPU time unbounded, as for a native process. `maximumInstructions`
+    /// and `resourceLimits.maximumOutputBytes` do not apply to this run: both
+    /// exist to bound a synchronous run, and here yielding and pipe
+    /// backpressure do that. A program whose goroutines all wait on each other
+    /// still fails with ``GoRuntimeError/deadlock``.
+    ///
+    /// Call from inside a step of `processContext`'s process (for example its
+    /// command body). `completion` runs exactly once, possibly before this
+    /// call returns, unless the process is killed first.
+    public func startProcess(
+        _ executable: GoExecutable,
+        processContext: ProcessContext,
+        arguments: [String] = [],
+        instructionBudget: Int? = nil,
+        completion: @escaping (Result<GoProcessResult, any Error>) -> Void
+    ) {
+        do {
+            if let result = try execute(
+                executable,
+                eventLoop: processContext.eventLoop,
+                processContext: processContext,
+                arguments: arguments,
+                write: { _ in },
+                resumedCompletion: completion,
+                cooperative: true,
+                instructionBudget: instructionBudget)
+            {
+                completion(.success(result))
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
     /// Run until the program finishes (returning its result) or suspends on
     /// host input (returning `nil`). Only a non-nil `resumedCompletion` permits
     /// suspension; it later receives the outcome of the resumed run.
+    ///
+    /// A `cooperative` run (see `startProcess`) requires a process context and
+    /// a `resumedCompletion`; it suspends instead of driving the event loop.
     private func execute(
         _ executable: GoExecutable,
         eventLoop: EventLoop,
         processContext: ProcessContext?,
         arguments: [String],
         write: @escaping (String) throws -> Void,
-        resumedCompletion: ((Result<GoProcessResult, any Error>) -> Void)?
+        resumedCompletion: ((Result<GoProcessResult, any Error>) -> Void)?,
+        cooperative: Bool = false,
+        instructionBudget: Int? = nil
     ) throws -> GoProcessResult? {
+        precondition(
+            !cooperative || (processContext != nil && resumedCompletion != nil),
+            "a cooperative Swiftix Go run needs a process and a completion")
+        let instructionLimit = cooperative
+            ? max(0, instructionBudget ?? Int.max)
+            : maximumInstructions
         do {
             try GoExecutableValidator.validate(executable, limits: resourceLimits)
         } catch let error as GoExecutableValidationError {
@@ -825,6 +887,10 @@ public struct GoVirtualMachine: Sendable {
         var blockedGoroutines: Set<Int> = []
         var blockedSelects: [Int: BlockedSelect] = [:]
         var currentBlocked = false
+        // True once the current goroutine's context is already stored in
+        // `goroutines` (parked, and possibly woken again) within this
+        // instruction, so the scheduler must not store it a second time.
+        var currentParked = false
         var nextWaitSequence: UInt64 = 0
         var selectRandomState = selectSeed
         var asynchronousError: GoRuntimeError?
@@ -842,6 +908,11 @@ public struct GoVirtualMachine: Sendable {
         var isSuspended = false
         var resumeHook: (() -> Void)?
         var pendingHostInputWaits = 0
+        // Cooperative-run state: host continuations (timers, descriptor and
+        // network waits, the quantum yield) that will resume a suspended run.
+        var pendingHostWaits = 0
+        var yieldRequested = false
+        var descriptorWrites: [Int: [PendingDescriptorWrite]] = [:]
         var standardInputCarry: [UInt8] = []
         var sliceStartInstruction = 0
         var completedNormally = false
@@ -909,6 +980,8 @@ public struct GoVirtualMachine: Sendable {
         }
 
         func consumeOutputBytes(_ byteCount: Int) throws {
+            // Pipe backpressure bounds a cooperative run's output instead.
+            if cooperative { return }
             guard byteCount >= 0,
                 outputBytesWritten <= resourceLimits.maximumOutputBytes,
                 byteCount <= resourceLimits.maximumOutputBytes - outputBytesWritten
@@ -918,9 +991,149 @@ public struct GoVirtualMachine: Sendable {
             outputBytesWritten += byteCount
         }
 
+        /// Resume a suspended run from a host continuation.
+        func resumeIfSuspended() {
+            guard isSuspended, let hook = resumeHook else { return }
+            resumeHook = nil
+            hook()
+        }
+
+        /// Bracket a host continuation that can make a goroutine runnable. A
+        /// cooperative run with nothing runnable suspends while any are
+        /// outstanding and reports a deadlock otherwise.
+        func beginHostWait() {
+            pendingHostWaits += 1
+        }
+
+        func endHostWait() {
+            pendingHostWaits -= 1
+            if cooperative, executionIsActive { resumeIfSuspended() }
+        }
+
+        func recordAsynchronousFailure(_ error: any Error) {
+            asynchronousError = (error as? GoRuntimeError) ?? .typeMismatch
+        }
+
+        /// Write the queued bytes of descriptor `fd` in order, waking each
+        /// writer when its bytes are accepted and parking on the kernel while
+        /// the descriptor is full.
+        func pumpDescriptorWrites(_ fd: Int) {
+            guard let processContext else { return }
+            while var head = descriptorWrites[fd]?.first {
+                var failure: String?
+                var accepted = 0
+                let end = min(head.bytes.count, head.offset + 65_536)
+                do {
+                    accepted = try processContext.writeFile(
+                        fd, Array(head.bytes[head.offset..<end]))
+                } catch SyscallError.wouldBlock {
+                    accepted = 0
+                } catch SyscallError.brokenPipe {
+                    // The kernel has delivered SIGPIPE. Yield so a killed
+                    // process stops here; one that ignores the signal sees the
+                    // error instead.
+                    failure = "broken pipe"
+                    yieldRequested = true
+                } catch {
+                    failure = "write failed: \(String(describing: error))"
+                }
+                head.offset += accepted
+                if failure == nil, head.offset < head.bytes.count {
+                    if accepted > 0 {
+                        head.idleRounds = 0
+                        descriptorWrites[fd]![0] = head
+                        continue
+                    }
+                    head.idleRounds += 1
+                    if head.idleRounds <= 8 {
+                        descriptorWrites[fd]![0] = head
+                        beginHostWait()
+                        processContext.poll(
+                            [PollRequest(fd: fd, interests: .writable)], timeout: nil
+                        ) { _ in
+                            defer { endHostWait() }
+                            guard executionIsActive, asynchronousError == nil else { return }
+                            pumpDescriptorWrites(fd)
+                        }
+                        return
+                    }
+                    failure = "write stalled"
+                }
+                descriptorWrites[fd]!.removeFirst()
+                if descriptorWrites[fd]!.isEmpty { descriptorWrites[fd] = nil }
+                do {
+                    try wakeGoroutine(
+                        head.goroutineID,
+                        values: head.results?(head.offset, failure) ?? [])
+                } catch {
+                    recordAsynchronousFailure(error)
+                    return
+                }
+            }
+        }
+
+        /// Write `bytes` to descriptor `fd` of the hosting process for the
+        /// current goroutine. `results` maps the accepted byte count and an
+        /// error message to the values the operation yields (none for
+        /// `fmt.Print`).
+        ///
+        /// A cooperative run parks the goroutine until every byte is accepted
+        /// (the caller ends the instruction with `currentBlocked` set).
+        /// Otherwise the write is immediate: fd 1 goes to the `write` sink, and
+        /// so does any descriptor of a run without a process.
+        func writeDescriptor(
+            _ fd: Int,
+            _ text: String,
+            results: ((Int, String?) -> [GoValue])? = nil
+        ) throws {
+            try writeDescriptor(fd, bytes: Array(text.utf8), text: text, results: results)
+        }
+
+        func writeDescriptor(
+            _ fd: Int,
+            bytes: [UInt8],
+            text: String? = nil,
+            results: ((Int, String?) -> [GoValue])? = nil
+        ) throws {
+            guard cooperative else {
+                try consumeOutputBytes(bytes.count)
+                var accepted = bytes.count
+                var failure: String?
+                if fd == 1 || processContext == nil {
+                    try write(text ?? String(decoding: bytes, as: UTF8.self))
+                } else if let processContext {
+                    accepted = 0
+                    do {
+                        while accepted < bytes.count {
+                            let count = try processContext.writeFile(
+                                fd, Array(bytes[accepted...]))
+                            guard count > 0 else {
+                                failure = "short write"
+                                break
+                            }
+                            accepted += count
+                        }
+                    } catch {
+                        failure = "write failed: \(String(describing: error))"
+                    }
+                }
+                if let results { stack.append(contentsOf: results(accepted, failure)) }
+                return
+            }
+            descriptorWrites[fd, default: []].append(
+                PendingDescriptorWrite(
+                    goroutineID: currentGoroutineID, bytes: bytes, results: results))
+            // The goroutine is parked before the pump can wake it.
+            goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
+            blockedGoroutines.insert(currentGoroutineID)
+            currentParked = true
+            currentBlocked = true
+            if descriptorWrites[fd]!.count == 1 { pumpDescriptorWrites(fd) }
+            if let asynchronousError { throw asynchronousError }
+        }
+
         func emit(_ text: String) throws {
-            try consumeOutputBytes(text.utf8.count)
-            try write(text)
+            try writeDescriptor(1, text)
         }
 
         func formatOutput(
@@ -1039,7 +1252,15 @@ public struct GoVirtualMachine: Sendable {
         /// Runtime timers belong to the hosting Swiftix process when one exists;
         /// standalone VM execution keeps using its explicitly supplied loop.
         func scheduleRuntimeWork(after delay: Double, _ work: @escaping () -> Void) {
-            if let processContext {
+            if cooperative, let processContext {
+                // A kernel sleep keeps the parked process alive and shows it as
+                // waiting; the continuation runs as a step of the process.
+                beginHostWait()
+                processContext.sleep(delay) {
+                    defer { endHostWait() }
+                    work()
+                }
+            } else if let processContext {
                 processContext.schedule(after: delay, work)
             } else {
                 eventLoop.schedule(after: delay, work)
@@ -1090,6 +1311,13 @@ public struct GoVirtualMachine: Sendable {
 
         func driveEventLoopUntilRunnable() throws {
             while !resumeNextGoroutine() {
+                if cooperative {
+                    // Never drive the loop from inside a process step: return
+                    // to it and let a host continuation resume the run.
+                    if let asynchronousError { throw asynchronousError }
+                    guard pendingHostWaits > 0 else { throw GoRuntimeError.deadlock }
+                    throw GoExecutionSuspension()
+                }
                 guard eventLoop.runNext() else {
                     if resumedCompletion != nil, pendingHostInputWaits > 0 {
                         throw GoExecutionSuspension()
@@ -1101,23 +1329,50 @@ public struct GoVirtualMachine: Sendable {
         }
 
         func scheduleNext(requeueCurrent: Bool) throws {
-            // Give one already-ready EventLoop job/timer a turn at each quantum
-            // without jumping logical time to a future deadline. Do this before
-            // selecting another guest goroutine so a busy run queue cannot starve
-            // host work.
+            var quantumEnded = yieldRequested
             if executed > 0,
                executed != lastEventLoopYieldInstruction,
                executed.isMultiple(of: instructionQuantum) {
                 lastEventLoopYieldInstruction = executed
-                _ = eventLoop.runUntilIdle(stepBudget: 1)
-                if let asynchronousError { throw asynchronousError }
+                quantumEnded = true
             }
-            if requeueCurrent, runQueue.isEmpty { return }
-            goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
-            if requeueCurrent {
+            yieldRequested = false
+            // Record a parked goroutine before any host work runs: the turn
+            // below may deliver the very wake-up it is waiting for.
+            if currentParked {
+                currentParked = false
+            } else if !requeueCurrent {
+                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
+                blockedGoroutines.insert(currentGoroutineID)
+            } else if cooperative, quantumEnded {
+                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
                 runQueue.append(currentGoroutineID)
             } else {
-                blockedGoroutines.insert(currentGoroutineID)
+                // The current goroutine keeps running unless others are ready.
+                if quantumEnded {
+                    _ = eventLoop.runUntilIdle(stepBudget: 1)
+                    if let asynchronousError { throw asynchronousError }
+                }
+                if runQueue.isEmpty { return }
+                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
+                runQueue.append(currentGoroutineID)
+                try driveEventLoopUntilRunnable()
+                return
+            }
+            if quantumEnded {
+                if cooperative, let processContext {
+                    // End this step. The zero-length sleep keeps the process
+                    // alive and queues the next slice behind other ready work.
+                    beginHostWait()
+                    processContext.sleep(0) { endHostWait() }
+                    throw GoExecutionSuspension()
+                }
+                // Give one already-ready EventLoop job/timer a turn at each
+                // quantum without jumping logical time to a future deadline.
+                // Do this before selecting another guest goroutine so a busy
+                // run queue cannot starve host work.
+                _ = eventLoop.runUntilIdle(stepBudget: 1)
+                if let asynchronousError { throw asynchronousError }
             }
             try driveEventLoopUntilRunnable()
         }
@@ -1154,7 +1409,9 @@ public struct GoVirtualMachine: Sendable {
         /// and resume the run if it suspended meanwhile.
         func readStandardInputChunk(for id: Int) {
             guard let processContext else { return }
+            beginHostWait()
             processContext.read(0, max: GoVirtualMachine.standardInputChunkBytes) { bytes in
+                defer { endHostWait() }
                 guard executionIsActive, asynchronousError == nil else { return }
                 do {
                     let pending = standardInputCarry + bytes
@@ -1186,10 +1443,7 @@ public struct GoVirtualMachine: Sendable {
                 } catch {
                     asynchronousError = .typeMismatch
                 }
-                if let hook = resumeHook {
-                    resumeHook = nil
-                    hook()
-                }
+                if !cooperative { resumeIfSuspended() }
             }
         }
 
@@ -1493,6 +1747,230 @@ public struct GoVirtualMachine: Sendable {
             }
         }
 
+        /// The elements of a slice value (`nil` is the empty slice).
+        func sliceElements(_ value: GoValue) throws -> ArraySlice<GoValue> {
+            if value == .nilValue { return [] }
+            guard case .slice(let slice) = value else { throw GoRuntimeError.typeMismatch }
+            let range = try validatedSliceRange(slice)
+            guard case .array(let backing) = try read(pointer: slice.backing, heap: heap) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            return backing[range]
+        }
+
+        /// The bytes of a `[]byte` value.
+        func sliceBytes(_ value: GoValue) throws -> [UInt8] {
+            try sliceElements(value).map { element in
+                guard case .int(let byte) = element else { throw GoRuntimeError.typeMismatch }
+                return UInt8(truncatingIfNeeded: byte)
+            }
+        }
+
+        func makeByteSlice(_ bytes: [UInt8]) throws -> GoValue {
+            try requireCollectionCount(bytes.count, resource: "slice elements")
+            let cell = try heap.allocate(.array(bytes.map { .int(Int64($0)) }))
+            return .slice(
+                GoSliceValue(
+                    backing: GoPointer(cell: cell),
+                    start: 0,
+                    length: bytes.count,
+                    capacity: bytes.count,
+                    zeroValue: .int(0)))
+        }
+
+        /// A Go `error` result: `nil`, or an error whose `Error()` is `message`.
+        func errorValue(_ message: String?) -> GoValue {
+            guard let message else { return .nilValue }
+            return .interface(GoInterfaceValue(typeName: "error", value: .string(message)))
+        }
+
+        /// Run a library function that reaches the hosting process: `*os.File`
+        /// and `fmt.Fprint*` output, descriptor reads, and whole-file I/O.
+        /// Arguments are the top `argumentCount` stack entries in call order.
+        /// Returns `false` when `name` is not such a function.
+        func executeHostNative(_ name: String, argumentCount: Int) throws -> Bool {
+            let expectedCount: Int?
+            switch name {
+            case "$fmt.Fprint", "$fmt.Fprintln": expectedCount = nil
+            case "$os.File.Write", "$os.File.WriteString", "$os.File.Read": expectedCount = 2
+            case "$os.ReadFile": expectedCount = 1
+            case "$os.WriteFile": expectedCount = 3
+            default: return false
+            }
+            guard argumentCount >= 1, stack.count >= argumentCount else {
+                throw GoRuntimeError.stackUnderflow
+            }
+            if let expectedCount, argumentCount != expectedCount {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+
+            func descriptor(_ value: GoValue) throws -> Int {
+                guard case .int(let raw) = value, let fd = Int(exactly: raw) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return fd
+            }
+            let writeResults: (Int, String?) -> [GoValue] = { count, failure in
+                [.int(Int64(count)), errorValue(failure)]
+            }
+
+            switch name {
+            case "$fmt.Fprint", "$fmt.Fprintln":
+                let newline = name == "$fmt.Fprintln"
+                try writeDescriptor(
+                    try descriptor(operands[0]),
+                    try formatOutput(
+                        Array(operands.dropFirst()),
+                        separator: newline ? " " : "",
+                        suffix: newline ? "\n" : ""))
+            case "$os.File.Write":
+                try writeDescriptor(
+                    try descriptor(operands[0]),
+                    bytes: try sliceBytes(operands[1]),
+                    results: writeResults)
+            case "$os.File.WriteString":
+                guard case .string(let text) = operands[1] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                try writeDescriptor(try descriptor(operands[0]), text, results: writeResults)
+            case "$os.File.Read":
+                let fd = try descriptor(operands[0])
+                let capacity: Int
+                let destination: GoSliceValue?
+                if case .slice(let slice) = operands[1] {
+                    _ = try validatedSliceRange(slice)
+                    capacity = slice.length
+                    destination = slice
+                } else if operands[1] == .nilValue {
+                    capacity = 0
+                    destination = nil
+                } else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                guard capacity > 0, let destination else {
+                    stack.append(contentsOf: [.int(0), .nilValue])
+                    break
+                }
+                func deliver(_ bytes: [UInt8]) throws -> [GoValue] {
+                    guard !bytes.isEmpty else { return [.int(0), errorValue("EOF")] }
+                    for (offset, byte) in bytes.enumerated() {
+                        let index = try checkedAdd(
+                            destination.start, offset, resource: "slice index")
+                        try writePointer(
+                            .int(Int64(byte)),
+                            through: appending(index: index, to: destination.backing),
+                            heap: &heap)
+                    }
+                    return [.int(Int64(bytes.count)), .nilValue]
+                }
+                // Bytes `ReadStdin` held back to keep a character whole are
+                // still unread input.
+                if fd == 0, !standardInputCarry.isEmpty {
+                    let count = min(capacity, standardInputCarry.count)
+                    let bytes = Array(standardInputCarry[..<count])
+                    standardInputCarry.removeFirst(count)
+                    stack.append(contentsOf: try deliver(bytes))
+                    break
+                }
+                guard let processContext, processContext.readiness(fd) != nil else {
+                    stack.append(contentsOf: [.int(0), errorValue("EOF")])
+                    break
+                }
+                let readerID = currentGoroutineID
+                pendingHostInputWaits += 1
+                beginHostWait()
+                processContext.read(fd, max: min(capacity, 65_536)) { bytes in
+                    defer { endHostWait() }
+                    guard executionIsActive, asynchronousError == nil else { return }
+                    pendingHostInputWaits -= 1
+                    do {
+                        try wakeGoroutine(readerID, values: try deliver(bytes))
+                    } catch {
+                        recordAsynchronousFailure(error)
+                    }
+                    if !cooperative { resumeIfSuspended() }
+                }
+                currentBlocked = true
+            case "$os.ReadFile":
+                guard case .string(let path) = operands[0] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                guard let processContext else {
+                    stack.append(contentsOf: [.nilValue, errorValue("open \(path): no file system")])
+                    break
+                }
+                var bytes: [UInt8] = []
+                do {
+                    let descriptor = try processContext.openFile(path, access: .readOnly)
+                    defer { try? processContext.closeFile(descriptor) }
+                    while true {
+                        let chunk = try processContext.readFile(descriptor, max: 65_536)
+                        if chunk.isEmpty { break }
+                        guard bytes.count <= resourceLimits.maximumInputBytes,
+                            chunk.count <= resourceLimits.maximumInputBytes - bytes.count
+                        else {
+                            throw GoRuntimeError.resourceLimitExceeded("input bytes")
+                        }
+                        bytes.append(contentsOf: chunk)
+                    }
+                } catch let error as GoRuntimeError {
+                    throw error
+                } catch {
+                    stack.append(contentsOf: [
+                        .nilValue, errorValue("open \(path): \(String(describing: error))"),
+                    ])
+                    break
+                }
+                stack.append(contentsOf: [try makeByteSlice(bytes), .nilValue])
+            default:
+                guard case .string(let path) = operands[0],
+                    case .int(let permissions) = operands[2]
+                else { throw GoRuntimeError.typeMismatch }
+                let contents = try sliceBytes(operands[1])
+                guard let processContext else {
+                    stack.append(errorValue("open \(path): no file system"))
+                    break
+                }
+                var failure: String?
+                do {
+                    let existed = processContext.stat(path) != nil
+                    // The VFS creates missing directories on open; Go does not.
+                    if let slash = path.lastIndex(of: "/"), slash != path.startIndex,
+                        processContext.stat(String(path[..<slash]))?.isDirectory != true
+                    {
+                        throw SyscallError.noSuchFileOrDirectory
+                    }
+                    let descriptor = try processContext.openFile(
+                        path, create: true, truncate: true, access: .writeOnly)
+                    defer { try? processContext.closeFile(descriptor) }
+                    if !existed {
+                        _ = processContext.chmod(
+                            path,
+                            mode: FileMode(rawValue: UInt16(truncatingIfNeeded: permissions & 0o777))
+                                .subtracting(processContext.fileCreationMask))
+                    }
+                    var offset = 0
+                    while offset < contents.count {
+                        let written = try processContext.writeFile(
+                            descriptor, Array(contents[offset...]))
+                        guard written > 0 else {
+                            failure = "write \(path): short write"
+                            break
+                        }
+                        offset += written
+                    }
+                } catch {
+                    failure = "open \(path): \(String(describing: error))"
+                }
+                stack.append(errorValue(failure))
+            }
+            return true
+        }
+
         func performGarbageCollection() {
             var rootCells = Array(0..<executable.globalCount)
             var rootValues: [GoValue] = stack
@@ -1626,6 +2104,117 @@ public struct GoVirtualMachine: Sendable {
             }
         }
 
+        /// Execute a pure native library call lowered to a reserved `$` name.
+        /// Pops `argumentCount` operands and pushes the results in order.
+        /// Returns false when `name` is not a pure native.
+        func executePureNative(
+            _ name: String,
+            argumentCount: Int,
+            stack: inout [GoValue]
+        ) throws -> Bool {
+            guard let expected = GoNative.argumentCounts[name] else { return false }
+            guard argumentCount == expected else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expected, actual: argumentCount)
+            }
+            /// The elements a slice operand exposes, plus where they live.
+            func sliceElements(
+                _ value: GoValue
+            ) throws -> (slice: GoSliceValue, backing: [GoValue], range: Range<Int>)? {
+                switch value {
+                case .nilValue:
+                    return nil
+                case .slice(let slice):
+                    let range = try validatedSliceRange(slice)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    return (slice, backing, range)
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
+            }
+            switch name {
+            case "$bits.not":
+                guard case .int(let value) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(.int(~value))
+            case "$conv.bytesToString":
+                var bytes: [UInt8] = []
+                if let elements = try sliceElements(try pop(&stack)) {
+                    bytes.reserveCapacity(elements.range.count)
+                    for element in elements.backing[elements.range] {
+                        guard case .int(let raw) = element, let byte = UInt8(exactly: raw) else {
+                            throw GoRuntimeError.typeMismatch
+                        }
+                        bytes.append(byte)
+                    }
+                }
+                let text = GoNative.string(fromBytes: bytes)
+                guard text.utf8.count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                stack.append(.string(text))
+            case "$conv.stringToBytes":
+                guard case .string(let text) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                try requireCollectionCount(text.utf8.count, resource: "slice elements")
+                let elements = text.utf8.map { GoValue.int(Int64($0)) }
+                let cell = try heap.allocate(.array(elements))
+                stack.append(
+                    .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell),
+                            start: 0,
+                            length: elements.count,
+                            capacity: elements.count,
+                            zeroValue: .int(0))))
+            case "$conv.runeToString":
+                guard case .int(let value) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(.string(GoNative.string(fromCodePoint: value)))
+            case "$strconv.Itoa":
+                guard case .int(let value) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(.string(String(value)))
+            case "$sort.Strings", "$sort.Ints":
+                guard let elements = try sliceElements(try pop(&stack)) else { break }
+                var backing = elements.backing
+                if name == "$sort.Strings" {
+                    let strings = try backing[elements.range].map { element -> String in
+                        guard case .string(let text) = element else {
+                            throw GoRuntimeError.typeMismatch
+                        }
+                        return text
+                    }
+                    backing.replaceSubrange(
+                        elements.range,
+                        with: GoNative.sortedStrings(strings).map { GoValue.string($0) })
+                } else {
+                    let integers = try backing[elements.range].map { element -> Int64 in
+                        guard case .int(let value) = element else {
+                            throw GoRuntimeError.typeMismatch
+                        }
+                        return value
+                    }
+                    backing.replaceSubrange(
+                        elements.range,
+                        with: integers.sorted().map { GoValue.int($0) })
+                }
+                try writePointer(.array(backing), through: elements.slice.backing, heap: &heap)
+            default:
+                let (lhs, rhs) = try integerPair(&stack)
+                guard let result = try GoNative.integerBinary(name, lhs, rhs) else {
+                    return false
+                }
+                stack.append(.int(result))
+            }
+            return true
+        }
+
         /// Run guest code until the program finishes or suspends on host input.
         func runSlice() throws {
             executionLoop: while true {
@@ -1676,7 +2265,7 @@ public struct GoVirtualMachine: Sendable {
                         } else {
                             throw GoRuntimeError.missingFunction(deferred.function)
                         }
-                        try scheduleNext(requeueCurrent: true)
+                        try scheduleNext(requeueCurrent: !currentBlocked)
                         continue
                     }
 
@@ -1736,7 +2325,7 @@ public struct GoVirtualMachine: Sendable {
                 frames[frameIndex].programCounter += 1
                 currentBlocked = false
                 executed += 1
-                guard executed - sliceStartInstruction <= maximumInstructions else {
+                guard executed - sliceStartInstruction <= instructionLimit else {
                     throw GoRuntimeError.instructionLimitExceeded
                 }
                 switch instruction {
@@ -1843,7 +2432,14 @@ public struct GoVirtualMachine: Sendable {
                     if condition { try jump(to: target, frame: &frames[frameIndex]) }
                 case .call(let name, let argumentCount):
                     guard let function = functions[name] else {
-                        throw GoRuntimeError.missingFunction(name)
+                        guard
+                            try executePureNative(
+                                name, argumentCount: argumentCount, stack: &stack)
+                                || executeHostNative(name, argumentCount: argumentCount)
+                        else {
+                            throw GoRuntimeError.missingFunction(name)
+                        }
+                        break
                     }
                     guard frames.count < maximumCallDepth else {
                         throw GoRuntimeError.callStackLimitExceeded
@@ -2763,7 +3359,9 @@ public struct GoVirtualMachine: Sendable {
                         break
                     }
                     let dialingID = currentGoroutineID
+                    beginHostWait()
                     processContext.tcpConnect(fd, to: ip, port: port) {
+                        defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
                         do {
                             try wakeGoroutine(
@@ -2851,7 +3449,9 @@ public struct GoVirtualMachine: Sendable {
                         break
                     }
                     let acceptingID = currentGoroutineID
+                    beginHostWait()
                     processContext.tcpAccept(listener.fd) { acceptedFD in
+                        defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
                         do {
                             try wakeGoroutine(
@@ -2886,7 +3486,9 @@ public struct GoVirtualMachine: Sendable {
                     }
                     let readingID = currentGoroutineID
                     let maxBytes = buf.length
+                    beginHostWait()
                     processContext.tcpRecv(conn.fd, max: maxBytes) { bytes in
+                        defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
                         do {
                             guard bytes.count <= maxBytes,
@@ -3057,13 +3659,17 @@ public struct GoVirtualMachine: Sendable {
                     // Spawn an internal accept loop using the event loop
                     let handlersCopy = httpHandlers
                     func acceptLoop() {
+                        beginHostWait()
                         processContext.tcpAccept(fd) { acceptedFD in
+                            defer { endHostWait() }
                             guard executionIsActive, asynchronousError == nil else { return }
                             // Read HTTP request
+                            beginHostWait()
                             processContext.tcpRecv(
                                 acceptedFD,
                                 max: resourceLimits.maximumNetworkTransferBytes
                             ) { bytes in
+                                defer { endHostWait() }
                                 guard executionIsActive, asynchronousError == nil else { return }
                                 guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
                                     asynchronousError = .resourceLimitExceeded(
@@ -3183,7 +3789,9 @@ public struct GoVirtualMachine: Sendable {
                         break
                     }
                     let gettingID = currentGoroutineID
+                    beginHostWait()
                     processContext.tcpConnect(fd, to: ip, port: port) {
+                        defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
                         // Send HTTP request
                         let request =
@@ -3198,10 +3806,12 @@ public struct GoVirtualMachine: Sendable {
                         }
                         _ = processContext.tcpSend(fd, Array(request.utf8))
                         // Read response
+                        beginHostWait()
                         processContext.tcpRecv(
                             fd,
                             max: resourceLimits.maximumNetworkTransferBytes
                         ) { bytes in
+                            defer { endHostWait() }
                             guard executionIsActive, asynchronousError == nil else { return }
                             guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
                                 asynchronousError = .resourceLimitExceeded(
@@ -3535,6 +4145,10 @@ public struct GoVirtualMachine: Sendable {
                     let values = Array(stack[start...])
                     stack.removeSubrange(start...)
                     testFailureCount += 1
+                    // The frame state is final before a write that can park.
+                    if fatal {
+                        frames[frameIndex].pendingExit = .testFatal
+                    }
                     if !values.isEmpty {
                         try emit(
                             try formatOutput(
@@ -3543,17 +4157,15 @@ public struct GoVirtualMachine: Sendable {
                                 separator: " ",
                                 suffix: "\n"))
                     }
-                    if fatal {
-                        frames[frameIndex].pendingExit = .testFatal
-                    }
                 case .testBegin(let name):
                     subtests.append((name, testFailureCount))
                 case .testEnd(let name):
                     let started = subtests.popLast()?.failuresAtStart ?? testFailureCount
                     let passed = testFailureCount == started
                     let status = passed ? "PASS" : "FAIL"
-                    try emit("--- \(status): \(name)\n")
+                    // The result is in place before a write that can park.
                     stack.append(.bool(passed))
+                    try emit("--- \(status): \(name)\n")
                 case .osArgs:
                     let elements = arguments.map { GoValue.string($0) }
                     let cell = try heap.allocate(.array(elements))
@@ -3614,6 +4226,49 @@ public struct GoVirtualMachine: Sendable {
                     guard let processContext else {
                         stack.append(.string(""))
                         stack.append(.int(1))
+                        break
+                    }
+                    if paths.isEmpty, cooperative {
+                        guard processContext.readiness(0) != nil else {
+                            stack.append(.string(""))
+                            stack.append(.int(0))
+                            break
+                        }
+                        // Park this goroutine and gather fd 0 to end of input
+                        // across process steps.
+                        let readerID = currentGoroutineID
+                        var gathered: [UInt8] = []
+                        func gatherStandardInput() {
+                            beginHostWait()
+                            processContext.read(0, max: 65_536) { chunk in
+                                defer { endHostWait() }
+                                guard executionIsActive, asynchronousError == nil else { return }
+                                if chunk.isEmpty {
+                                    do {
+                                        try wakeGoroutine(
+                                            readerID,
+                                            values: [
+                                                .string(String(decoding: gathered, as: UTF8.self)),
+                                                .int(0),
+                                            ])
+                                    } catch {
+                                        recordAsynchronousFailure(error)
+                                    }
+                                    return
+                                }
+                                guard gathered.count <= resourceLimits.maximumInputBytes,
+                                    chunk.count
+                                        <= resourceLimits.maximumInputBytes - gathered.count
+                                else {
+                                    asynchronousError = .resourceLimitExceeded("input bytes")
+                                    return
+                                }
+                                gathered.append(contentsOf: chunk)
+                                gatherStandardInput()
+                            }
+                        }
+                        gatherStandardInput()
+                        currentBlocked = true
                         break
                     }
                     if paths.isEmpty {
@@ -3746,7 +4401,7 @@ public struct GoVirtualMachine: Sendable {
                 guard stack.count <= resourceLimits.maximumValueStackEntries else {
                     throw GoRuntimeError.resourceLimitExceeded("operand stack")
                 }
-                if heap.allocationsSinceCollection >= garbageCollectionThreshold,
+                if heap.shouldCollect(threshold: garbageCollectionThreshold),
                     frames.indices.contains(frameIndex),
                     frames[frameIndex].function.safepointProgramCounters.contains(
                         frames[frameIndex].programCounter)
@@ -3763,8 +4418,10 @@ public struct GoVirtualMachine: Sendable {
         /// final outcome through `resumedCompletion`.
         func resumeSuspendedExecution() {
             isSuspended = false
-            sliceStartInstruction = executed
-            outputBytesWritten = 0
+            if !cooperative {
+                sliceStartInstruction = executed
+                outputBytesWritten = 0
+            }
             do {
                 if let asynchronousError { throw asynchronousError }
                 try driveEventLoopUntilRunnable()
@@ -3908,6 +4565,11 @@ public struct GoVirtualMachine: Sendable {
         heap: inout ManagedHeap
     ) throws {
         guard heap.contains(pointer.cell) else { throw GoRuntimeError.invalidPointer }
+        if pointer.path.count == 1, case .index(let element) = pointer.path[0],
+            try heap.replaceArrayElement(pointer.cell, element: element, with: value)
+        {
+            return
+        }
 
         func replacing(
             _ current: GoValue,
@@ -4081,6 +4743,10 @@ private struct ManagedHeap {
     private let maximumCells: Int
     private let maximumBytes: Int
     private var liveBytes: Int
+    /// Number of occupied cells, maintained on allocate/collect so statistics
+    /// never scan the heap (they are sampled after every instruction).
+    private var liveCells: Int
+    private var liveBytesAfterCollection = 0
     private var freeList: [Int] = []
     private(set) var allocationsSinceCollection = 0
     private var totalAllocations = 0
@@ -4098,6 +4764,7 @@ private struct ManagedHeap {
         self.maximumCells = maximumCells
         self.maximumBytes = maximumBytes
         self.liveBytes = initialBytes
+        self.liveCells = globalCount
         cells = []
         cells.reserveCapacity(globalCount)
         for _ in 0..<globalCount {
@@ -4110,14 +4777,27 @@ private struct ManagedHeap {
         allocationsSinceCollection = globalCount
     }
 
+    /// Whether enough has been allocated since the last collection to pay
+    /// for another one.
+    ///
+    /// A collection visits every live value, so collecting every `threshold`
+    /// allocations costs time proportional to the live heap per call-heavy
+    /// loop iteration. Scaling the trigger with the bytes that survived the
+    /// last collection keeps the amortized cost per allocation constant. The
+    /// fixed threshold applies again once the heap is half full, so a program
+    /// near its ceiling is still collected promptly.
+    func shouldCollect(threshold: Int) -> Bool {
+        guard allocationsSinceCollection >= threshold else { return false }
+        if liveCells > maximumCells / 2 || liveBytes > maximumBytes / 2 { return true }
+        return allocationsSinceCollection >= liveBytesAfterCollection / 64
+    }
+
     var statistics: GoRuntimeStatistics {
         GoRuntimeStatistics(
             heapAllocations: totalAllocations,
             garbageCollections: collectionCount,
             reclaimedHeapCells: reclaimedCount,
-            liveHeapCells: cells.reduce(into: 0) { count, cell in
-                if cell != nil { count += 1 }
-            },
+            liveHeapCells: liveCells,
             liveHeapBytes: liveBytes,
             maximumHeapBytes: maximumBytes)
     }
@@ -4150,6 +4830,42 @@ private struct ManagedHeap {
         liveBytes = bytesWithoutOldCell + estimatedBytes
     }
 
+    /// Replace element `element` of the array stored in cell `index` without
+    /// copying the array or re-measuring its other elements, so a slice store
+    /// or append costs O(1) instead of O(length). Returns `false` when the
+    /// cell does not hold an array with that element; the caller then takes
+    /// the general path, which reports the precise error.
+    mutating func replaceArrayElement(
+        _ index: Int,
+        element: Int,
+        with value: GoValue
+    ) throws -> Bool {
+        guard contains(index), case .array(var values) = cells[index]!.value,
+            values.indices.contains(element)
+        else { return false }
+        let oldBytes = try Self.estimatedBytes(of: values[element], maximum: maximumBytes)
+        let newBytes = try Self.estimatedBytes(of: value, maximum: maximumBytes)
+        let (layout, cellBytes, marked) = (
+            cells[index]!.layout, cells[index]!.estimatedBytes, cells[index]!.marked)
+        let bytesWithoutOldElement = liveBytes - oldBytes
+        guard bytesWithoutOldElement <= maximumBytes,
+            newBytes <= maximumBytes - bytesWithoutOldElement
+        else {
+            throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+        }
+        // Drop the cell's reference first so `values` is uniquely referenced
+        // and the element store below mutates the buffer in place.
+        cells[index] = nil
+        values[element] = value
+        cells[index] = Cell(
+            value: .array(values),
+            layout: layout,
+            estimatedBytes: cellBytes - oldBytes + newBytes,
+            marked: marked)
+        liveBytes = bytesWithoutOldElement + newBytes
+        return true
+    }
+
     mutating func allocate(_ value: GoValue) throws -> Int {
         let estimatedBytes = try Self.estimatedBytes(of: value, maximum: maximumBytes)
         guard liveBytes <= maximumBytes,
@@ -4176,6 +4892,7 @@ private struct ManagedHeap {
             throw GoRuntimeError.resourceLimitExceeded("heap allocation counters")
         }
         liveBytes += estimatedBytes
+        liveCells += 1
         allocationsSinceCollection += 1
         totalAllocations += 1
         return index
@@ -4205,11 +4922,13 @@ private struct ManagedHeap {
                 cells[index] = cell
             } else {
                 liveBytes -= cell.estimatedBytes
+                liveCells -= 1
                 cells[index] = nil
                 freeList.append(index)
                 reclaimedCount += 1
             }
         }
+        liveBytesAfterCollection = liveBytes
     }
 
     private static func estimatedBytes(of root: GoValue, maximum: Int) throws -> Int {
@@ -4407,6 +5126,16 @@ private enum GoHeapLayout {
             preconditionFailure("managed heap layout/value mismatch")
         }
     }
+}
+
+/// Bytes a goroutine is waiting to write to a descriptor of its process.
+private struct PendingDescriptorWrite {
+    let goroutineID: Int
+    let bytes: [UInt8]
+    var offset = 0
+    var idleRounds = 0
+    /// Values the write yields from the accepted byte count and error message.
+    let results: ((Int, String?) -> [GoValue])?
 }
 
 private struct DeferredCall {
