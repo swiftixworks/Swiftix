@@ -74,9 +74,10 @@ final class MountNamespace {
     /// Resolve `path` (an absolute, `.`/`..`-collapsed path) against the table:
     /// the deepest mountpoint that is a path-component prefix of `path` wins. When
     /// one matches, return that mount's root and the remainder of the path
-    /// relative to it; when none does, return `nil` (the caller resolves against
-    /// the base tree with the original path).
-    func resolve(_ path: String) -> (root: VNode, subpath: String)? {
+    /// relative to it (plus the mountpoint's depth in components); when none
+    /// does, return `nil` (the caller resolves against the base tree with the
+    /// original path).
+    func resolve(_ path: String) -> (root: VNode, subpath: String, depth: Int)? {
         guard !entries.isEmpty else { return nil }
         let target = Self.components(path)
         var best: (root: VNode, depth: Int)?
@@ -90,7 +91,7 @@ final class MountNamespace {
         }
         guard let best else { return nil }
         let remainder = target.dropFirst(best.depth).joined(separator: "/")
-        return (best.root, "/" + remainder)
+        return (best.root, "/" + remainder, best.depth)
     }
 
     static func components(_ path: String) -> [String] {

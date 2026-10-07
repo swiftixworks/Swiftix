@@ -165,7 +165,8 @@ extension ProcessContext {
         }
         // A reset wakes the parked recv with an empty read; surface it as a typed
         // error so the caller distinguishes an abort from a normal EOF (R10.3).
-        if connection.wasReset { throw SyscallError.connectionReset }
+        // Bytes that arrived before the reset are still delivered first.
+        if bytes.isEmpty, connection.wasReset { throw SyscallError.connectionReset }
         return bytes
     }
 

@@ -54,6 +54,48 @@ public final class ProcessContext {
         return "/" + stack.joined(separator: "/")
     }
 
+    // MARK: - Path resolution with search permission
+
+    /// The directory-search policy for a walk toward `absolutePath` (already
+    /// normalized by `absolute`). uid 0 bypasses DAC and gets no policy, so its
+    /// walks cost exactly what they did before per-component checks existed.
+    ///
+    /// A path at or below the working directory resolves *from* the working
+    /// directory, like a relative path on Linux: the directories above the cwd
+    /// were searched when the process (or an ancestor) entered it and are not
+    /// asked again, while the cwd itself and everything under it are. Any other
+    /// path — including one that climbs out of the cwd with `..` — is checked
+    /// from the root.
+    func pathSearch(toward absolutePath: String) -> VirtualFileSystem.PathSearch? {
+        guard process.uid != 0 else { return nil }
+        let cwd = process.cwd
+        var trusted = 0
+        if cwd != "/", absolutePath == cwd || absolutePath.hasPrefix(cwd + "/") {
+            trusted = cwd.split(separator: "/").count
+        }
+        return VirtualFileSystem.PathSearch(permits: { [unowned self] directory in
+            self.permits(directory, .execute)
+        }, trustedComponents: trusted)
+    }
+
+    /// The policy inside a capability scope: every directory from the scope root
+    /// down is checked.
+    var scopedSearch: VirtualFileSystem.PathSearch? { pathSearch(toward: "/") }
+
+    /// Resolve `path` (absolute or cwd-relative) in this process's mount
+    /// namespace, enforcing search permission on every traversed directory.
+    func resolvePath(_ path: String, follow: Bool = true) -> VirtualFileSystem.PathResolution {
+        let resolved = absolute(path)
+        return kernel.vfs.resolve(resolved, follow: follow, mounts: mountNS,
+                                  search: pathSearch(toward: resolved))
+    }
+
+    /// `resolvePath` for callers that treat "cannot be reached" and "does not
+    /// exist" alike.
+    func lookupNode(_ path: String, follow: Bool = true) -> VNode? {
+        resolvePath(path, follow: follow).node
+    }
+
     /// Record one completed Swiftix syscall using a whitespace-free detail token
     /// so `/proc/<pid>/syscalls` remains line-oriented and mechanically parsable.
     func recordSyscall(_ name: String, result: String, detail: String = "-") {

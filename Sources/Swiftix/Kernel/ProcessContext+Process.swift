@@ -78,7 +78,7 @@ extension ProcessContext {
     @discardableResult
     public func chdir(_ path: String) -> Bool {
         let resolved = absolute(path)
-        guard let node = kernel.vfs.lookup(resolved, mounts: mountNS),
+        guard let node = lookupNode(resolved),
               node.kind == .directory,
               permits(node, .execute) else {
             recordSyscall("chdir", result: "-1", detail: "path=\(resolved)")
@@ -246,7 +246,7 @@ extension ProcessContext {
     /// Change ownership of a file. This compact model reserves chown for root.
     public func chown(_ path: String, uid: UInt32, gid: UInt32) -> Bool {
         guard process.uid == 0 else { return false }
-        guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
+        guard let node = lookupNode(absolute(path)) else { return false }
         node.uid = uid
         node.gid = gid
         node.touchChange(kernel.loop.now)
@@ -255,7 +255,7 @@ extension ProcessContext {
 
     /// Change mode (permission bits) of a file.
     public func chmod(_ path: String, mode: FileMode) -> Bool {
-        guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
+        guard let node = lookupNode(absolute(path)) else { return false }
         guard process.uid == 0 || process.uid == node.uid else { return false }
         node.mode = mode
         node.touchChange(kernel.loop.now)

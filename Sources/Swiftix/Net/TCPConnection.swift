@@ -62,6 +62,21 @@ final class TCPConnection {
     /// as before.
     private(set) var wasReset = false
 
+    /// No descriptor references this connection any more (last close, process
+    /// exit or kill): nothing will read it again, and nothing but the close
+    /// handshake keeps it in the table.
+    private(set) var isOrphaned = false
+
+    /// A close is in progress whose FIN waits behind unsent Send_Buffer bytes.
+    private var finDeferred = false
+    /// Our FIN has been assigned a sequence number and transmitted. Until then
+    /// "everything sent is acknowledged" says nothing about the FIN.
+    private var finSent = false
+    private var orphanTimeoutArmed = false
+    /// How long a descriptor-less connection may sit in FIN_WAIT_2 waiting for a
+    /// peer FIN that never comes (Linux `tcp_fin_timeout`).
+    private let orphanFinWait2Timeout = 60.0
+
     /// Test seam (internal, additive-only): shrink the Receive_Buffer_Capacity so a
     /// small transfer can drive the Zero_Window path deterministically on the
     /// logical-time loop (R12). Internal so the public API is unchanged (NFR-1).
@@ -100,6 +115,9 @@ final class TCPConnection {
     // re-arming the timer on every `pump()`.
     private var persistTimer = TCPEpochTimer()
     private var persisting = false
+    /// Probes sent in the current stall since the connection became an orphan
+    /// (or since the stall began); see `TCPConnectionPlanner.persistProbe`.
+    private var persistProbesSent = 0
     private let persistInterval = 1.0
 
     /// Count of RTO-timer-driven retransmissions (not fast retransmits). The
@@ -248,7 +266,9 @@ final class TCPConnection {
     // MARK: - App API
 
     func send(_ data: [UInt8]) {
-        guard state == .established, !data.isEmpty else { return }
+        // CLOSE_WAIT is a half-closed connection: the peer finished sending, we
+        // have not.
+        guard state == .established || state == .closeWait, !data.isEmpty else { return }
         // Append to the Send_Buffer (R7.1) and try to drain it within the window.
         sendBuffer.append(data)
         perform(.pumpSendBuffer)
@@ -272,6 +292,12 @@ final class TCPConnection {
     }
 
     var hasBufferedData: Bool { !receiveBuffer.isEmpty }
+
+    /// A receive returns now instead of parking: bytes are buffered, or none
+    /// will ever arrive (EOF, reset, or a connection that is gone).
+    var receiveWouldNotBlock: Bool {
+        hasBufferedData || eofReceived || wasReset || state == .closed
+    }
 
     var readiness: IOReadiness {
         var mask: IOReadiness = []
@@ -300,7 +326,23 @@ final class TCPConnection {
 
     /// Begin (or continue) an orderly close.
     func close() {
-        perform(TCPConnectionPlanner.localClose(from: state))
+        perform(TCPConnectionPlanner.localClose(from: state, hasUnsentData: !sendBuffer.isEmpty))
+    }
+
+    /// The last descriptor for this connection's open-file description closed.
+    func lastDescriptorClosed() {
+        guard !isOrphaned else { return }
+        isOrphaned = true
+        persistProbesSent = 0
+        perform(TCPConnectionPlanner.lastDescriptorClosed(from: state,
+                                                          hasUnreadData: !receiveBuffer.isEmpty,
+                                                          hasUnsentData: !sendBuffer.isEmpty))
+    }
+
+    /// The listener that would have handed this connection to `accept` closed.
+    func listenerClosed() {
+        isOrphaned = true
+        perform(TCPConnectionPlanner.listenerClosed(state: state))
     }
 
     // MARK: - Egress helpers
@@ -326,6 +368,11 @@ final class TCPConnection {
             let chunk = sendBuffer.popPrefix(n)
             perform(.sendControlled(flags: [.ack, .psh], payload: chunk))
         }
+        // A deferred FIN goes out right behind the last application byte.
+        if finDeferred, sendBuffer.isEmpty {
+            finDeferred = false
+            perform(.sendControlled(flags: [.ack, .fin], payload: []))
+        }
     }
 
     // MARK: - Zero-window persist timer (R12.3)
@@ -335,6 +382,7 @@ final class TCPConnection {
     private func startPersistTimer() {
         guard !persisting else { return }
         persisting = true
+        persistProbesSent = 0
         schedulePersist()
     }
 
@@ -350,11 +398,14 @@ final class TCPConnection {
     private func schedulePersist() {
         persistTimer.schedule(on: stack, after: persistInterval) { [weak self] epoch in
             guard let self, self.persistTimer.accepts(epoch), self.persisting else { return }
-            guard self.state == .established, self.peerWindow == 0, !self.sendBuffer.isEmpty else {
+            guard self.state != .closed, self.peerWindow == 0, !self.sendBuffer.isEmpty else {
                 self.persisting = false
                 return
             }
-            self.perform(.sendZeroWindowProbe)
+            self.perform(TCPConnectionPlanner.persistProbe(orphaned: self.isOrphaned,
+                                                           probesSent: self.persistProbesSent))
+            guard self.state != .closed else { return }   // an orphan out of probes
+            self.persistProbesSent += 1
             self.schedulePersist()   // keep probing until the window opens
         }
     }
@@ -389,6 +440,7 @@ final class TCPConnection {
                                      sentAt: stack.loop.now,
                                      retransmitted: false)
         sndNxt = sndNxt &+ out.length
+        if flags.contains(.fin) { finSent = true }
         retransmitQueue.append(out)
         perform(TCPConnectionPlanner.transmitAndArmTimer(out))
     }
@@ -405,6 +457,17 @@ final class TCPConnection {
                                        acknowledgment: rcvNxt,
                                        window: advertisedWindow,
                                        options: options)
+    }
+
+    /// RST|ACK at `sndNxt`, the sequence the peer's receive window starts at (or
+    /// contains, with segments still in flight), so it is accepted as in-window.
+    private func sendReset() {
+        stack.sendRST(to: remoteIP,
+                      localPort: localPort,
+                      remotePort: remotePort,
+                      seq: sndNxt,
+                      ack: rcvNxt,
+                      ackFlag: true)
     }
 
     private func transmit(_ out: TCPOutgoingSegment) {
@@ -448,6 +511,10 @@ final class TCPConnection {
             sendControlled(flags: flags, payload: payload)
         case .sendAck:
             sendAck()
+        case .sendReset:
+            sendReset()
+        case .deferFIN:
+            finDeferred = true
         case .transmit(let segment):
             transmit(segment)
         case .fastRetransmit:
@@ -464,6 +531,8 @@ final class TCPConnection {
             retransmitTimer.cancel()
         case .scheduleTimeWaitExpiry:
             scheduleTimeWaitExpiry()
+        case .scheduleOrphanTimeout:
+            scheduleOrphanTimeout()
         case .startPersistTimer:
             startPersistTimer()
         case .stopPersistTimer:
@@ -541,10 +610,22 @@ final class TCPConnection {
                 state = .established
                 congestion.onEstablished()
                 perform(ackActions)
-                listener?.deliver(self)
+                if let listener {
+                    listener.deliver(self)
+                } else {
+                    // The listener closed mid-handshake: nothing can accept this.
+                    listenerClosed()
+                }
             }
 
         case .established, .finWait1, .finWait2, .closeWait, .closing, .lastAck, .timeWait:
+            if TCPStateMachine.orphanRejectsPayload(orphaned: isOrphaned,
+                                                    segmentSequence: header.sequence,
+                                                    payloadCount: payload.count,
+                                                    receiveNext: rcvNxt) {
+                perform(TCPConnectionPlanner.orphanReceivedData)
+                return
+            }
             if header.flags.contains(.ack) {
                 handleIncomingAck(header, payloadEmpty: payload.isEmpty)
             }
@@ -555,7 +636,8 @@ final class TCPConnection {
             perform(finResult.actions)
             perform(TCPConnectionPlanner.closeTransition(from: state,
                                                          receivedFIN: finResult.received,
-                                                         ourFinAcked: sndUna == sndNxt))
+                                                         ourFinAcked: finSent && sndUna == sndNxt,
+                                                         orphaned: isOrphaned))
 
         default:
             break
@@ -712,6 +794,17 @@ final class TCPConnection {
         return plan
     }
 
+    /// Bound an orphan's stay in FIN_WAIT_2. Armed at most once; a connection
+    /// that has moved on by the time it fires is left alone.
+    private func scheduleOrphanTimeout() {
+        guard !orphanTimeoutArmed else { return }
+        orphanTimeoutArmed = true
+        stack.schedule(after: orphanFinWait2Timeout) { [weak self] in
+            guard let self, self.state == .finWait2 else { return }
+            self.perform(TCPConnectionPlanner.orphanTimeoutExpired)
+        }
+    }
+
     private func scheduleTimeWaitExpiry() {
         stack.schedule(after: timeWaitDuration) { [weak self] in
             guard let self, self.state == .timeWait else { return }
@@ -742,6 +835,14 @@ final class TCPListener {
 
     func dequeue() -> TCPConnection? {
         backlog.popFirst()
+    }
+
+    /// The listening socket's last descriptor closed: connections that were
+    /// established but never accepted have no future owner and are reset.
+    func closeBacklog() {
+        while let connection = backlog.popFirst() {
+            connection.listenerClosed()
+        }
     }
 
     func addReadinessListener(_ listener: @escaping () -> Void) -> ReadinessSubscription {

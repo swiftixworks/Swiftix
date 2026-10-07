@@ -54,6 +54,9 @@ extension BuiltinCommands {
                 }
                 guard positional.count == 2 else { usage(); return }
                 let source = positional[0], mountpoint = positional[1]
+                guard ctx.getuid() == 0 else {
+                    ctx.fail("mount: \(mountpoint): must be superuser to use mount.", code: 1); return
+                }
                 let ok: Bool
                 if bind {
                     ok = ctx.mountBind(source: source, at: mountpoint)
@@ -75,6 +78,9 @@ extension BuiltinCommands {
             Command(name: "umount", summary: "unmount a filesystem", category: .fileSystem) { ctx, argv in
                 guard argv.count > 1 else {
                     ctx.usage("umount", "umount <mountpoint>"); return
+                }
+                guard ctx.getuid() == 0 else {
+                    ctx.fail("umount: \(argv[1]): must be superuser to unmount.", code: 1); return
                 }
                 if ctx.unmount(argv[1]) {
                     ctx.exit(0)

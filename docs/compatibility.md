@@ -52,8 +52,16 @@ I/O, and last-close pipe behavior.
 The compatibility boundary remains explicit:
 
 - credentials implement inherited effective uid/gid/supplementary groups and a
-  compact mode-bit DAC subset, not real/saved IDs, capabilities, ACLs, or full
-  per-component search permission;
+  compact mode-bit DAC subset, not real/saved IDs, capabilities, or ACLs.
+  Directory search (execute) permission is enforced on every path component,
+  through symbolic links and mount namespaces; uid 0 bypasses it, and only
+  uid 0 may mount or unmount. One deliberate difference from Linux remains:
+  `..` is collapsed lexically before the walk, so a path that climbs out of
+  the working directory is checked from the root;
+- a connected TCP socket closes when the last descriptor sharing its open-file
+  description does (close, exit, or kill): FIN after pending data, or RST when
+  received data was never read. There is no `shutdown(2)` half-close call,
+  `SO_LINGER`, or `SIGPIPE`/`EPIPE` for writes to a reset connection;
 - only the cgroup-v2-style pids controller is modeled, and a refused Swift
   `spawn` returns PID `0` rather than exposing host `errno`;
 - UDP has one binding owner per port. `SO_REUSEADDR` can be stored/read as an

@@ -584,7 +584,13 @@ extension PropertyInvariantsTests {
         }
         nodes.kernelA.spawn("tcp-client") { ctx in
             guard let fd = ctx.tcpSocket() else { return }
-            ctx.tcpConnect(fd, to: nodes.ipB, port: 80) { }
+            ctx.tcpConnect(fd, to: nodes.ipB, port: 80) {
+                // Hold the connection open: a client that returned here would
+                // exit, and its last descriptor closing sends the server a FIN —
+                // the server would be in CLOSE_WAIT with its recv already woken,
+                // not the ESTABLISHED, parked peer this property is about.
+                ctx.tcpRecv(fd) { _ in }
+            }
         }
         loop.advance(by: 0.1)   // establish + park, well under the initial RTO
 

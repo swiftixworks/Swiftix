@@ -57,23 +57,31 @@ extension ProcessContext {
     /// process's mount namespace — the moral equivalent of
     /// `mount -t tmpfs tmpfs <path>`. Files created under it live in the mount, and
     /// the mountpoint's previous contents are shadowed while it is mounted.
+    ///
+    /// Changing the mount table is reserved for uid 0, as on Linux (where it
+    /// needs `CAP_SYS_ADMIN`): a mount can shadow any directory, and a bind
+    /// mount gives a tree a second path that skips its ancestors' search
+    /// permission.
     @discardableResult
     public func mountTmpfs(at path: String) -> Bool {
-        kernel.mountTmpfs(at: absolute(path), ns: process.mountNamespace)
+        guard process.uid == 0 else { return false }
+        return kernel.mountTmpfs(at: absolute(path), ns: process.mountNamespace)
     }
 
     /// Bind-mount the directory `source` onto `path` (`mount --bind <source>
     /// <path>`): the two paths then refer to the same subtree, so writes through
-    /// one are visible through the other.
+    /// one are visible through the other. uid 0 only.
     @discardableResult
     public func mountBind(source: String, at path: String) -> Bool {
-        kernel.mountBind(source: absolute(source), at: absolute(path), ns: process.mountNamespace)
+        guard process.uid == 0 else { return false }
+        return kernel.mountBind(source: absolute(source), at: absolute(path), ns: process.mountNamespace)
     }
 
-    /// Unmount whatever is mounted at `path` (`umount <path>`).
+    /// Unmount whatever is mounted at `path` (`umount <path>`). uid 0 only.
     @discardableResult
     public func unmount(_ path: String) -> Bool {
-        kernel.unmount(absolute(path), ns: process.mountNamespace)
+        guard process.uid == 0 else { return false }
+        return kernel.unmount(absolute(path), ns: process.mountNamespace)
     }
 
     /// Detach this process into a private copy of its mount namespace — the moral

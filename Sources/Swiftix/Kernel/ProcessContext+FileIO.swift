@@ -21,9 +21,9 @@ extension ProcessContext {
             // The legacy convenience API historically returned a handle usable
             // for both the initialization write and a subsequent read/seek.
             inferredAccess = .readWrite
-        } else if kernel.vfs.lookup(absolute(path), mounts: mountNS)?.deviceKind != nil {
+        } else if lookupNode(absolute(path))?.deviceKind != nil {
             inferredAccess = .readWrite
-        } else if kernel.vfs.lookup(absolute(path), mounts: mountNS)?.kind == .fifo {
+        } else if lookupNode(absolute(path))?.kind == .fifo {
             inferredAccess = .readWrite
         } else {
             inferredAccess = .readOnly
@@ -38,7 +38,7 @@ extension ProcessContext {
     @discardableResult
     public func mkdir(_ path: String) -> Bool {
         let resolved = absolute(path)
-        let existing = kernel.vfs.lookup(resolved, follow: false, mounts: mountNS)
+        let existing = lookupNode(resolved, follow: false)
         let result: Bool
         if existing == nil, !canMutateParent(of: resolved) {
             result = false
@@ -69,7 +69,7 @@ extension ProcessContext {
     /// links are followed (like POSIX `stat`); a dangling link resolves to `nil`.
     public func stat(_ path: String) -> FileStat? {
         let resolved = absolute(path)
-        let result = kernel.vfs.lookup(resolved, mounts: mountNS).map(FileStat.init)
+        let result = lookupNode(resolved).map(FileStat.init)
         recordSyscall("stat", result: result == nil ? "-1" : "0", detail: "path=\(resolved)")
         return result
     }
@@ -77,7 +77,7 @@ extension ProcessContext {
     /// Metadata for the node at `path` without following a final symbolic link.
     public func lstat(_ path: String) -> FileStat? {
         let resolved = absolute(path)
-        let result = kernel.vfs.lookup(resolved, follow: false, mounts: mountNS).map(FileStat.init)
+        let result = lookupNode(resolved, follow: false).map(FileStat.init)
         recordSyscall("lstat", result: result == nil ? "-1" : "0", detail: "path=\(resolved)")
         return result
     }
@@ -101,7 +101,7 @@ extension ProcessContext {
     /// The target path of the symbolic link at `path` (POSIX `readlink`), or
     /// `nil` if `path` is not a symbolic link. Does not follow the final link.
     public func readlink(_ path: String) -> String? {
-        guard let node = kernel.vfs.lookup(absolute(path), follow: false, mounts: mountNS),
+        guard let node = lookupNode(absolute(path), follow: false),
               node.kind == .symlink else { return nil }
         return node.linkTarget
     }
@@ -114,7 +114,9 @@ extension ProcessContext {
     @discardableResult
     public func link(_ targetPath: String, at linkPath: String) -> Bool {
         let destination = absolute(linkPath)
-        guard canMutateParent(of: destination) else { return false }
+        // The target must be reachable by this process, not merely exist: a link
+        // into a directory the caller cannot search would hand out the inode.
+        guard canMutateParent(of: destination), lookupNode(targetPath) != nil else { return false }
         return kernel.vfs.link(absolute(targetPath), at: destination, mounts: mountNS)
     }
 
@@ -169,7 +171,7 @@ extension ProcessContext {
     /// path doesn't exist.
     @discardableResult
     public func utimes(_ path: String, atime: Double? = nil, mtime: Double? = nil) -> Bool {
-        guard let node = kernel.vfs.lookup(absolute(path), mounts: mountNS) else { return false }
+        guard let node = lookupNode(absolute(path)) else { return false }
         guard process.uid == 0 || process.uid == node.uid || permits(node, .write) else { return false }
         let now = kernel.loop.now
         node.atime = atime ?? now
@@ -463,7 +465,7 @@ extension ProcessContext {
     /// `ls` built-in; procfs directories (e.g. `/proc/net`) list too.
     public func listDirectory(_ path: String) -> [String]? {
         let resolved = absolute(path)
-        guard let node = kernel.vfs.lookup(resolved, mounts: mountNS),
+        guard let node = lookupNode(resolved),
               node.kind == .directory,
               permits(node, .read), permits(node, .execute) else {
             recordSyscall("readdir", result: "-1", detail: "path=\(resolved)")
@@ -518,8 +520,11 @@ extension ProcessContext {
                          flags: OpenFlags,
                          access: FileAccessMode) throws -> Int {
         let resolved = absolute(path)
-        let existing = kernel.vfs.lookup(resolved, mounts: mountNS)
-        if existing == nil, flags.contains(.create), !canMutateParent(of: resolved) {
+        let resolution = resolvePath(resolved)
+        let existing = resolution.node
+        var denied = false
+        if case .searchDenied = resolution { denied = true }
+        if denied || (existing == nil && flags.contains(.create) && !canMutateParent(of: resolved)) {
             recordSyscall("open", error: .permissionDenied, detail: "path=\(resolved)")
             throw SyscallError.permissionDenied
         }
@@ -545,9 +550,9 @@ extension ProcessContext {
                          flags: OpenFlags = [],
                          access: FileAccessMode = .readOnly) throws -> Int {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        let existing = kernel.vfs.lookup(relative, beneath: root)
+        let existing = try scopedNode(relative, beneath: root)
         if existing == nil, flags.contains(.create) {
-            guard let parent = kernel.vfs.parentDirectory(of: relative, beneath: root) else {
+            guard let parent = try scopedParent(of: relative, beneath: root) else {
                 throw SyscallError.noSuchFileOrDirectory
             }
             guard permits(parent, .write), permits(parent, .execute) else {
@@ -563,7 +568,7 @@ extension ProcessContext {
     /// Metadata for a path relative to a filesystem capability.
     public func stat(_ path: String, in scope: FileSystemScope) throws -> FileStat {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        guard let node = kernel.vfs.lookup(relative, beneath: root) else {
+        guard let node = try scopedNode(relative, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         return FileStat(node)
@@ -575,7 +580,7 @@ extension ProcessContext {
     public func listDirectory(_ path: String,
                               in scope: FileSystemScope) throws -> [FileSystemDirectoryEntry] {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        guard let node = kernel.vfs.lookup(relative, beneath: root) else {
+        guard let node = try scopedNode(relative, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard node.kind == .directory else { throw SyscallError.notADirectory }
@@ -594,10 +599,10 @@ extension ProcessContext {
     /// Create one directory relative to a filesystem capability.
     public func mkdir(_ path: String, in scope: FileSystemScope) throws {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        if kernel.vfs.lookup(relative, follow: false, beneath: root) != nil {
+        if try scopedNode(relative, follow: false, beneath: root) != nil {
             throw SyscallError.fileExists
         }
-        guard let parent = kernel.vfs.parentDirectory(of: relative, beneath: root) else {
+        guard let parent = try scopedParent(of: relative, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard permits(parent, .write), permits(parent, .execute) else {
@@ -612,7 +617,7 @@ extension ProcessContext {
     /// Remove a file or empty directory relative to a filesystem capability.
     public func remove(_ path: String, in scope: FileSystemScope) throws {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        guard kernel.vfs.lookup(relative, follow: false, beneath: root) != nil else {
+        guard try scopedNode(relative, follow: false, beneath: root) != nil else {
             throw SyscallError.noSuchFileOrDirectory
         }
         try requireMutableParent(of: relative, beneath: root)
@@ -624,7 +629,7 @@ extension ProcessContext {
     /// Unlink a non-directory node relative to a filesystem capability.
     public func unlinkFile(_ path: String, in scope: FileSystemScope) throws {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        guard let node = kernel.vfs.lookup(relative, follow: false, beneath: root) else {
+        guard let node = try scopedNode(relative, follow: false, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard node.kind != .directory else { throw SyscallError.isADirectory }
@@ -637,7 +642,7 @@ extension ProcessContext {
     /// Remove an empty directory relative to a filesystem capability.
     public func removeDirectory(_ path: String, in scope: FileSystemScope) throws {
         let (root, relative) = try scopedRootAndPath(scope, path)
-        guard let node = kernel.vfs.lookup(relative, follow: false, beneath: root) else {
+        guard let node = try scopedNode(relative, follow: false, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard node.kind == .directory else { throw SyscallError.notADirectory }
@@ -697,7 +702,7 @@ extension ProcessContext {
             }
         }
 
-        guard let root = kernel.vfs.lookup(absolute(scope.rootPath), mounts: mountNS) else {
+        guard let root = try node(resolvePath(scope.rootPath)) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard root.kind == .directory else { throw SyscallError.invalidArgument }
@@ -708,14 +713,36 @@ extension ProcessContext {
     /// convenience VFS historically creates missing parents for root; non-root
     /// callers must name an existing writable/searchable immediate parent.
     private func canMutateParent(of absolutePath: String) -> Bool {
-        guard let parent = kernel.vfs.parentDirectory(of: absolutePath, mounts: mountNS) else {
+        switch kernel.vfs.resolveParentDirectory(of: absolutePath, mounts: mountNS,
+                                                 search: pathSearch(toward: absolutePath)) {
+        case .found(let parent):
+            return permits(parent, .write) && permits(parent, .execute)
+        case .missing:
             return process.uid == 0
+        case .searchDenied:
+            return false
         }
-        return permits(parent, .write) && permits(parent, .execute)
+    }
+
+    /// Resolve inside a capability scope with search permission enforced from
+    /// the scope root down. `nil` is a missing path; a refusal is EACCES.
+    private func scopedNode(_ relativePath: String,
+                            follow: Bool = true,
+                            beneath root: VNode) throws -> VNode? {
+        try node(kernel.vfs.resolve(relativePath, follow: follow, beneath: root, search: scopedSearch))
+    }
+
+    private func scopedParent(of relativePath: String, beneath root: VNode) throws -> VNode? {
+        try node(kernel.vfs.resolveParentDirectory(of: relativePath, beneath: root, search: scopedSearch))
+    }
+
+    private func node(_ resolution: VirtualFileSystem.PathResolution) throws -> VNode? {
+        if case .searchDenied = resolution { throw SyscallError.permissionDenied }
+        return resolution.node
     }
 
     private func requireMutableParent(of relativePath: String, beneath root: VNode) throws {
-        guard let parent = kernel.vfs.parentDirectory(of: relativePath, beneath: root) else {
+        guard let parent = try scopedParent(of: relativePath, beneath: root) else {
             throw SyscallError.noSuchFileOrDirectory
         }
         guard permits(parent, .write), permits(parent, .execute) else {

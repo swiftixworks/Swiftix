@@ -474,6 +474,9 @@ struct AsyncSyscallTests {
         pair.kernelA.spawn("tcp-client") { ctx in
             guard let fd = ctx.tcpSocket() else { return }
             try? await ctx.tcpConnect(fd, to: ipB, port: 8080)
+            // Hold the connection open: a client that returned here would exit,
+            // and its last descriptor closing sends the server a FIN.
+            _ = try? await ctx.tcpRecv(fd)
         }
 
         await drive(loop, until: { box.parked })
@@ -635,6 +638,9 @@ struct AsyncSyscallTests {
         pair.kernelA.spawn("tcp-client") { ctx in
             guard let fd = ctx.tcpSocket() else { return }
             try? await ctx.tcpConnect(fd, to: ipB, port: 80)
+            // Hold the connection open: a client that returned here would exit,
+            // and its last descriptor closing sends the server a FIN.
+            _ = try? await ctx.tcpRecv(fd)
         }
 
         // Establish and park the server on recv.

@@ -5,6 +5,42 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- Directory search (execute) permission is enforced on every component of a
+  path, not only the last: as uid 1000, `cat /root/x` now fails with
+  `Permission denied` when `/root` is mode 0700, whatever the mode of `x`.
+  This applies to every path syscall, to symbolic-link targets, to mount
+  namespaces, and to `FileSystemScope` operations; uid 0 is unaffected. A path
+  at or below the working directory still resolves from the working
+  directory. `link` fails when the caller cannot reach the target, and tab
+  completion lists only what the shell's user may list.
+- `mount` and `umount` (and `mountTmpfs`/`mountBind`/`unmount`) require
+  uid 0; other users get `must be superuser to use mount.` Previously any user
+  could change the mount table, including bind-mounting a directory it could
+  not otherwise enter.
+- A connected TCP socket is closed by its last descriptor: `tcpClose` on one
+  of several descriptors sharing a connection (a `dup`, or a socket inherited
+  by a child) no longer sends a FIN; the last close does.
+
+### Fixed
+
+- A process that exits or is killed with a connected TCP socket open now
+  closes the connection: Ctrl-C on `nc` or `curl` no longer leaves the server
+  side established forever. The peer sees a FIN, or a reset if the process
+  left received data unread (as on Linux). Connections nobody accepted are
+  reset when their listener closes, data sent to a closed peer draws a reset,
+  an ownerless connection whose peer never closes is released after 60
+  seconds, and one whose last data is stuck behind a zero window resets the
+  peer after 8 unanswered probes.
+- A TCP close with data still waiting for the send window sends the FIN after
+  that data instead of ahead of it.
+- Data can be sent on a connection after the peer has closed its half
+  (CLOSE_WAIT).
+- A receive on a connection that was already reset returns immediately
+  instead of parking forever, and bytes that arrived before a reset are
+  delivered before the reset is reported.
+
 ## 0.12.0 — 2026-09-30
 
 This release lets independently packaged Swiftix Go programs run full-screen

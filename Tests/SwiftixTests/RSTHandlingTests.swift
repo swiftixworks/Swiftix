@@ -117,7 +117,11 @@ struct RSTHandlingTests {
         }
         pair.kernelA.spawn("tcp-client") { ctx in
             guard let fd = ctx.tcpSocket() else { return }
-            ctx.tcpConnect(fd, to: pair.ipB, port: 80) { }
+            ctx.tcpConnect(fd, to: pair.ipB, port: 80) {
+                // Hold the connection open: a client that returned here would exit,
+                // and its last descriptor closing sends the server a FIN.
+                ctx.tcpRecv(fd) { _ in }
+            }
         }
         // Advance well under the initial 1s RTO so the connection is established and
         // the server is parked, without the retransmit path firing.

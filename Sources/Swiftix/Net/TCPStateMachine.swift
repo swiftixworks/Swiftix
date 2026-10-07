@@ -64,6 +64,19 @@ enum TCPStateMachine {
         return offset < advertisedWindow
     }
 
+    /// Whether a segment carries bytes nobody can ever read. Once the last
+    /// descriptor is gone the connection is an orphan: new payload (anything
+    /// extending past `receiveNext`) cannot be delivered, so it is answered
+    /// with a reset instead of being buffered and acknowledged forever. A pure
+    /// retransmission of already-received bytes is not new data.
+    static func orphanRejectsPayload(orphaned: Bool,
+                                     segmentSequence: UInt32,
+                                     payloadCount: Int,
+                                     receiveNext: UInt32) -> Bool {
+        guard orphaned, payloadCount > 0 else { return false }
+        return TCPSequence.greater(segmentSequence &+ UInt32(payloadCount), than: receiveNext)
+    }
+
     static func closeTransition(from state: TCPState, receivedFIN: Bool, ourFinAcked: Bool) -> CloseTransition {
         switch state {
         case .established:

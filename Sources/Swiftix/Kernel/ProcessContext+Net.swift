@@ -319,7 +319,7 @@ extension ProcessContext {
         // Fast path: bytes already buffered, or EOF already arrived (a FIN can be
         // consumed before the app ever calls recv — resume immediately with an
         // empty read so the caller observes EOF instead of blocking forever).
-        if connection.hasBufferedData || connection.eofReceived {
+        if connection.receiveWouldNotBlock {
             let waitID = process.beginWait(.tcpReceive(fd: fd))
             kernel.runStep(process) {
                 process.endWait(waitID)
@@ -349,11 +349,12 @@ extension ProcessContext {
         }
     }
 
+    /// Close a TCP descriptor. Like `close(2)`, this releases one descriptor:
+    /// the connection itself closes (FIN, or RST with unread data) only when
+    /// the last descriptor sharing its open-file description is gone, so a
+    /// `dup` or a child that inherited the socket keeps it open.
     public func tcpClose(_ fd: Int) {
         let wasOpen = process.fileDescriptors.object(fd) != nil
-        if let socket = process.fileDescriptors.object(fd) as? TCPSocket {
-            socket.connection?.close()
-        }
         process.fileDescriptors.close(fd)
         recordSyscall("close", result: wasOpen ? "0" : "-1", detail: "fd=\(fd)")
     }

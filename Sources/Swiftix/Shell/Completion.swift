@@ -59,15 +59,25 @@ extension Kernel {
             namePart = token
         }
         let dirPath = Self.resolve(dirPart.isEmpty ? "." : dirPart, cwd: cwd)
-        let entries = directoryEntries(dirPath) ?? []
+        let entries = directoryEntries(dirPath, shellPID: shellPID) ?? []
         let candidates = entries.filter { $0.hasPrefix(namePart) }.sorted()
         return Self.finish(partial: namePart, candidates: candidates)
     }
 
     /// VFS entries at an absolute path (names, dirs suffixed with "/"), or `nil`
-    /// if the path is not a directory.
-    private func directoryEntries(_ absolutePath: String) -> [String]? {
-        guard let node = vfs.lookup(absolutePath), node.kind == .directory else { return nil }
+    /// if the path is not a directory the shell process may list. Completion
+    /// answers with the shell's own credentials, so it never names an entry
+    /// `ls` would refuse to show.
+    private func directoryEntries(_ absolutePath: String, shellPID: PID) -> [String]? {
+        guard let shell = process(shellPID), shell.isLive else {
+            guard let node = vfs.lookup(absolutePath), node.kind == .directory else { return nil }
+            return node.children.map { name, child in
+                child.kind == .directory ? name + "/" : name
+            }
+        }
+        let context = ProcessContext(process: shell, kernel: self)
+        guard let node = context.lookupNode(absolutePath), node.kind == .directory,
+              context.permits(node, .read) else { return nil }
         return node.children.map { name, child in
             child.kind == .directory ? name + "/" : name
         }

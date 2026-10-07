@@ -2,8 +2,39 @@
 /// regular-file, symbolic-link, and named-pipe (FIFO) nodes; create / lookup;
 /// synthetic (procfs/sysfs) files; hard links with nlink tracking; deferred
 /// deletion (unlink-while-open); mount projection; and device nodes. Access
-/// policy stays in `ProcessContext`, while this type owns path resolution.
+/// policy stays in `ProcessContext`, while this type owns path resolution: a
+/// caller that wants directory search permission enforced hands the walk a
+/// `PathSearch` predicate, and the walk consults it once per traversed directory.
 final class VirtualFileSystem {
+    /// Search-permission policy for one path walk. The VFS knows nothing about
+    /// credentials; `permits` is the caller's "may I traverse this directory"
+    /// (execute bit) decision, asked for every directory a component is looked
+    /// up in. Kernel-internal and uid-0 walks pass no policy at all, so they pay
+    /// nothing per component.
+    struct PathSearch {
+        /// Whether the caller may search (look a name up in) `directory`.
+        let permits: (VNode) -> Bool
+        /// Leading components resolved without a check. A path at or below the
+        /// caller's working directory starts at that directory, as a relative
+        /// path does on Linux, so the directories *above* the cwd are not asked
+        /// again; the cwd itself and everything beneath it still are.
+        var trustedComponents = 0
+    }
+
+    /// Why a credential-aware walk ended.
+    enum PathResolution {
+        case found(VNode)
+        /// A component does not exist, or a non-directory was traversed.
+        case missing
+        /// A traversed directory refused search permission (POSIX `EACCES`).
+        case searchDenied
+
+        var node: VNode? {
+            if case .found(let node) = self { return node }
+            return nil
+        }
+    }
+
     let root = VNode(directory: "/")
 
     /// Logical clock provider — returns `EventLoop.now` so timestamp updates
@@ -59,45 +90,111 @@ final class VirtualFileSystem {
     /// mounted tree when `path` falls under a mountpoint; `nil` (the default,
     /// preserving every existing caller) resolves against the base tree only.
     func lookup(_ path: String, follow: Bool = true, mounts: MountNamespace? = nil) -> VNode? {
-        let (origin, subpath) = mountOrigin(path, mounts)
-        return walk(from: origin, subpath, follow: follow)
+        resolve(path, follow: follow, mounts: mounts, search: nil).node
+    }
+
+    /// `lookup` that enforces `search` on every traversed directory and reports
+    /// a refusal separately from a missing path. Crossing into a mount checks the
+    /// directories leading to the mountpoint first, then the mounted root in
+    /// place of the directory it covers.
+    func resolve(_ path: String,
+                 follow: Bool = true,
+                 mounts: MountNamespace? = nil,
+                 search: PathSearch?) -> PathResolution {
+        guard let entry = mountEntry(path, mounts, search) else { return .searchDenied }
+        return walk(from: entry.origin, entry.subpath, follow: follow, search: entry.search)
+    }
+
+    /// `mountOrigin` for a credential-aware walk: the starting tree, the path
+    /// inside it, and the policy for the rest of the walk. The longest-prefix
+    /// table jumps straight into a mounted tree, so the directories that lead to
+    /// the mountpoint are checked here; `nil` means one of them refused search.
+    private func mountEntry(_ path: String,
+                            _ mounts: MountNamespace?,
+                            _ search: PathSearch?) -> (origin: VNode, subpath: String, search: PathSearch?)? {
+        guard let mounts, let hit = mounts.resolve(path) else { return (root, path, search) }
+        guard var inner = search else { return (hit.root, hit.subpath, nil) }
+        var ancestor = ""
+        for (depth, part) in components(path).prefix(hit.depth).enumerated() {
+            if depth >= inner.trustedComponents,
+               let directory = lookup(ancestor.isEmpty ? "/" : ancestor, mounts: mounts),
+               !inner.permits(directory) {
+                return nil
+            }
+            ancestor += "/" + part
+        }
+        inner.trustedComponents = Swift.max(0, inner.trustedComponents - hit.depth)
+        return (hit.root, hit.subpath, inner)
     }
 
     /// Resolve a relative path beneath an already-resolved directory. Absolute
     /// symlink targets are re-rooted at `root` and `..` can never walk above it,
     /// providing the VFS primitive used by capability-scoped operations.
     func lookup(_ relativePath: String, follow: Bool = true, beneath root: VNode) -> VNode? {
-        guard root.kind == .directory else { return nil }
+        resolve(relativePath, follow: follow, beneath: root, search: nil).node
+    }
+
+    /// The capability-scoped `lookup` with search permission enforced from
+    /// `root` downwards.
+    func resolve(_ relativePath: String,
+                 follow: Bool = true,
+                 beneath root: VNode,
+                 search: PathSearch?) -> PathResolution {
+        guard root.kind == .directory else { return .missing }
         return walk(from: root,
                     relativePath,
                     follow: follow,
-                    absoluteSymlinkRoot: root)
+                    absoluteSymlinkRoot: root,
+                    search: search)
     }
 
     /// Resolve the immediate parent directory of an absolute path in a mount
     /// namespace. Intermediate symlinks are followed exactly as in `lookup`.
     func parentDirectory(of path: String, mounts: MountNamespace? = nil) -> VNode? {
-        let (origin, subpath) = mountOrigin(path, mounts)
-        return parentDirectory(of: subpath, beneath: origin, absoluteSymlinkRoot: nil)
+        resolveParentDirectory(of: path, mounts: mounts, search: nil).node
+    }
+
+    /// `parentDirectory` with search permission enforced on the way to the
+    /// parent. The parent's own permissions are the caller's to judge.
+    func resolveParentDirectory(of path: String,
+                                mounts: MountNamespace? = nil,
+                                search: PathSearch?) -> PathResolution {
+        guard let entry = mountEntry(path, mounts, search) else { return .searchDenied }
+        return resolveParentDirectory(of: entry.subpath, beneath: entry.origin,
+                                      absoluteSymlinkRoot: nil, search: entry.search)
     }
 
     /// Resolve the immediate parent while remaining anchored beneath a
     /// capability root, including absolute symlink targets.
     func parentDirectory(of relativePath: String, beneath root: VNode) -> VNode? {
-        parentDirectory(of: relativePath, beneath: root, absoluteSymlinkRoot: root)
+        resolveParentDirectory(of: relativePath, beneath: root, search: nil).node
     }
 
-    private func parentDirectory(of path: String,
-                                 beneath root: VNode,
-                                 absoluteSymlinkRoot: VNode?) -> VNode? {
+    /// The capability-scoped `parentDirectory` with search permission enforced.
+    func resolveParentDirectory(of relativePath: String,
+                                beneath root: VNode,
+                                search: PathSearch?) -> PathResolution {
+        resolveParentDirectory(of: relativePath, beneath: root,
+                               absoluteSymlinkRoot: root, search: search)
+    }
+
+    private func resolveParentDirectory(of path: String,
+                                        beneath root: VNode,
+                                        absoluteSymlinkRoot: VNode?,
+                                        search: PathSearch?) -> PathResolution {
         let parts = components(path)
-        guard !parts.isEmpty else { return nil }
+        guard !parts.isEmpty else { return .missing }
         let parentPath = parts.dropLast().joined(separator: "/")
-        let parent = walk(from: root,
-                          parentPath,
-                          follow: true,
-                          absoluteSymlinkRoot: absoluteSymlinkRoot)
-        return parent?.kind == .directory ? parent : nil
+        return directory(walk(from: root,
+                              parentPath,
+                              follow: true,
+                              absoluteSymlinkRoot: absoluteSymlinkRoot,
+                              search: search))
+    }
+
+    private func directory(_ resolution: PathResolution) -> PathResolution {
+        if case .found(let node) = resolution, node.kind != .directory { return .missing }
+        return resolution
     }
 
     /// The starting tree and path for resolving `path`: the deepest mount whose
@@ -112,36 +209,49 @@ final class VirtualFileSystem {
     /// An **absolute** symlink target restarts from the base tree (a documented
     /// simplification: absolute links are not re-projected through the mount
     /// table); a relative one resolves from the link's directory.
+    ///
+    /// With a `search` policy, every directory a component is looked up in must
+    /// permit search, including the directories a symlink target walks through
+    /// and the one a `..` steps out of. The final node itself is never asked:
+    /// what the caller may do with it is the caller's check.
     private func walk(from origin: VNode,
                       _ path: String,
                       follow: Bool,
-                      absoluteSymlinkRoot: VNode? = nil) -> VNode? {
-        var remaining = components(path)   // components still to walk
+                      absoluteSymlinkRoot: VNode? = nil,
+                      search: PathSearch? = nil) -> PathResolution {
+        var remaining = components(path)[...]   // components still to walk
         var node = origin
         var resolved: [String] = []        // real (symlink-free) components under `walkRoot`
         var walkRoot = origin
         var hops = 0
+        // Leading entries of `remaining` exempt from the search check.
+        var trusted = search?.trustedComponents ?? 0
 
-        while !remaining.isEmpty {
-            let part = remaining.removeFirst()
+        while let part = remaining.popFirst() {
+            let exempt = trusted > 0
+            if exempt { trusted -= 1 }
             switch part {
             case ".":
                 continue
             case "..":
+                if let search, !exempt, node.kind == .directory, !search.permits(node) {
+                    return .searchDenied
+                }
                 if !resolved.isEmpty { resolved.removeLast() }
                 node = nodeAt(from: walkRoot, resolved) ?? walkRoot
                 continue
             default:
                 break
             }
-            guard node.kind == .directory else { return nil }
+            guard node.kind == .directory else { return .missing }
+            if let search, !exempt, !search.permits(node) { return .searchDenied }
             // Real children win; a dynamic-directory node (e.g. /proc) can also
             // resolve computed children like a live pid.
-            guard let next = node.child(part) ?? node.resolveDynamicChild?(part) else { return nil }
+            guard let next = node.child(part) ?? node.resolveDynamicChild?(part) else { return .missing }
             let isFinal = remaining.isEmpty
             if next.kind == .symlink, !(isFinal && !follow) {
                 hops += 1
-                if hops > maxSymlinkHops { return nil }
+                if hops > maxSymlinkHops { return .missing }
                 let targetComponents = components(next.linkTarget)
                 if next.linkTarget.hasPrefix("/") {
                     let targetRoot = absoluteSymlinkRoot ?? root
@@ -151,13 +261,16 @@ final class VirtualFileSystem {
                 }
                 // Relative target resolves from the link's directory (`node`
                 // stays put); splice the target ahead of the rest of the path.
-                remaining = targetComponents + remaining
+                // A link inside the trusted prefix is part of how the caller got
+                // to its working directory, so its target is trusted with it.
+                if exempt { trusted += targetComponents.count }
+                remaining = (targetComponents + remaining)[...]
             } else {
                 node = next
                 resolved.append(part)
             }
         }
-        return node
+        return .found(node)
     }
 
     /// Create a regular file beneath a capability root. Unlike the convenience

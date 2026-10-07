@@ -40,6 +40,18 @@ Release assessment from 2026-08-13:
 - approximately 83.7% line coverage and 72.9% region coverage;
 - approximately 214 seconds for an all-product Release build with Swift 6.3.3 on macOS.
 
+Path-search permission check, measured 2026-10-07 (Release, `stat` of a file
+at directory depth 4, 32, and 256): about 0.4 µs per path component as uid 0,
+which carries no search policy, and about 0.5 µs as a non-root user (13–19%
+more). Cost stays linear in depth; a refused walk stops at the refusing
+directory. Directory depth is not limited and does not consume host stack:
+`VNode` teardown, VFS accounting, snapshot capture and restore, and the
+tree-walking commands keep explicit worklists, and tests cover chains 5,000
+levels deep on a 512 KiB secondary-thread stack. Path-based walks of such a
+tree are quadratic in depth, because every syscall re-resolves its path. A
+snapshot's legacy `root` projection stops at 256 levels; the inode table
+carries the rest.
+
 These numbers establish an order of magnitude only. The microbenchmarks are not yet fixed in CI, and there is no real-device, complex-loss, or long-running soak dataset, so they do not form a cross-machine SLA.
 
 ## Unresolved Risks

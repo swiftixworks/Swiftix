@@ -9,10 +9,13 @@ final class TCPSocket: FileObject, ReadinessEventSource, SocketOptionStorage {
     /// Port bound via `bind()` for later use by `listen()`.
     var boundPort: UInt16?
     private let options = SocketOptions()
-    /// Live descriptor-handle count (incremented on allocate/dup/inheritance,
-    /// decremented on close). The passive-listen port is released only when the
-    /// last handle goes away, so a listener fd inherited by a child that later
-    /// exits does not evict the parent's still-open listener.
+    /// Open-file descriptions referencing this socket. `dup` and spawn
+    /// inheritance share one description (see `FileDescriptorTable`), so this
+    /// reaches zero only when the *last* descriptor anywhere closes — by an
+    /// explicit close, or by its process exiting or being killed. Nothing is
+    /// released before that: a listener fd inherited by a child that later exits
+    /// does not evict the parent's still-open listener, and a connected socket
+    /// shared with a child stays open until both are done with it.
     private var handleCount = 0
 
     init(stack: NetworkStack) {
@@ -28,8 +31,14 @@ final class TCPSocket: FileObject, ReadinessEventSource, SocketOptionStorage {
         // no longer applies once the server that held it is gone).
         if let listener {
             stack.removeListener(listener)
+            listener.closeBacklog()
             self.listener = nil
         }
+        // Last handle on a connected socket: `close(2)`. The connection decides
+        // between an orderly FIN and a reset (see
+        // `TCPConnectionPlanner.lastDescriptorClosed`) and then lives on only as
+        // long as its close handshake needs.
+        connection?.lastDescriptorClosed()
     }
 
     func read(max: Int) -> [UInt8] {

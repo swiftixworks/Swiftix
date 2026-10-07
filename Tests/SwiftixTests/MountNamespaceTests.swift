@@ -9,6 +9,58 @@ import Testing
 @Suite("Mount namespace (mount table isolation)")
 struct MountNamespaceTests {
 
+    // MARK: - Privilege
+
+    /// Changing the mount table is reserved for uid 0, even for a mountpoint the
+    /// caller owns in its own private namespace.
+    @Test func onlyRootMayMountOrUnmount() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        final class Outcome { var calls: [String: Bool] = [:]; var rootUnmount = false; var stillMounted = false }
+        let outcome = Outcome()
+
+        kernel.spawn("root") { ctx in
+            ctx.mkdir("/mine"); ctx.mkdir("/src"); ctx.mkdir("/mnt")
+            _ = ctx.chown("/mine", uid: 1000, gid: 1000)
+            _ = ctx.mountTmpfs(at: "/mnt")
+            ctx.spawn("user") { child in
+                child.setgid(1000); child.setuid(1000)
+                child.unshareMountNamespace()
+                outcome.calls["tmpfs"] = child.mountTmpfs(at: "/mine")
+                outcome.calls["bind"] = child.mountBind(source: "/src", at: "/mine")
+                outcome.calls["umount"] = child.unmount("/mnt")
+                outcome.stillMounted = child.mountTable().contains { $0.mountpoint == "/mnt" }
+                child.exit(0)
+            }
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+        kernel.spawn("root") { ctx in
+            outcome.rootUnmount = ctx.unmount("/mnt")
+            ctx.exit(0)
+        }
+        loop.runUntilIdle()
+
+        #expect(outcome.calls == ["tmpfs": false, "bind": false, "umount": false])
+        #expect(outcome.stillMounted)
+        #expect(outcome.rootUnmount)
+    }
+
+    @Test func mountCommandsRefuseANonRootUser() {
+        let out = run([
+            "mkdir /mnt /src",
+            "su 1000 mount -t tmpfs tmpfs /mnt",
+            "su 1000 mount --bind /src /mnt",
+            "mount -t tmpfs tmpfs /mnt",
+            "su 1000 umount /mnt",
+            "umount /mnt; echo root-umount=$?",
+        ])
+        let text = String(decoding: out, as: UTF8.self)
+        #expect(text.components(separatedBy: "mount: /mnt: must be superuser to use mount.").count == 3)
+        #expect(text.contains("umount: /mnt: must be superuser to unmount."))
+        #expect(text.contains("root-umount=0"))
+    }
+
     // MARK: - Syscall layer
 
     /// A tmpfs mount shadows the mountpoint's base contents and holds its own
