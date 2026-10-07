@@ -42,6 +42,7 @@ final class ProcessScheduler {
                 return
             }
             process.runState = .running
+            process.isInYieldedBurst = yielding
             process.scheduleTicks += 1   // CPU-activity proxy: how often this process was run
             self.stepCount &+= 1
             process.activeStepDepth += 1
@@ -71,6 +72,10 @@ final class ProcessScheduler {
         } else if process.isStopped {
             process.runState = .stopped
         } else if process.queuedSteps > 0 {
+            process.runState = .runnable
+        } else if process.isInYieldedBurst, process.asyncBodyWaitID != nil, process.blockedOn == 1 {
+            // An async body resumed by a yield holds only its lifetime wait:
+            // it is computing in executor jobs, not parked.
             process.runState = .runnable
         } else if process.blockedOn > 0 {
             process.runState = .waiting                 // parked on I/O or a child

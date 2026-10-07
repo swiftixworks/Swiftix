@@ -46,6 +46,13 @@ final class Process {
     /// leaving the process in S until the callback actually starts executing.
     var queuedSteps = 0
 
+    /// Whether the last step this process ran was a yield and it has not
+    /// waited for anything since. An `async` body computes in executor jobs,
+    /// outside any step, so between two yields it has neither a queued step
+    /// nor a running one; this is what keeps it reported as runnable (`R`)
+    /// there instead of sleeping. Cleared as soon as it registers a wait.
+    var isInYieldedBurst = false
+
     /// Steps of this process currently executing. A step can run nested inside
     /// another when process code drives the event loop itself (the Swiftix Go
     /// VM does); only the outermost step decides the process's fate.
@@ -226,6 +233,12 @@ final class Process {
     func beginWait(_ reason: ProcessWaitReason,
                    cancellation: (() -> Void)? = nil) -> Int {
         guard isLive else { return 0 }
+        // A body that was computing after a yield is now parking: outside a
+        // step, with nothing queued, this wait is what it sleeps on.
+        if isInYieldedBurst, activeStepDepth == 0, queuedSteps == 0 {
+            isInYieldedBurst = false
+            if runState == .runnable { runState = .waiting }
+        }
         return waits.begin(reason, cancellation: cancellation)
     }
 

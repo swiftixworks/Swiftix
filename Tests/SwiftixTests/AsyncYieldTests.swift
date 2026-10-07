@@ -216,6 +216,57 @@ struct AsyncYieldTests {
 
     // MARK: - Process state and signals
 
+    /// `ps` shows a spinning async process as running at every frame, in
+    /// whichever half of a turn the frame ends, and as sleeping once it
+    /// really waits.
+    @Test(arguments: [3, 7, 20, 100])
+    func yieldingProcessIsReportedRunnableUntilItWaits(budget: Int) {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        var spinning = true
+        let pid = kernel.spawn("spin") { (ctx: ProcessContext) async in
+            while spinning {
+                do { try await ctx.yield() } catch { return }
+            }
+            try? await ctx.sleep(10)
+        }
+        func state() -> String? { kernel.snapshotProcesses().first { $0.pid == pid }?.state }
+        Self.drive(loop, frames: 2, budget: budget, chunk: budget)
+
+        for _ in 0..<40 {
+            Self.tick(loop, budget: budget, chunk: budget)
+            #expect(state() == "R")
+        }
+
+        spinning = false
+        Self.drive(loop, frames: 5)
+        #expect(state() == "S")
+    }
+
+    /// An async process that never yields keeps the existing report: it is
+    /// sleeping whenever it waits, also for a zero-length sleep.
+    @Test func sleepingAsyncProcessIsStillReportedSleeping() {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        let pid = kernel.spawn("sleeper") { (ctx: ProcessContext) async in
+            try? await ctx.sleep(10)
+        }
+        Self.drive(loop, frames: 5)
+        #expect(kernel.snapshotProcesses().first { $0.pid == pid }?.state == "S")
+    }
+
+    @Test(arguments: ["awk 'BEGIN{while(1){x++}}' &", "cat /dev/zero > /dev/null &"])
+    func spinningCommandIsReportedRunnable(_ line: String) {
+        let h = CommandHarness()
+        h.pty.writeFromApp(Array((line + "\n").utf8))
+        Self.drive(h.loop, frames: 6, budget: 40)
+        let name = String(line.prefix { $0 != " " })
+        for _ in 0..<10 {
+            Self.tick(h.loop, budget: 40)
+            #expect(h.kernel.snapshotProcesses().first { $0.name == name }?.state == "R")
+        }
+    }
+
     @Test func yieldingProcessCanBeKilled() {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)

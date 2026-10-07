@@ -34,6 +34,10 @@ format, behavior and platform changes are recorded here.
   through the blocking or async frontend resumes as a yield.
 - A shell `while`/`until` loop yields on its first iteration and then every
   256 iterations.
+- `ps`, `top`, and `/proc/<pid>/stat` report an `async` process that is
+  yielding (`awk`, `bc`, `cat /dev/zero`, a custom body calling `yield()`) as
+  running (`R`) until it next waits. It was shown as sleeping (`S`) for most
+  of each turn.
 - A process step queued by yielded work (a wake-up through a pipe, a child
   being started, an exit being reported) is queued as a yield, and `yes`
   yields each time a full pipe makes it wait.
