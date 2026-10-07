@@ -10,6 +10,9 @@ format, behavior and platform changes are recorded here.
 - `ProcessContext.yield(resume:)`: a CPU-bound process gives up the processor
   and continues in a later step without holding logical time, unlike
   `sleep(0)`.
+- `ProcessContext.yield()`: the `async` form, for process bodies that loop
+  through `await`. It throws `.interrupted` if the process is terminated while
+  it is waiting for its turn.
 
 ### Changed
 
@@ -21,6 +24,15 @@ format, behavior and platform changes are recorded here.
   before, and `runUntilIdle()`/`runNext()` are unchanged. Hosts should keep
   advancing toward their own frame target when a call stops short of it; see
   "Real-Time Driving" in `docs/architecture.md`.
+- `EventLoop.advance(by:stepBudget:)` treats the executor jobs that resume an
+  `async` task after `yield()` as yields: they keep their FIFO place, and the
+  clock reaches the target when the budget runs out with only such jobs and
+  yields left. Every other job holds the clock as before.
+- `awk` and `bc` yield instead of taking a zero-length sleep, and `bc` also
+  yields on the first iteration of a loop instead of only every 256th.
+- A read from `/dev/zero`, `/dev/full`, `/dev/random`, or `/dev/urandom`
+  through the blocking or async frontend resumes as a yield.
+- A shell `while`/`until` loop yields every 256 iterations.
 - A file-backed Go program yields at each instruction quantum instead of taking
   a zero-length sleep, and `ps` reports a spinning program as running (`R`).
 
@@ -31,6 +43,14 @@ format, behavior and platform changes are recorded here.
   fire while it runs. Previously each quantum re-queued itself at the current
   instant, `advance(by:)` never reached its target, and it returned
   `.budgetExceeded` with the clock unmoved for as long as the program ran.
+- `awk`, `bc`, and commands that copy from an endless device (`cat /dev/zero`,
+  `dd if=/dev/urandom`) no longer stop logical time for their kernel while
+  they run under a real-time host; a `sleep` in another process now wakes on
+  time.
+- A shell loop made only of builtins (`while :; do :; done`, also in the
+  background) no longer runs as a single step that never ends. The call that
+  drove it (`advance(by:)`, `runUntilIdle()`) never returned, so the host
+  hung and Ctrl-C could not be delivered.
 - `mkdir`, `mv`, `rm`, `rmdir`, and every other command that goes through the
   capability-scoped file calls now stamp what they change. A new directory or
   file created that way was left at the epoch (1970 with an injected clock), a

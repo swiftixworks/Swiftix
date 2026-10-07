@@ -298,6 +298,10 @@ extension Programs {
 
         // MARK: - Commands
 
+        /// How many iterations a `while`/`until` loop runs before it gives
+        /// the processor back, so signals arrive and other work runs.
+        private static let loopYieldInterval = 256
+
         func execCommand(_ command: ScriptCommand, background: Bool, _ done: @escaping () -> Void) {
             if background {
                 switch command {
@@ -344,6 +348,7 @@ extension Programs {
                 }
             case let .whileClause(cond, body, until):
                 var lastBodyStatus: Int32 = 0
+                var iterations = 0
                 loopDepth += 1
                 drive({ next in
                     self.conditionDepth += 1
@@ -353,7 +358,16 @@ extension Programs {
                         guard (self.status.last == 0) != until else { next(false); return }
                         self.execList(body) {
                             lastBodyStatus = self.status.last
-                            next(self.continueLoopAfterBody())
+                            let again = self.continueLoopAfterBody()
+                            iterations += 1
+                            guard again, iterations % Self.loopYieldInterval == 0 else {
+                                next(again)
+                                return
+                            }
+                            // A loop of builtins alone (`while :; do :; done`)
+                            // completes every iteration inside one step and
+                            // would never return to the event loop.
+                            self.ctx.yield { next(true) }
                         }
                     }
                 }, done: {

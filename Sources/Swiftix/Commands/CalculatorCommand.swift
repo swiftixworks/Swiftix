@@ -1196,12 +1196,17 @@ private final class BCInterpreter {
 
     /// Give the event loop a turn inside long-running loops, and push output
     /// through so a pipeline reader sees it as it is produced.
+    ///
+    /// The first iteration yields too. Evaluation suspends at every `async`
+    /// call, and until its first yield that is ordinary work the event loop
+    /// waits for; yielding at once keeps a long loop from holding logical
+    /// time through its first 256 iterations.
     private func yieldPeriodically() async throws {
         iterations += 1
-        guard iterations % 256 == 0 || output.count >= 16384 else { return }
+        guard iterations % 256 == 1 || output.count >= 16384 else { return }
         guard await flush() else { throw Stop.halt }
         do {
-            try await ctx.sleep(0)
+            try await ctx.yield()
         } catch {
             throw Stop.halt
         }

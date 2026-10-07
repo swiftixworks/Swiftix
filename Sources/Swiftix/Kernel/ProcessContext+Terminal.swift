@@ -105,7 +105,9 @@ extension ProcessContext {
         // redirected file (`cat < file`).
         guard let stream = object as? ReadableStream else {
             let waitID = process.beginWait(.descriptor(fd: fd, operation: "read"))
-            kernel.runStep(process) {
+            // A read loop over an endless device never waits for anything, so
+            // each turn is a yield rather than work that holds logical time.
+            kernel.runStep(process, yielding: object is EndlessReadSource) {
                 process.endWait(waitID)
                 resume(object.read(max: limit))
             }

@@ -14,7 +14,9 @@
 /// they have run. A *yield* is the continuation of a CPU-bound task that gave
 /// up the processor (see `CancellationScope.yield`): it runs in the same order
 /// as a zero-delay timer, but a task that never stops yielding must not stop
-/// time, so `advance(by:)` lets later timers and the clock pass it.
+/// time, so `advance(by:)` lets later timers and the clock pass it. An `async`
+/// task that yields resumes as executor jobs; those jobs are marked as yields
+/// too (see `resumingYieldedTask`).
 ///
 /// Not thread-safe by design: a topology runs on a single executor and hundreds
 /// of nodes share one loop, rather than one-thread-per-node.
@@ -146,6 +148,12 @@ public final class EventLoop {
         let work: () -> Void
     }
 
+    /// An executor job, and whether it continues a task that yielded.
+    private struct QueuedJob {
+        let job: UnownedJob
+        let isYield: Bool
+    }
+
     private final class StepBudget {
         var remaining: Int
         var wasExceeded = false
@@ -190,7 +198,16 @@ public final class EventLoop {
     /// time by `advance(by:)` / `runUntilIdle()` alongside timer events, so
     /// `await` suspension/resumption interleaves with timers on the single loop
     /// thread — no second thread, no locking (R16.4).
-    private var jobQueue = FIFOQueue<UnownedJob>()
+    private var jobQueue = FIFOQueue<QueuedJob>()
+
+    /// How many queued jobs continue a task that yielded. The rest are
+    /// ordinary jobs, which hold the clock.
+    private var yieldJobCount = 0
+
+    /// Whether a job posted right now continues a task that yielded: set
+    /// while such a task is resumed and while one of its jobs runs. See
+    /// `resumingYieldedTask`.
+    private var isResumingYieldedTask = false
 
     /// The budget shared by reentrant `advance`, `runUntilIdle`, and `runNext`
     /// calls. Only the outermost bounded operation creates a budget.
@@ -230,8 +247,34 @@ public final class EventLoop {
     /// `advance(by:)` / `runUntilIdle()`.
     func enqueueJob(_ job: UnownedJob) {
         let wasIdle = !hasPendingWork
-        jobQueue.append(job)
+        jobQueue.append(QueuedJob(job: job, isYield: isResumingYieldedTask))
+        if isResumingYieldedTask { yieldJobCount += 1 }
         if wasIdle { onWorkAvailable?() }
+    }
+
+    /// Resume an `async` task that gave up the processor. `resume` must resume
+    /// that task's continuation from a yield callback (`CancellationScope.yield`).
+    ///
+    /// Resuming a continuation posts an executor job, and an executor job
+    /// normally holds the clock. The job posted while `resume` runs is instead
+    /// recorded as a yield: it keeps its FIFO place among jobs, and
+    /// `advance(by:stepBudget:)` treats it as it treats a queued yield.
+    ///
+    /// A running task does not stay in one job. The Swift runtime posts a new
+    /// job each time the task switches executor context, several times
+    /// between two suspensions, so a job posted while a yield job runs is a
+    /// yield job as well. The chain ends when the task waits for something:
+    /// its last job posts nothing, and whatever wakes it later is ordinary
+    /// work again. Timers scheduled along the way are ordinary timers.
+    func resumingYieldedTask(_ resume: () -> Void) {
+        withJobsRecorded(asYield: true, resume)
+    }
+
+    private func withJobsRecorded(asYield: Bool, _ work: () -> Void) {
+        let wasResuming = isResumingYieldedTask
+        isResumingYieldedTask = asYield
+        defer { isResumingYieldedTask = wasResuming }
+        work()
     }
 
     /// Number of executor jobs still pending. Kept for compatibility; use
@@ -471,7 +514,8 @@ public final class EventLoop {
     ///
     /// - After a short burst of yields, a timer due later in the window runs
     ///   at its own deadline, so timers are not starved.
-    /// - When the budget runs out and yields are the only work left inside the
+    /// - When the budget runs out and yields (queued, or resuming an `async`
+    ///   task) are the only work left inside the
     ///   window, `now` still reaches `target`. The call reports
     ///   `.budgetExceeded` (ready work remains), and the interval has elapsed.
     ///
@@ -510,11 +554,14 @@ public final class EventLoop {
         }
     }
 
-    /// Finish an `advance` whose budget ran out. Jobs and timers due by
-    /// `target` keep the clock where it is; yielded CPU-bound work does not.
+    /// Finish an `advance` whose budget ran out. Ordinary jobs and timers due
+    /// by `target` keep the clock where it is; yielded CPU-bound work, queued
+    /// or resuming as a job, does not.
     private func exhausted(_ target: Double) -> RunResult {
         let timerIsDue = queue.first.map { $0.deadline <= target } ?? false
-        if jobQueue.isEmpty, !timerIsDue, !yieldQueue.isEmpty {
+        let hasOrdinaryJob = jobQueue.count > yieldJobCount
+        let hasYield = !yieldQueue.isEmpty || yieldJobCount > 0
+        if !hasOrdinaryJob, !timerIsDue, hasYield {
             now = max(now, target)
         }
         return .budgetExceeded
@@ -609,9 +656,12 @@ public final class EventLoop {
 
         guard budget.consume() else { return .budgetExceeded }
 
-        if !shouldRunCallback, let job = jobQueue.popFirst() {
+        if !shouldRunCallback, let queued = jobQueue.popFirst() {
+            if queued.isYield { yieldJobCount -= 1 }
             consecutiveJobSteps = min(consecutiveJobSteps + 1, EventLoop.maximumJobBurst)
-            job.runSynchronously(on: executor.asUnownedSerialExecutor())
+            withJobsRecorded(asYield: queued.isYield) {
+                queued.job.runSynchronously(on: executor.asUnownedSerialExecutor())
+            }
             return .ran
         }
 
@@ -622,7 +672,7 @@ public final class EventLoop {
         next.token?.isPending = false
         consecutiveJobSteps = 0
         now = max(now, next.deadline)
-        next.work()
+        withJobsRecorded(asYield: false, next.work)
         return .ran
     }
 

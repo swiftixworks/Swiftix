@@ -350,10 +350,16 @@ final class StepReadBudget {
     }
 }
 
+/// A device whose reads never block and never reach end-of-file. A process
+/// that reads one through the blocking/async frontend is doing CPU-bound work
+/// for as long as it loops, so each such read resumes as a yield (see
+/// `ProcessContext.yield(resume:)`) instead of holding logical time.
+protocol EndlessReadSource: FileObject {}
+
 /// `/dev/zero` and `/dev/full`: reads yield zero bytes (bounded per scheduler
 /// step, see `StepReadBudget`). `/dev/zero` discards writes; `/dev/full`
 /// accepts none and reports ENOSPC through the throwing write frontend.
-final class ZeroDeviceHandle: FileObject, WriteRejecting {
+final class ZeroDeviceHandle: FileObject, WriteRejecting, EndlessReadSource {
     private let budget: StepReadBudget
     let isFull: Bool
 
@@ -376,7 +382,7 @@ final class ZeroDeviceHandle: FileObject, WriteRejecting {
 
 /// `/dev/random` / `/dev/urandom`: reads draw from the kernel's deterministic,
 /// seedable generator (not cryptographically secure); writes are discarded.
-final class RandomDeviceHandle: FileObject {
+final class RandomDeviceHandle: FileObject, EndlessReadSource {
     private let budget: StepReadBudget
     private let source: (Int) -> [UInt8]
 

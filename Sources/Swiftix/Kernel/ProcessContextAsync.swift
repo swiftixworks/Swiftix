@@ -45,10 +45,18 @@ private extension BlockVolumeError {
 
 extension ProcessContext {
 
-    private func awaitInterruptible<Value: Sendable>(_ register: (@escaping (Value) -> Void) -> Void) async throws -> Value {
+    /// `asYield` marks the resumption as the continuation of CPU-bound work:
+    /// `register` must then finish from a yielding step, and the jobs that
+    /// resume this task do not hold logical time (see
+    /// `EventLoop.resumingYieldedTask`).
+    private func awaitInterruptible<Value: Sendable>(
+        asYield: Bool = false,
+        _ register: (@escaping (Value) -> Void) -> Void
+    ) async throws -> Value {
         let value = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value, Error>) in
             let state = InterruptibleAsyncWaitState()
             let process = self.process
+            let loop = kernel.loop
             state.cancellationID = process.beginWait(.asyncContinuation) {
                 guard !state.didFinish else { return }
                 state.didFinish = true
@@ -61,7 +69,11 @@ extension ProcessContext {
                     process.disarmWaitCancellation(cancellationID)
                     process.endWait(cancellationID)
                 }
-                continuation.resume(returning: value)
+                if asYield {
+                    loop.resumingYieldedTask { continuation.resume(returning: value) }
+                } else {
+                    continuation.resume(returning: value)
+                }
             }
         }
         guard await kernel.awaitAsyncExecution(process) else {
@@ -135,7 +147,9 @@ extension ProcessContext {
            !stream.hasBytesAvailable {
             throw SyscallError.wouldBlock
         }
-        return try await awaitInterruptible { finish in
+        // An endless device is always ready, so a loop over it is CPU-bound
+        // work: its resumption is a yield (the callback form queues it as one).
+        return try await awaitInterruptible(asYield: object is EndlessReadSource) { finish in
             read(fd, max: maxBytes, resume: finish)
         }
     }
@@ -360,6 +374,23 @@ extension ProcessContext {
         }
         guard await kernel.awaitAsyncExecution(process) else {
             throw SyscallError.interrupted
+        }
+    }
+
+    /// Give up the processor in the middle of CPU-bound work and continue in
+    /// a later step, throwing `.interrupted` if the process is terminated
+    /// meanwhile. The async form of `yield(resume:)`: other ready processes
+    /// and kernel work run in between, the process stays runnable, and a
+    /// pending signal is delivered before this returns.
+    ///
+    /// Use this, not `sleep(0)`, inside a long computation. A zero-length
+    /// sleep is a timer at the current instant, and resuming from it is an
+    /// ordinary executor job; both hold logical time still for the whole
+    /// kernel for as long as the process keeps looping. A yield does not (see
+    /// `EventLoop.advance(by:stepBudget:)`).
+    public func yield() async throws {
+        let _: Void = try await awaitInterruptible(asYield: true) { finish in
+            kernel.runStep(process, yielding: true) { finish(()) }
         }
     }
 

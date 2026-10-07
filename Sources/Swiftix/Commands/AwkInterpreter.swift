@@ -22,8 +22,9 @@
 /// reader has to go back to its descriptor for more input (so an interactive
 /// or piped session sees output as soon as awk would block), and at exit.
 /// Text for stderr travels in the same queue, which keeps it ordered with
-/// stdout. Every 65 536 checkpoints the interpreter also yields with a
-/// zero-length `sleep`, so a runaway program stays interruptible.
+/// stdout. Every 65 536 checkpoints the interpreter also yields
+/// (`ProcessContext.yield()`), so a runaway program stays interruptible and
+/// does not hold logical time.
 ///
 /// Concurrency: plain reference types used only from the owning `awk` command
 /// body on the kernel's loop-bound serial executor. No locks, not `Sendable`.
@@ -1139,7 +1140,7 @@ final class AwkInterpreter {
         // Let the event loop deliver signals and run other processes; an
         // interrupted wait means this process was told to stop.
         do {
-            try await ctx.sleep(0)
+            try await ctx.yield()
         } catch {
             throw AwkRuntimeError.stopped
         }

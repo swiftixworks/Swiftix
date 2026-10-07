@@ -83,7 +83,7 @@ are not prerequisites for duplicating a complete Linux container stack.
 - Blocking syscalls suspend and resume through park/wake and `IOReadiness`; async frontends return to the bound `SwiftixExecutor`.
 - Owner scopes support pause, resume, and cancel; event tokens can physically remove timers.
 - The Go VM uses an instruction quantum so ready kernel work cannot be starved indefinitely.
-- A CPU-bound process gives up the processor with `ProcessContext.yield` (the Go quantum does), not a zero-length sleep. A yield keeps its place among ready work but does not hold logical time; see [Real-Time Driving](#real-time-driving).
+- A CPU-bound process gives up the processor with `ProcessContext.yield` (`try await ctx.yield()` in an `async` body, `yield(resume:)` otherwise), not a zero-length sleep. The Go quantum, `awk`, `bc`, and shell `while`/`until` loops do. A yield keeps its place among ready work but does not hold logical time; see [Real-Time Driving](#real-time-driving).
 - `Kernel.pause/resume/shutdown` manages process work and network timers together, and node destruction cancels owned work.
 
 ### Real-Time Driving
@@ -99,6 +99,14 @@ elapsed since its previous call and the amount of work it can afford.
   later runs after at most 8 consecutive yields. When the budget runs out and
   yields are the only work left in the window, `now` still reaches the target;
   the result is `.budgetExceeded` because ready work remains.
+- **An `async` task that yields resumes as executor jobs, and those count as
+  yields.** The Swift runtime posts a job for the resumption and another each
+  time the running task switches executor context, so a task runs as a chain
+  of jobs. The loop marks the job that resumes a yielded task, and every job
+  posted while a marked job runs. The chain ends when the task waits for
+  something (a sleep, a pipe, a child): whatever wakes it is ordinary work
+  again. Until its first yield a task is ordinary work too, so a long
+  computation should yield early, not only every N iterations.
 - **Host contract.** Treat `.budgetExceeded` as "call again soon", and compare
   `now` with the frame's own target: if it is short, advance by the remainder
   rather than discarding it, or guest time falls behind. The step budget is how
@@ -108,9 +116,14 @@ elapsed since its previous call and the amount of work it can afford.
 - `runUntilIdle()` and `runNext()` are unchanged: they never move the clock
   past ready work, yields included.
 
-Processes that loop through `async` syscalls (`awk`, `bc`, `cat /dev/zero`)
-still resume as executor jobs and therefore still hold the clock while they
-spin; only the Go quantum uses the yield today.
+Reads from an endless device (`/dev/zero`, `/dev/full`, `/dev/random`,
+`/dev/urandom`) through the blocking or async frontend resume as yields as
+well, because such a read never waits for anything: `cat /dev/zero > /dev/null`
+does not hold the clock.
+
+Two always-ready processes that keep waking each other through a pipe
+(`yes | cat > /dev/null`) still do: each wake-up is an ordinary step at the
+current instant, and neither side ever yields.
 
 ### Host-Owned Machine State
 
