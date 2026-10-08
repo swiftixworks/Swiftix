@@ -55,6 +55,14 @@ format, behavior and platform changes are recorded here.
   fire while it runs. Previously each quantum re-queued itself at the current
   instant, `advance(by:)` never reached its target, and it returned
   `.budgetExceeded` with the clock unmoved for as long as the program ran.
+- An `async` process body no longer takes a loop step for every `async` call
+  and return. Its jobs were run as jobs of the loop's serial executor although
+  the task only has a task-executor preference, so the Swift runtime re-posted
+  the task at each call boundary. A 5,000-iteration `bc` loop took about
+  155,000 steps, more than the default step budget of one `runUntilIdle()`,
+  and now takes about 50; the loop now has a separate task executor and runs
+  those jobs on it. Fewer steps per process means a given step budget does
+  more work, and async processes interleave at their suspensions only.
 - `awk`, `bc`, and commands that copy from an endless device (`cat /dev/zero`,
   `dd if=/dev/urandom`) no longer stop logical time for their kernel while
   they run under a real-time host; a `sleep` in another process now wakes on

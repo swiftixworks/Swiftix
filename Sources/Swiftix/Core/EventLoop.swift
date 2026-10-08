@@ -152,6 +152,9 @@ public final class EventLoop {
     private struct QueuedJob {
         let job: UnownedJob
         let isYield: Bool
+        /// Posted through the loop's task executor, not its serial executor;
+        /// it has to be run the same way (see `SwiftixTaskExecutor`).
+        let onTaskExecutor: Bool
     }
 
     private final class StepBudget {
@@ -248,12 +251,27 @@ public final class EventLoop {
         return min(timerDeadline, now)
     }
 
+    /// Backing storage for `taskExecutor`; a stored property cannot carry
+    /// the availability its type needs.
+    private var taskExecutorStorage: AnyObject?
+
+    /// The one task executor owned by this loop: the executor preference of
+    /// every `async` process body on it. Created on first use.
+    @available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *)
+    var taskExecutor: SwiftixTaskExecutor {
+        if let existing = taskExecutorStorage as? SwiftixTaskExecutor { return existing }
+        let created = SwiftixTaskExecutor(loop: self)
+        taskExecutorStorage = created
+        return created
+    }
+
     /// Enqueue a Swift-concurrency `job` to run at the current logical time.
-    /// Called by the loop-owned `SwiftixExecutor`. The job is drained by the next
-    /// `advance(by:)` / `runUntilIdle()`.
-    func enqueueJob(_ job: UnownedJob) {
+    /// Called by the loop-owned `SwiftixExecutor` and `SwiftixTaskExecutor`.
+    /// The job is drained by the next `advance(by:)` / `runUntilIdle()`.
+    func enqueueJob(_ job: UnownedJob, onTaskExecutor: Bool = false) {
         let wasIdle = !hasPendingWork
-        jobQueue.append(QueuedJob(job: job, isYield: isResumingYieldedTask))
+        jobQueue.append(QueuedJob(job: job, isYield: isResumingYieldedTask,
+                                  onTaskExecutor: onTaskExecutor))
         if isResumingYieldedTask { yieldJobCount += 1 }
         if wasIdle { onWorkAvailable?() }
     }
@@ -667,7 +685,11 @@ public final class EventLoop {
             if queued.isYield { yieldJobCount -= 1 }
             consecutiveJobSteps = min(consecutiveJobSteps + 1, EventLoop.maximumJobBurst)
             withJobsRecorded(asYield: queued.isYield) {
-                queued.job.runSynchronously(on: executor.asUnownedSerialExecutor())
+                if queued.onTaskExecutor, #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *) {
+                    queued.job.runSynchronously(on: taskExecutor.asUnownedTaskExecutor())
+                } else {
+                    queued.job.runSynchronously(on: executor.asUnownedSerialExecutor())
+                }
             }
             return .ran
         }

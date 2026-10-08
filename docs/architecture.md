@@ -100,10 +100,11 @@ elapsed since its previous call and the amount of work it can afford.
   yields are the only work left in the window, `now` still reaches the target;
   the result is `.budgetExceeded` because ready work remains.
 - **An `async` task that yields resumes as executor jobs, and those count as
-  yields.** The Swift runtime posts a job for the resumption and another each
-  time the running task switches executor context, so a task runs as a chain
-  of jobs. The loop marks the job that resumes a yielded task, and every job
-  posted while a marked job runs. The chain ends when the task waits for
+  yields.** The Swift runtime posts a job for the resumption, and may post
+  more while the task runs (it does on runtimes without task executors, where
+  the body runs through a host actor), so a task can run as a chain of jobs.
+  The loop marks the job that resumes a yielded task, and every job posted
+  while a marked job runs. The chain ends when the task waits for
   something (a sleep, a pipe, a child): whatever wakes it is ordinary work
   again. Until its first yield a task is ordinary work too, so a long
   computation should yield early, not only every N iterations.
@@ -169,6 +170,13 @@ Run state (`runnable`, `running`, `waiting`, `stopped`) is independent from
 lifecycle (`live`, transient `exiting`, `zombie`). The separation is an
 invariant: stop/continue are live state changes; exit/signaled are terminal
 results; a stopped process can never also be a zombie.
+
+An `async` process body is a task whose executor preference is the loop's task
+executor, and the loop runs its jobs as that executor's. One job then runs the
+body from one suspension to the next: an `async` call that does not suspend
+costs no loop step, a yield costs two (the queued step and the resuming job),
+and a zero-length sleep three. The step budget therefore measures suspensions,
+not call depth.
 
 An `async` body computes in executor jobs, outside any scheduler step, so
 between waits it has neither a queued nor a running step. It is reported as

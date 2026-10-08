@@ -293,7 +293,7 @@ struct AsyncYieldTests {
         Self.drive(h.loop, frames: 6, budget: 40)
         let name = String(line.prefix { $0 != " " })
         for _ in 0..<10 {
-            Self.tick(h.loop, budget: 40)
+            Self.tick(h.loop, budget: 12, chunk: 6)
             #expect(h.kernel.snapshotProcesses().first { $0.name == name }?.state == "R")
         }
     }
@@ -358,9 +358,9 @@ struct AsyncYieldTests {
         h.pty.writeFromApp(Array("sleep 1; echo woke-$?\n".utf8))
         let started = h.loop.now
 
-        Self.drive(h.loop, frames: 57, budget: 40)
+        Self.drive(h.loop, frames: 57, budget: 12, chunk: 6)
         #expect(!h.output().contains("woke-0"))
-        Self.drive(h.loop, frames: 9, budget: 40)
+        Self.drive(h.loop, frames: 9, budget: 12, chunk: 6)
         #expect(h.output().contains("woke-0"))
         #expect(abs(h.loop.now - started - 66 * Self.frame) < 1e-9)
     }
@@ -380,6 +380,17 @@ struct AsyncYieldTests {
         Self.drive(h.loop, frames: 10)
         #expect(h.output().contains("still-here"))
         #expect(h.loop.runUntilIdle() == .completed)
+    }
+
+    /// A finite computation fits the default step budget: its cost in loop
+    /// steps follows its suspensions, not the `async` calls it makes.
+    @Test func longFiniteBcLoopCompletesWithinTheDefaultBudget() {
+        guard #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *) else { return }
+        let h = CommandHarness()
+        h.clearOutput()
+        h.pty.writeFromApp(Array("echo 'for(i=0;i<5000;i++){x=x+i}; x' | bc\n".utf8))
+        #expect(h.loop.runUntilIdle(stepBudget: 1_000) == .completed)
+        #expect(h.output().contains("12497500"))
     }
 
     @Test func foregroundShellLoopOfBuiltinsIsInterruptedByControlC() {

@@ -536,9 +536,10 @@ public final class Kernel {
         }
     }
 
-    /// The loop-owned serial executor that async process bodies run on. Every
-    /// Kernel sharing this loop reads the same executor; a Kernel never installs
-    /// or replaces executor state on the loop.
+    /// The loop-owned serial executor. Every Kernel sharing this loop reads the
+    /// same executor; a Kernel never installs or replaces executor state on the
+    /// loop. Async process bodies run on the loop's task executor where the
+    /// runtime has one, and through `asyncHost` on this executor otherwise.
     var asyncExecutor: SwiftixExecutor { loop.executor }
 
     /// Host actor bound to the loop's shared executor; awaiting a body here runs
@@ -637,7 +638,6 @@ public final class Kernel {
         inherit(into: process, from: parent)
         cgroups.admitChild(pid: process.pid, parentPID: parent)
         let host = asyncHost
-        let executor = asyncExecutor
         runStep(process) { [weak self] in
             guard let self else { return }
             // Hold the process "waiting" for the entire lifetime of the async
@@ -654,11 +654,12 @@ public final class Kernel {
                 process: process)
             // Launch the body so that it — and the continuations of the async
             // syscalls it awaits — run as EventLoop jobs on the single logical
-            // loop thread. Keep the handle so shutdown/signal teardown can cancel
+            // loop thread. Every Kernel sharing this loop uses the loop's one
+            // task executor. Keep the handle so shutdown/signal teardown can cancel
             // a permanently suspended body and release its lifetime payload.
             let task: Task<Void, Never>
             if #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *) {
-                task = Task(executorPreference: executor) {
+                task = Task(executorPreference: self.loop.taskExecutor) {
                     guard await payload.kernel.awaitAsyncExecution(payload.process) else { return }
                     await payload.body(payload.context)
                     payload.kernel.finishAsyncBody(payload.process)

@@ -204,4 +204,58 @@ struct SwiftixExecutorTests {
         }
         #expect(progress.done)
     }
+
+    // MARK: - Async process bodies
+
+    final class Recursion {
+        func depth(_ remaining: Int) async -> Int {
+            remaining == 0 ? 0 : 1 + (await depth(remaining - 1))
+        }
+    }
+
+    /// Loop steps an async process body takes from spawn to exit.
+    static func steps(_ body: @escaping (ProcessContext) async -> Void) -> Int {
+        let loop = EventLoop()
+        let kernel = Kernel(loop: loop)
+        kernel.spawn("body", body)
+        var steps = 0
+        while steps < 100_000, loop.runNext() { steps += 1 }
+        #expect(kernel.snapshotProcesses().isEmpty)
+        return steps
+    }
+
+    /// An `async` call that never suspends is not a trip through the loop. A
+    /// body run as a job of the wrong executor re-posted itself at every call
+    /// and return, so its step count grew with the calls it made.
+    @Test func asyncCallsThatDoNotSuspendCostNoLoopSteps() {
+        guard #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *) else { return }
+        let empty = Self.steps { _ in }
+        let calls = Self.steps { ctx in
+            let recursion = Recursion()
+            for _ in 0..<200 { _ = await recursion.depth(20) }
+            _ = await ctx.kernel.awaitAsyncExecution(ctx.process)
+        }
+        #expect(calls == empty)
+    }
+
+    /// Each real suspension is a fixed, small number of steps.
+    @Test func eachSuspensionCostsAFixedNumberOfLoopSteps() {
+        guard #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *) else { return }
+        func yields(_ count: Int) -> Int {
+            Self.steps { ctx in
+                for _ in 0..<count { try? await ctx.yield() }
+            }
+        }
+        func sleeps(_ count: Int) -> Int {
+            Self.steps { ctx in
+                for _ in 0..<count { try? await ctx.sleep(0) }
+            }
+        }
+        let base = yields(0)
+        // The queued step, then the job that resumes the body.
+        #expect(yields(10) - base == 20)
+        #expect(yields(50) - base == 100)
+        // The timer, the step it queues, then the job.
+        #expect(sleeps(10) - base == 30)
+    }
 }

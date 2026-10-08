@@ -39,21 +39,45 @@ final class SwiftixExecutor: SerialExecutor, @unchecked Sendable {
     }
 }
 
-// Also act as a `TaskExecutor` (SE-0417) so an `async` process body launched by
-// `Kernel.spawn(_:parent:_ body: (ProcessContext) async -> Void)` can set this as
-// its *task executor preference*. That pins the body's nonisolated `async` code
-// — and the continuations of the async syscalls it awaits — onto the loop, so it
-// all runs as `EventLoop` jobs on the single logical loop thread rather than the
-// global concurrent executor (deterministic, no wall-clock, no background-thread
-// races). `enqueue(_:)` is shared with the `SerialExecutor` conformance: both
-// post the job onto the loop's job queue.
-//
-// Availability-gated because task-executor preference requires these runtime
-// floors on Apple platforms; on Linux there is no gating, so the contract stays
-// identical across platforms (R16.5). The library's own platform floors are a
-// major version below these, so the gate is applied at the use site.
+/// The loop's `TaskExecutor` (SE-0417). An `async` process body launched by
+/// `Kernel.spawn(_:parent:_ body: (ProcessContext) async -> Void)` sets this as
+/// its *task executor preference*. That pins the body's nonisolated `async` code
+/// — and the continuations of the async syscalls it awaits — onto the loop, so it
+/// all runs as `EventLoop` jobs on the single logical loop thread rather than the
+/// global concurrent executor (deterministic, no wall-clock, no background-thread
+/// races).
+///
+/// It is a separate object from `SwiftixExecutor` so the loop can tell which
+/// kind of job it holds. A job posted here belongs to a task that is not
+/// isolated to any serial executor, and must be run as such
+/// (`runSynchronously(on: UnownedTaskExecutor)`). Run as a job of the serial
+/// executor instead, the task finds itself on the wrong executor at every
+/// `async` call and return and re-posts itself each time: one or two loop
+/// steps per call, with no suspension in the source.
+///
+/// Availability-gated because task-executor preference requires these runtime
+/// floors on Apple platforms; on Linux there is no gating, so the contract stays
+/// identical across platforms (R16.5). The library's own platform floors are a
+/// major version below these, so the gate is applied at the use site.
+///
+/// `@unchecked Sendable` for the same reason as `SwiftixExecutor`: the protocol
+/// refines `Sendable`, and safety rests on the single-executor contract.
 @available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, *)
-extension SwiftixExecutor: TaskExecutor {
+final class SwiftixTaskExecutor: TaskExecutor, @unchecked Sendable {
+
+    /// The loop this executor posts to. The loop owns this executor, so the
+    /// back-reference is unowned and cannot form a retain cycle.
+    unowned let loop: EventLoop
+
+    init(loop: EventLoop) {
+        self.loop = loop
+    }
+
+    /// Post a job of a task that prefers this executor onto the loop.
+    func enqueue(_ job: consuming ExecutorJob) {
+        loop.enqueueJob(UnownedJob(job), onTaskExecutor: true)
+    }
+
     func asUnownedTaskExecutor() -> UnownedTaskExecutor {
         UnownedTaskExecutor(ordinary: self)
     }
