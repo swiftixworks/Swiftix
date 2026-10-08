@@ -5,6 +5,8 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+## 0.13.1 — 2026-10-08
+
 ### Added
 
 - `ProcessContext.yield(resume:)`: a CPU-bound process gives up the processor
