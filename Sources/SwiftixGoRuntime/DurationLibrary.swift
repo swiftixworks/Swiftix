@@ -11,6 +11,15 @@
 /// arguments; no process or executor state.
 
 enum GoDuration {
+    /// Go's `Duration.Seconds`, `Minutes`, and `Hours`: the duration in
+    /// units of `unit` nanoseconds, as the bits of a `float64`. The whole
+    /// units and the rest are converted apart, as Go converts them, so a
+    /// long duration keeps what a single division would round away.
+    static func units(_ duration: Int64, _ unit: Int64) -> GoValue {
+        let value = Double(duration / unit) + Double(duration % unit) / Double(unit)
+        return .int(Int64(bitPattern: value.bitPattern))
+    }
+
     static let nanosecond: Int64 = 1
     static let microsecond: Int64 = 1_000
     static let millisecond: Int64 = 1_000_000
@@ -235,7 +244,7 @@ extension GoNative {
     static let parseDuration = "$time.ParseDuration"
 
     /// Result of the `time` native `name` that takes or gives a duration,
-    /// or nil when `name` is not one. Go's `int64` results are `int` here.
+    /// or nil when `name` is not one. A `float64` result is its bits.
     static func duration(_ name: String, _ operands: [Int64], now: Int64) -> GoValue? {
         switch name {
         case "$time.Until": return .int(operands[0] &- now)
@@ -246,6 +255,9 @@ extension GoNative {
         case "$time.Duration.Round": return .int(GoDuration.round(operands[0], operands[1]))
         case "$time.Duration.Truncate": return .int(GoDuration.truncate(operands[0], operands[1]))
         case "$time.Duration.Abs": return .int(GoDuration.absolute(operands[0]))
+        case "$time.Duration.Seconds": return GoDuration.units(operands[0], 1_000_000_000)
+        case "$time.Duration.Minutes": return GoDuration.units(operands[0], 60 * 1_000_000_000)
+        case "$time.Duration.Hours": return GoDuration.units(operands[0], 3_600 * 1_000_000_000)
         default: return nil
         }
     }

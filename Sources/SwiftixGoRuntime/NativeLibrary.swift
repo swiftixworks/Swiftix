@@ -60,6 +60,9 @@ enum GoNative {
         "$time.Duration.Round": 2,
         "$time.Duration.Truncate": 2,
         "$time.Duration.Abs": 1,
+        "$time.Duration.Seconds": 1,
+        "$time.Duration.Minutes": 1,
+        "$time.Duration.Hours": 1,
     ]
 
     /// Reserved call names of the natives the library's own Go text calls

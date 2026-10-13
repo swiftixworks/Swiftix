@@ -2147,7 +2147,7 @@ public struct GoVirtualMachine: Sendable {
                     switch descriptor.definitions[symbol] {
                     case .number(let number)?:
                         if case .int(let bits) = held,
-                            let text = GoFormat.number(bits, number, GoFormat.Directive(verb: "v"))
+                            let text = GoNumeric.panicValue(bits, number)
                         {
                             return "\(typeName)(\(text))"
                         }
@@ -2161,7 +2161,7 @@ public struct GoVirtualMachine: Sendable {
                         break
                     }
                 } else if case .number(let number) = descriptor.type, case .int(let bits) = held,
-                    let text = GoFormat.number(bits, number, GoFormat.Directive(verb: "v"))
+                    let text = GoNumeric.panicValue(bits, number)
                 {
                     return text
                 } else if let text = plain(held) {
@@ -2554,7 +2554,8 @@ public struct GoVirtualMachine: Sendable {
                 let entries = storage.entries.enumerated().sorted { lhs, rhs in
                     let order =
                         unsignedKeys
-                        ? GoNumeric.unsignedOrder(lhs.element.key, rhs.element.key)
+                        ? GoNumeric.unsignedOrder(
+                            lhs.element.key, rhs.element.key, keyType.map(scope.underlying))
                         : GoFormat.keyOrder(lhs.element.key, rhs.element.key)
                     return order == 0 ? lhs.offset < rhs.offset : order < 0
                 }.map(\.element)
@@ -3243,6 +3244,38 @@ public struct GoVirtualMachine: Sendable {
                 let wanted = UInt8(truncatingIfNeeded: try integer(1))
                 let index = Array(try text(0).utf8).firstIndex(of: wanted)
                 stack.append(.int(Int64(index ?? -1)))
+            case "$strconv.ParseFloat":
+                let size = try integer(1)
+                let parsed = GoFloat.parse(try text(0), bitSize: size == 32 ? 32 : 64)
+                stack.append(.int(Int64(bitPattern: parsed.value.bitPattern)))
+                stack.append(
+                    try parsed.failure.map {
+                        try makeError(
+                            GoNumeric.ParseFailure($0).message(
+                                function: "ParseFloat", text: try text(0)))
+                    } ?? .nilValue)
+            case "$strconv.FormatFloat":
+                let value = Double(bitPattern: UInt64(bitPattern: try integer(0)))
+                let size = try integer(3)
+                guard size == 32 || size == 64 else {
+                    throw GoRuntimePanic(text: "strconv: illegal AppendFloat/FormatFloat bitSize")
+                }
+                let precision = try integer(2)
+                stack.append(
+                    .string(
+                        GoFloat.format(
+                            value, format: UInt8(truncatingIfNeeded: try integer(1)),
+                            precision: Int(clamping: precision), bitSize: Int(size))))
+            case "$sort.Float64s":
+                // In Go's order: a NaN before every number.
+                let sorted = try sliceElements(operands[0]).map { element -> Double in
+                    guard case .int(let bits) = element else { throw GoRuntimeError.typeMismatch }
+                    return Double(bitPattern: UInt64(bitPattern: bits))
+                }.sorted { $0 < $1 || ($0.isNaN && !$1.isNaN) }
+                if case .slice(let slice) = operands[0] {
+                    try storeElements(
+                        sorted.map { GoValue.int(Int64(bitPattern: $0.bitPattern)) }, into: slice)
+                }
             default:
                 throw GoRuntimeError.typeMismatch
             }

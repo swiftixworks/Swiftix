@@ -1517,9 +1517,10 @@ struct GoDurationTests: GoTestHarness {
 
         #expect(
             GoLibraryMethods.functions.keys.sorted() == [
-                "time.Duration.Abs", "time.Duration.Microseconds", "time.Duration.Milliseconds",
-                "time.Duration.Nanoseconds", "time.Duration.Round", "time.Duration.String",
-                "time.Duration.Truncate",
+                "time.Duration.Abs", "time.Duration.Hours", "time.Duration.Microseconds",
+                "time.Duration.Milliseconds", "time.Duration.Minutes",
+                "time.Duration.Nanoseconds", "time.Duration.Round", "time.Duration.Seconds",
+                "time.Duration.String", "time.Duration.Truncate",
             ])
         #expect(
             GoLibraryMethods.functions.keys.sorted()
@@ -1574,6 +1575,7 @@ struct GoDurationTests: GoTestHarness {
         #expect(GoNative.time("$time.Duration.String", [1_500_000_000], now: 0) == .string("1.5s"))
         #expect(GoNative.time("$time.Duration.Microseconds", [-1_999], now: 0) == .int(-1))
         #expect(GoNative.time("$time.Duration.Milliseconds", [1_999_999], now: 0) == .int(1))
-        #expect(GoNative.time("$time.Duration.Seconds", [1], now: 0) == nil)
+        #expect(GoNative.time("$time.Duration.Seconds", [1], now: 0)
+                == .int(Int64(bitPattern: (1e-9).bitPattern)))
     }
 }

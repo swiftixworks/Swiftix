@@ -190,7 +190,7 @@ private struct FormatScanner {
                 tokens.append(try scanBlockComment(leadingNewlines: newlines))
             } else if isIdentifierStart(byte) {
                 tokens.append(scanWord(leadingNewlines: newlines))
-            } else if isDigit(byte) {
+            } else if isDigit(byte) || (byte == 0x2E && peek(1).map(isDigit) == true) {
                 tokens.append(scanInteger(leadingNewlines: newlines))
             } else if byte == 0x22 || byte == 0x27 {
                 tokens.append(try scanString(leadingNewlines: newlines))
@@ -245,12 +245,57 @@ private struct FormatScanner {
     }
 
     mutating func scanInteger(leadingNewlines: Int) -> FormatToken {
-        // Keeps a prefixed or separated literal (`0x1f`, `0o644`, `1_000`) whole.
+        // Keeps a prefixed or separated literal (`0x1f`, `0o644`, `1_000`) whole,
+        // and a floating-point one with its point and its signed exponent
+        // (`1.5`, `.5`, `1e-9`, `0x1p-2`).
         let start = index
-        while index < bytes.count, isIdentifierContinue(bytes[index]), bytes[index] < 0x80 {
-            index += 1
+        let isHexadecimal = bytes[index] == 0x30 && peek(1).map { $0 | 0x20 } == 0x78
+        var hasPoint = false
+        var hasExponent = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if isIdentifierContinue(byte), byte < 0x80 {
+                if (byte | 0x20) == (isHexadecimal ? 0x70 : 0x65), index > start {
+                    // The marker of an exponent takes the sign after it.
+                    hasExponent = hasExponent || isHexadecimal || !bytes[start..<index].contains(0x78)
+                    index += 1
+                    if index < bytes.count, bytes[index] == 0x2B || bytes[index] == 0x2D,
+                        peek(1).map(isDigit) == true
+                    {
+                        index += 1
+                    }
+                    continue
+                }
+                index += 1
+            } else if byte == 0x2E, !hasPoint, !hasExponent {
+                hasPoint = true
+                index += 1
+            } else {
+                break
+            }
         }
-        return token(.literal, from: start, leadingNewlines: leadingNewlines)
+        let literal = token(.literal, from: start, leadingNewlines: leadingNewlines)
+        return FormatToken(
+            kind: .literal, text: Self.normalizedNumber(literal.text),
+            leadingNewlines: leadingNewlines, offset: start)
+    }
+
+    /// A numeric literal as Go's `gofmt` writes it: the letter of a base
+    /// prefix and of an exponent in lower case, the digits as they are.
+    static func normalizedNumber(_ literal: String) -> String {
+        var text = Array(literal.utf8)
+        guard text.count >= 2 else { return literal }
+        func lowerLast(_ letter: UInt8) {
+            if let index = text.lastIndex(of: letter) { text[index] = letter | 0x20 }
+        }
+        if text[0] == 0x30, [0x58, 0x4F, 0x42, 0x78].contains(text[1]) {
+            let isHexadecimal = (text[1] | 0x20) == 0x78
+            text[1] |= 0x20
+            if isHexadecimal { lowerLast(0x50) }
+        } else if !(text[0] == 0x30 && [0x6F, 0x62].contains(text[1])) {
+            lowerLast(0x45)
+        }
+        return String(decoding: text, as: UTF8.self)
     }
 
     /// A string or a rune literal, kept as the source has it.

@@ -93,6 +93,41 @@ enum GoNumberLibrary {
         case ("strings", "ContainsRune"): return function([.string, rune], [.bool])
         case ("strings", "IndexRune"): return function([.string, rune], [.int])
         case ("strings", "IndexByte"): return function([.string, GoPredeclared.byte], [.int])
+        default: return floatFunction(package: package, member: member)
+        }
+    }
+
+    /// The functions that take or give a floating-point number.
+    static func floatFunction(package: String, member: String) -> GoNativeFunction? {
+        guard GoNumericKind.floatsAreSupported else { return nil }
+        let float = GoPredeclared.float64
+        func function(_ parameters: [GoType], _ results: [GoType]) -> GoNativeFunction {
+            let name = package + "." + member
+            return GoNativeFunction(
+                symbol: "$" + name, goName: name, parameters: parameters, results: results)
+        }
+        switch (package, member) {
+        case ("math", "Sqrt"), ("math", "Floor"), ("math", "Ceil"), ("math", "Trunc"),
+            ("math", "Round"), ("math", "RoundToEven"), ("math", "Abs"):
+            return function([float], [float])
+        case ("math", "Max"), ("math", "Min"), ("math", "Pow"), ("math", "Mod"),
+            ("math", "Copysign"):
+            return function([float, float], [float])
+        case ("math", "Inf"): return function([.int], [float])
+        case ("math", "NaN"): return function([], [float])
+        case ("math", "IsNaN"), ("math", "Signbit"): return function([float], [.bool])
+        case ("math", "IsInf"): return function([float, .int], [.bool])
+        case ("math", "Float64bits"): return function([float], [GoNumericKind.uint64.type])
+        case ("math", "Float64frombits"): return function([GoNumericKind.uint64.type], [float])
+        case ("math", "Float32bits"):
+            return function([GoNumericKind.float32.type], [GoNumericKind.uint32.type])
+        case ("math", "Float32frombits"):
+            return function([GoNumericKind.uint32.type], [GoNumericKind.float32.type])
+        case ("strconv", "ParseFloat"):
+            return function([.string, .int], [float, GoPredeclared.errorType])
+        case ("strconv", "FormatFloat"):
+            return function([float, GoPredeclared.byte, .int, .int], [.string])
+        case ("sort", "Float64s"): return function([.slice(float)], [])
         default: return nil
         }
     }
@@ -110,5 +145,11 @@ enum GoNumberLibrary {
         "$utf8.RuneCountInString", "$utf8.ValidString", "$utf8.RuneLen",
         "$utf8.DecodeRuneInString", "$utf8.EncodeRune",
         "$strings.ContainsRune", "$strings.IndexRune", "$strings.IndexByte",
+        "$math.Sqrt", "$math.Floor", "$math.Ceil", "$math.Trunc", "$math.Round",
+        "$math.RoundToEven", "$math.Abs", "$math.Max", "$math.Min", "$math.Pow", "$math.Mod",
+        "$math.Copysign", "$math.Inf", "$math.NaN", "$math.IsNaN", "$math.Signbit",
+        "$math.IsInf", "$math.Float64bits", "$math.Float64frombits", "$math.Float32bits",
+        "$math.Float32frombits", "$strconv.ParseFloat", "$strconv.FormatFloat",
+        "$sort.Float64s",
     ]
 }

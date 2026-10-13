@@ -51,8 +51,19 @@ struct GoConstant: Equatable, Sendable {
 
     /// The text of the value in a diagnostic.
     var text: String {
-        if value.isInteger { return value.truncated.description }
-        return value.nearestDouble.description
+        if kind != .float, value.isInteger { return value.truncated.description }
+        let nearest = value.nearestDouble
+        if nearest.isFinite {
+            // An integer as Go writes one, without the `.0` of Swift.
+            let text = nearest.description
+            return text.hasSuffix(".0") ? String(text.dropLast(2)) : text
+        }
+        // Too large for any type: its first digits and its exponent.
+        let digits = Array(value.truncated.description.drop { $0 == "-" })
+        var mantissa = String(digits.prefix(6))
+        while mantissa.count > 1, mantissa.hasSuffix("0") { mantissa.removeLast() }
+        if mantissa.count > 1 { mantissa.insert(".", at: mantissa.index(after: mantissa.startIndex)) }
+        return (value.signum < 0 ? "-" : "") + mantissa + "e+" + String(digits.count - 1)
     }
 
     static func untyped(_ value: GoBigInt, kind: Kind = .integer, isPlain: Bool) -> GoConstant {

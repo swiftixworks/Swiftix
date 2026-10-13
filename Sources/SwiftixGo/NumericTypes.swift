@@ -35,7 +35,7 @@ enum GoNumericKind: String, CaseIterable, Sendable {
 
     /// Whether the floating-point types, literals, and constants are part
     /// of the dialect.
-    static let floatsAreSupported = false
+    static let floatsAreSupported = true
 
     /// The kind a predeclared type name denotes, with `byte` and `rune`
     /// for the types they are other names of.

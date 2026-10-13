@@ -167,8 +167,9 @@ struct GoByteTypeTests: GoTestHarness {
     }
 
     @Test func otherNumericTypesAreReportedAsUnsupported() {
-        for name in ["float32", "float64", "complex64", "complex128"] {
-            let expected = "type \(name) is not supported; the numeric types are the integer types"
+        for name in ["complex64", "complex128"] {
+            let expected =
+                "type \(name) is not supported; the numeric types are the integer and floating-point types"
             #expect(goMainDiagnostic("var x \(name)\nfmt.Println(x)") == expected)
             #expect(goMainDiagnostic("fmt.Println(\(name)(1))") == expected)
             #expect(

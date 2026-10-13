@@ -2747,12 +2747,21 @@ struct IRLowerer {
             for caseExpression in switchCase.expressions {
                 let caseRegister = try lower(caseExpression)
                 let comparison = allocateRegister()
-                operations.append(
-                    .binary(
-                        destination: comparison,
-                        operator: .equal,
-                        left: switchRegister,
-                        right: caseRegister))
+                if expression.map(isFloatingPoint) == true {
+                    // Two floating-point numbers are equal by value: the
+                    // zeros are, and a NaN is equal to nothing.
+                    operations.append(
+                        .call(
+                            function: "$num.feq", arguments: [switchRegister, caseRegister],
+                            destinations: [comparison]))
+                } else {
+                    operations.append(
+                        .binary(
+                            destination: comparison,
+                            operator: .equal,
+                            left: switchRegister,
+                            right: caseRegister))
+                }
                 operations.append(.jumpIfTrue(condition: comparison, target: caseLabels[index]))
             }
         }
@@ -4837,6 +4846,8 @@ struct IRLowerer {
             // An opaque timestamp; the zero time is 0.
             return constant(.int(0))
         }
+        // The bits of a floating-point zero are those of the integer.
+        if numericKind(type)?.isFloat == true { return constant(.int(0)) }
         switch underlying(type) {
         case .int: return constant(.int(0))
         case .string: return constant(.string(""))
@@ -5901,6 +5912,9 @@ extension IRLowerer {
     /// the first of them that none after it is before (`min`) or after
     /// (`max`), by the comparison `<` makes.
     mutating func lowerExtreme(isMinimum: Bool, of arguments: [GoExpression]) throws -> Int {
+        if let number = try lowerNumericExtreme(isMinimum: isMinimum, of: arguments) {
+            return number
+        }
         let operands = try arguments.map { try lower($0) }
         let result = allocateRegister()
         guard let first = operands.first else { return constant(.int(0)) }

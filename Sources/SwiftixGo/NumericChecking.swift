@@ -533,7 +533,9 @@ extension FunctionChecker {
         if let folded = try constant(of: expression) {
             return noteDefault(folded, for: expression)
         }
-        if binaryOperator == .divide || binaryOperator == .remainder,
+        // An integer is not divided by a constant zero. A floating-point
+        // number is: the quotient is an infinity or a NaN.
+        if binaryOperator == .divide || binaryOperator == .remainder, !isFloat(operandType),
             let divisor = try constant(of: right), divisor.value.signum == 0
         {
             throw GoDiagnostic(position: right.startPosition, message: "division by zero")
@@ -623,6 +625,60 @@ extension FunctionChecker {
         guard leftKind.isInteger else { throw mistake }
         noteOperation(expression, at: leftType)
         return leftType
+    }
+
+    /// The type of `min` or `max` of numbers when a floating-point one is
+    /// among them: the one type of the operands that have one, which the
+    /// untyped constants take, or `float64` when all are constants. Nil
+    /// when no operand is floating-point, which the rule for the other
+    /// ordered types decides.
+    mutating func floatingOrderedType(_ arguments: [GoExpression]) throws -> GoType? {
+        var types: [GoType] = []
+        for argument in arguments { types.append(try type(of: argument)) }
+        guard types.contains(where: isFloat) else { return nil }
+        // How Go names an operand in the report: an untyped constant by
+        // its kind.
+        func name(_ argument: GoExpression, _ type: GoType) throws -> String {
+            if let constant = try constant(of: argument), constant.isUntyped {
+                switch constant.kind {
+                case .integer: return "untyped int"
+                case .rune: return "untyped rune"
+                case .float: return "untyped float"
+                }
+            }
+            if stringConstant(of: argument)?.type == nil, type == .string,
+                stringConstant(of: argument) != nil
+            {
+                return "untyped string"
+            }
+            return "\(type)"
+        }
+        // A number is not ordered with anything that is none.
+        for (index, type) in types.enumerated() where !isNumeric(type) || !isNumeric(types[0]) {
+            guard index > 0 else { continue }
+            throw GoDiagnostic(
+                position: arguments[index].position,
+                message: "invalid argument: mismatched types "
+                    + (try name(arguments[index - 1], types[index - 1])) + " (previous argument) and "
+                    + (try name(arguments[index], type))
+                    + " (type of \(arguments[index].sourceSpelling))")
+        }
+        var shared: (type: GoType, of: GoExpression)?
+        for (argument, type) in zip(arguments, types) where try !isUntyped(argument) {
+            if let previous = shared, previous.type != type {
+                throw GoDiagnostic(
+                    position: argument.position,
+                    message: "invalid argument: mismatched types \(previous.type) "
+                        + "(previous argument) and \(type) "
+                        + "(type of \(argument.sourceSpelling))")
+            }
+            shared = shared ?? (type, argument)
+        }
+        let result = shared?.type ?? GoPredeclared.float64
+        for argument in arguments where try isUntyped(argument) {
+            try adopt(argument, as: result)
+        }
+        return result
     }
 
     /// The type of a literal that is spelled as an identifier.

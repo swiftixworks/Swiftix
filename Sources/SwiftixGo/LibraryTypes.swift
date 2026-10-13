@@ -109,13 +109,12 @@ enum GoLibraryTypes {
     static let nativeCallNames: Set<String> = Set(
         durationMethods.map { "$time.Duration." + $0 } + ["$time.Until", "$time.ParseDuration"])
 
-    /// The methods of `time.Duration` that take and give integers, strings,
-    /// and durations. `Seconds`, `Minutes`, and `Hours` give a `float64` and
-    /// are left for when the dialect has one: each is a name here, a row in
+    /// The methods of `time.Duration`. Each is a name here, a row in
     /// `durationMethod`, and in the runtime an entry of
     /// `GoNative.timeArgumentCounts` and a case of `GoNative.duration`.
     static let durationMethods = [
         "String", "Nanoseconds", "Microseconds", "Milliseconds", "Round", "Truncate", "Abs",
+        "Seconds", "Minutes", "Hours",
     ]
 
     /// Native methods of `time.Duration`. The receiver is the first
@@ -128,6 +127,8 @@ enum GoLibraryTypes {
         case "String": (parameters, result) = ([duration], .string)
         case "Nanoseconds", "Microseconds", "Milliseconds":
             (parameters, result) = ([duration], GoNumericKind.int64.type)
+        case "Seconds", "Minutes", "Hours":
+            (parameters, result) = ([duration], GoPredeclared.float64)
         case "Round", "Truncate": (parameters, result) = ([duration, duration], duration)
         case "Abs": (parameters, result) = ([duration], duration)
         default: return nil

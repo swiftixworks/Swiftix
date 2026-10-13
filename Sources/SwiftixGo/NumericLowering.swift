@@ -165,6 +165,50 @@ extension IRLowerer {
         }
     }
 
+    /// Whether `expression` is a floating-point number.
+    func isFloatingPoint(_ expression: GoExpression) -> Bool {
+        (try? type(of: expression)).flatMap(numericKind)?.isFloat == true
+    }
+
+    /// `min` or `max` of numbers the instruction for `<` does not order:
+    /// floating-point ones, where a NaN gives a NaN and negative zero is
+    /// less than zero, and unsigned ones of 64 bits. Nil for any other.
+    mutating func lowerNumericExtreme(
+        isMinimum: Bool, of arguments: [GoExpression]
+    ) throws -> Int? {
+        let kinds = arguments.compactMap { (try? type(of: $0)).flatMap(numericKind) }
+        guard let kind = kinds.first(where: { $0.isFloat || $0.isWideUnsigned }),
+            let first = arguments.first
+        else { return nil }
+        var result = try lower(first)
+        for argument in arguments.dropFirst() {
+            let operand = try lower(argument)
+            let next = allocateRegister()
+            if kind.isFloat {
+                operations.append(
+                    .call(
+                        function: isMinimum ? "$num.fmin" : "$num.fmax",
+                        arguments: [result, operand], destinations: [next]))
+            } else {
+                // The lesser, or the greater, of two: one comparison and
+                // the choice it makes.
+                let isBetter = allocateRegister()
+                let kept = allocateLabel()
+                operations.append(.copy(destination: next, source: result))
+                operations.append(
+                    .call(
+                        function: "$num.ult",
+                        arguments: isMinimum ? [operand, result] : [result, operand],
+                        destinations: [isBetter]))
+                operations.append(.jumpIfFalse(condition: isBetter, target: kept))
+                operations.append(.copy(destination: next, source: operand))
+                operations.append(.label(kept))
+            }
+            result = next
+        }
+        return result
+    }
+
     /// `x++` and `x--` for a number that is no `int` and no `byte`; false
     /// for those, which are compiled as before.
     mutating func lowerNumericIncrement(_ statement: GoStatement) throws -> Bool {
@@ -241,8 +285,15 @@ extension IRLowerer {
             let float = call(source.isWideUnsigned ? "$num.utof" : "$num.itof", register)
             return target == .float32 ? call("$num.f32", float) : float
         case (true, false):
-            let integer = call(target.isWideUnsigned ? "$num.ftou" : "$num.ftoi", register)
-            return wrap(integer, to: target)
+            // What is before the point. For a number the type has no
+            // integer for, the reference machine decides: it stops at the
+            // ends of 64 bits, or of 32 for a type of 32 bits or fewer,
+            // except `uint32`, which keeps the low bits of the 64.
+            if target.isWideUnsigned { return call("$num.ftou", register) }
+            if target.bits == 64 { return call("$num.ftoi", register) }
+            if target == .uint32 { return wrap(call("$num.ftoi", register), to: target) }
+            let narrow = call("$num.ftoi32", register)
+            return target == .int32 ? narrow : wrap(narrow, to: target)
         case (true, true):
             return source == .float64 && target == .float32 ? call("$num.f32", register) : register
         }

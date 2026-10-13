@@ -1833,7 +1833,7 @@ struct FunctionChecker {
             return
         }
         let targetType = try assignableType(of: target)
-        guard isInteger(targetType) else {
+        guard isInteger(targetType) || isFloat(targetType) else {
             let spelling = incrementOperator == .increment ? "++" : "--"
             throw GoDiagnostic(
                 position: position,
@@ -4524,6 +4524,7 @@ struct FunctionChecker {
     }
 
     func isComparable(_ type: GoType) -> Bool {
+        if isFloat(type) { return true }
         switch underlying(type) {
         case .int, .string, .bool, .pointer, .nilType, .interface, .channel: return true
         case .structure(let fields): return fields.allSatisfy { isComparable($0.type) }
@@ -5514,7 +5515,7 @@ extension FunctionChecker {
 
     /// The types `<`, `min`, and `max` put in order.
     func isOrdered(_ type: GoType) -> Bool {
-        isInteger(type) || isString(type)
+        isInteger(type) || isString(type) || isFloat(type)
     }
 
     /// An operand as Go describes it in a message: a variable by its name
@@ -5609,6 +5610,7 @@ extension FunctionChecker {
                 position: position,
                 message: "invalid operation: invalid use of ... with built-in \(name)")
         }
+        if let floating = try floatingOrderedType(arguments) { return floating }
         // The type so far and how Go names it, and whether a constant gave it.
         var shared: (type: GoType, name: String, isConstant: Bool)?
         for argument in arguments {

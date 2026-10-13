@@ -196,7 +196,7 @@ struct GoAppendSpreadTests: GoTestHarness {
             goMainDiagnostic("x := append([]int{1}, \"text\"...)\nfmt.Println(x)")
                 == "cannot use string as []int value in append")
         #expect(
-            goMainDiagnostic("x := append([]int{1}, 5...)\nfmt.Println(x)")
+            goMainDiagnostic("x := append([]int{1}, 5 ...)\nfmt.Println(x)")
                 == "cannot use int as []int value in append")
         #expect(
             goMainDiagnostic("x := append([]int{1}, 2, []int{3}...)\nfmt.Println(x)")

@@ -78,12 +78,23 @@ enum GoNumeric {
         "$utf8.RuneCountInString": 1, "$utf8.ValidString": 1, "$utf8.RuneLen": 1,
         "$utf8.DecodeRuneInString": 1, "$utf8.EncodeRune": 2,
         "$strings.ContainsRune": 2, "$strings.IndexRune": 2, "$strings.IndexByte": 2,
+        "$num.fadd": 2, "$num.fsub": 2, "$num.fmul": 2, "$num.fdiv": 2, "$num.fneg": 1,
+        "$num.feq": 2, "$num.fne": 2, "$num.flt": 2, "$num.fle": 2, "$num.fgt": 2, "$num.fge": 2,
+        "$num.f32": 1, "$num.itof": 1, "$num.utof": 1, "$num.ftoi": 1, "$num.ftoi32": 1,
+        "$num.ftou": 1, "$num.fmin": 2, "$num.fmax": 2,
+        "$math.Sqrt": 1, "$math.Floor": 1, "$math.Ceil": 1, "$math.Trunc": 1, "$math.Round": 1,
+        "$math.RoundToEven": 1, "$math.Abs": 1, "$math.Max": 2, "$math.Min": 2, "$math.Pow": 2,
+        "$math.Mod": 2, "$math.Inf": 1, "$math.NaN": 0, "$math.IsNaN": 1, "$math.IsInf": 2,
+        "$math.Signbit": 1, "$math.Copysign": 2, "$math.Float64bits": 1,
+        "$math.Float64frombits": 1, "$math.Float32bits": 1, "$math.Float32frombits": 1,
+        "$strconv.ParseFloat": 2, "$strconv.FormatFloat": 4, "$sort.Float64s": 1,
     ]
 
     /// The result of an operation on integers alone, or nil when `name` is
     /// not one. A division by zero panics as the instruction does.
     static func integer(_ name: String, _ operands: [Int64]) throws -> GoValue? {
         func unsigned(_ index: Int) -> UInt64 { UInt64(bitPattern: operands[index]) }
+        if let float = floating(name, operands) { return float }
         switch name {
         case "$num.i8": return .int(Int64(Int8(truncatingIfNeeded: operands[0])))
         case "$num.i16": return .int(Int64(Int16(truncatingIfNeeded: operands[0])))
@@ -119,6 +130,164 @@ enum GoNumeric {
         case "$utf8.RuneLen": return .int(Int64(runeLength(operands[0])))
         default: return nil
         }
+    }
+
+    /// The result of an operation on floating-point numbers, each operand
+    /// and result the bit pattern of a `float64`, or nil when `name` is not
+    /// one. Nothing here panics: a division by zero is an infinity or a NaN.
+    static func floating(_ name: String, _ operands: [Int64]) -> GoValue? {
+        func number(_ index: Int) -> Double { Double(bitPattern: UInt64(bitPattern: operands[index])) }
+        func bits(_ value: Double) -> GoValue { .int(Int64(bitPattern: value.bitPattern)) }
+        switch name {
+        case "$num.fadd": return bits(number(0) + number(1))
+        case "$num.fsub": return bits(number(0) - number(1))
+        case "$num.fmul": return bits(number(0) * number(1))
+        case "$num.fdiv": return bits(number(0) / number(1))
+        case "$num.fneg": return bits(-number(0))
+        case "$num.feq": return .bool(number(0) == number(1))
+        case "$num.fne": return .bool(number(0) != number(1))
+        case "$num.flt": return .bool(number(0) < number(1))
+        case "$num.fle": return .bool(number(0) <= number(1))
+        case "$num.fgt": return .bool(number(0) > number(1))
+        case "$num.fge": return .bool(number(0) >= number(1))
+        // A `float32` is the `float64` with its value: rounding to the
+        // narrower format after each operation is the operation of it.
+        case "$num.f32": return bits(Double(Float(number(0))))
+        case "$num.itof": return bits(Double(operands[0]))
+        case "$num.utof": return bits(Double(UInt64(bitPattern: operands[0])))
+        case "$num.ftoi": return .int(integer(number(0)))
+        case "$num.ftoi32": return .int(Int64(narrow(number(0))))
+        case "$num.ftou": return .int(Int64(bitPattern: unsigned(number(0))))
+        case "$num.fmin", "$math.Min": return bits(minimum(number(0), number(1)))
+        case "$num.fmax", "$math.Max": return bits(maximum(number(0), number(1)))
+        case "$math.Sqrt": return bits(number(0).squareRoot())
+        case "$math.Floor": return bits(number(0).rounded(.down))
+        case "$math.Ceil": return bits(number(0).rounded(.up))
+        case "$math.Trunc": return bits(number(0).rounded(.towardZero))
+        case "$math.Round": return bits(number(0).rounded(.toNearestOrAwayFromZero))
+        case "$math.RoundToEven": return bits(number(0).rounded(.toNearestOrEven))
+        case "$math.Abs": return bits(number(0).magnitude)
+        case "$math.Pow": return bits(GoFloat.pow(number(0), number(1)))
+        case "$math.Mod": return bits(number(0).truncatingRemainder(dividingBy: number(1)))
+        case "$math.Inf": return bits(operands[0] >= 0 ? .infinity : -.infinity)
+        case "$math.NaN": return bits(.nan)
+        case "$math.IsNaN": return .bool(number(0).isNaN)
+        case "$math.IsInf":
+            let value = number(0)
+            return .bool(
+                value.isInfinite
+                    && (operands[1] == 0 || (operands[1] > 0) == (value > 0)))
+        case "$math.Signbit": return .bool(number(0).sign == .minus)
+        case "$math.Copysign":
+            return bits(Double(sign: number(1).sign, exponent: 0, significand: 1) * number(0).magnitude)
+        case "$math.Float64bits", "$math.Float64frombits": return .int(operands[0])
+        case "$math.Float32bits": return .int(Int64(Float(number(0)).bitPattern))
+        case "$math.Float32frombits":
+            return bits(Double(Float(bitPattern: UInt32(truncatingIfNeeded: operands[0]))))
+        default: return nil
+        }
+    }
+
+    // A conversion of a floating-point number to an integer keeps what is
+    // before the point. For a number no integer of the type is, Go leaves
+    // the result to the machine; these are the results of the reference
+    // machine (arm64), which stops at the ends of the range and makes zero
+    // of a NaN.
+
+    /// To a signed integer of 64 bits.
+    static func integer(_ value: Double) -> Int64 {
+        if value.isNaN { return 0 }
+        if value >= 9_223_372_036_854_775_808.0 { return .max }
+        if value <= -9_223_372_036_854_775_808.0 { return .min }
+        return Int64(value.rounded(.towardZero))
+    }
+
+    /// To a signed integer of 32 bits, from which the narrower types and
+    /// the unsigned ones of 8 and 16 bits take their low bits.
+    static func narrow(_ value: Double) -> Int32 {
+        if value.isNaN { return 0 }
+        if value >= 2_147_483_648.0 { return .max }
+        if value <= -2_147_483_648.0 { return .min }
+        return Int32(value.rounded(.towardZero))
+    }
+
+    /// To an unsigned integer of 64 bits.
+    static func unsigned(_ value: Double) -> UInt64 {
+        if value.isNaN || value <= 0 { return 0 }
+        if value >= 18_446_744_073_709_551_616.0 { return .max }
+        return UInt64(value.rounded(.towardZero))
+    }
+
+    /// Go's `math.Max`, which the builtin `max` shares: a NaN gives a NaN,
+    /// and positive zero is the greater of the zeros.
+    static func maximum(_ x: Double, _ y: Double) -> Double {
+        if x == .infinity || y == .infinity { return .infinity }
+        if x.isNaN || y.isNaN { return .nan }
+        if x == 0, x == y { return x.sign == .minus ? y : x }
+        return x > y ? x : y
+    }
+
+    /// Go's `math.Min`.
+    static func minimum(_ x: Double, _ y: Double) -> Double {
+        if x == -.infinity || y == -.infinity { return -.infinity }
+        if x.isNaN || y.isNaN { return .nan }
+        if x == 0, x == y { return x.sign == .minus ? x : y }
+        return x < y ? x : y
+    }
+
+    /// What an unrecovered panic prints for a number of kind `kind`.
+    static func panicValue(_ bits: Int64, _ kind: GoNumberKind) -> String? {
+        if kind.isFloat { return panicText(Double(bitPattern: UInt64(bitPattern: bits))) }
+        return GoFormat.number(bits, kind, GoFormat.Directive(verb: "v"))
+    }
+
+    /// What the run-time system prints for a floating-point number a
+    /// program panicked with: `+1.500000e+000`. Go's `printfloat`.
+    static func panicText(_ number: Double) -> String {
+        if number.isNaN { return "NaN" }
+        if number.isInfinite { return number > 0 ? "+Inf" : "-Inf" }
+        let digitCount = 7
+        var value = number
+        var sign: UInt8 = 0x2B
+        var exponent = 0
+        if value == 0 {
+            if value.sign == .minus { sign = 0x2D }
+        } else {
+            if value < 0 {
+                value = -value
+                sign = 0x2D
+            }
+            while value >= 10 {
+                exponent += 1
+                value /= 10
+            }
+            while value < 1 {
+                exponent -= 1
+                value *= 10
+            }
+            var half = 5.0
+            for _ in 0..<digitCount { half /= 10 }
+            value += half
+            if value >= 10 {
+                exponent += 1
+                value /= 10
+            }
+        }
+        var digits: [UInt8] = []
+        for _ in 0..<digitCount {
+            let digit = Int(value)
+            digits.append(UInt8(digit) + 0x30)
+            value -= Double(digit)
+            value *= 10
+        }
+        var text = [sign, digits[0], 0x2E] + digits[1...]
+        text.append(0x65)
+        text.append(exponent < 0 ? 0x2D : 0x2B)
+        let magnitude = exponent.magnitude
+        text.append(UInt8(magnitude / 100 % 10) + 0x30)
+        text.append(UInt8(magnitude / 10 % 10) + 0x30)
+        text.append(UInt8(magnitude % 10) + 0x30)
+        return String(decoding: text, as: UTF8.self)
     }
 
     /// Bytes in the UTF-8 encoding of a code point, or -1 when it is none.
@@ -161,6 +330,10 @@ enum GoNumeric {
         case range
         case base(Int64)
         case bitSize(Int64)
+
+        init(_ failure: GoFloat.ParseFailure) {
+            self = failure == .syntax ? .syntax : .range
+        }
 
         /// The text of Go's `*strconv.NumError`.
         func message(function: String, text: String) -> String {
@@ -300,6 +473,14 @@ extension GoFormat {
     /// An integer of a sized type under `directive`, or nil when the verb
     /// does not apply. The 64 bits are read as the kind says.
     static func number(_ bits: Int64, _ kind: GoNumberKind, _ directive: Directive) -> String? {
+        if kind.isFloat {
+            return GoFloat.formatted(
+                Double(bitPattern: UInt64(bitPattern: bits)), bitSize: kind == .float32 ? 32 : 64,
+                verb: directive.verb, plus: directive.plus, minus: directive.minus,
+                sharp: directive.sharp, space: directive.space, zero: directive.zero,
+                width: directive.width, precision: directive.precision,
+                goSyntax: directive.goSyntax)
+        }
         guard kind.isUnsigned else { return integer(bits, directive) }
         if bits >= 0 { return integer(bits, directive, unsigned: true) }
         return wide(UInt64(bitPattern: bits), directive)
@@ -341,14 +522,25 @@ extension GoNumeric {
     /// Whether the keys of a map of this key type sort as unsigned 64-bit
     /// integers, which their bits alone do not show.
     static func ordersUnsigned(_ keyType: GoRuntimeType?) -> Bool {
-        if case .number(let kind)? = keyType { return kind.isWideUnsigned }
+        if case .number(let kind)? = keyType { return kind.isWideUnsigned || kind.isFloat }
         return false
     }
 
-    /// The order of two such keys, as `GoFormat.keyOrder` gives it.
-    static func unsignedOrder(_ lhs: GoValue, _ rhs: GoValue) -> Int {
+    /// The order of two such keys, as `GoFormat.keyOrder` gives it. Keys
+    /// that are floating-point numbers sort by value, a NaN before any.
+    static func unsignedOrder(
+        _ lhs: GoValue, _ rhs: GoValue, _ keyType: GoRuntimeType?
+    ) -> Int {
         guard case .int(let left) = lhs, case .int(let right) = rhs else {
             return GoFormat.keyOrder(lhs, rhs)
+        }
+        if case .number(let kind)? = keyType, kind.isFloat {
+            let (a, b) = (
+                Double(bitPattern: UInt64(bitPattern: left)),
+                Double(bitPattern: UInt64(bitPattern: right))
+            )
+            if a.isNaN || b.isNaN { return a.isNaN == b.isNaN ? 0 : (a.isNaN ? -1 : 1) }
+            return a < b ? -1 : (a > b ? 1 : 0)
         }
         let (a, b) = (UInt64(bitPattern: left), UInt64(bitPattern: right))
         return a < b ? -1 : (a > b ? 1 : 0)

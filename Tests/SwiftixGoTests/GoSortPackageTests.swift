@@ -205,7 +205,8 @@ struct GoSortPackageTests: GoTestHarness {
             goMainDiagnostic("x := sort.Ints([]int{1})\nfmt.Println(x)", imports: sort)
                 == "no value used as value")
         #expect(
-            goMainDiagnostic("sort.Float64s([]int{1})", imports: sort) == "undefined: sort.Float64s")
+            goMainDiagnostic("sort.Float64s([]int{1})", imports: sort)
+                == "cannot use []int as []float64 value")
         #expect(goMainDiagnostic("sort.Ints([]int{1})") == "undefined: sort")
         #expect(
             goMainDiagnostic("fmt.Println(strconv.Itoa(\"1\"))", imports: ["fmt", "strconv"])
