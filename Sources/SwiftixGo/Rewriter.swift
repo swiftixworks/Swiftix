@@ -428,6 +428,7 @@ public enum GoSourceRewriter {
             .compositeLiteral(let rhsType, let rhsElements, _)
         ):
             return typeText(lhsType) == typeText(rhsType)
+                && capturesFieldNames(of: lhsType, captures: &captures)
                 && lhsElements.map(\.key) == rhsElements.map(\.key)
                 && matchesList(
                     lhsElements.compactMap(\.keyExpression),
@@ -443,6 +444,36 @@ public enum GoSourceRewriter {
             return typeText(lhs) == typeText(rhs)
         default:
             return false
+        }
+    }
+
+    /// The names of the fields of a struct type a pattern writes out are
+    /// identifiers of the pattern like any other: one that is a wildcard
+    /// stands for the field's name wherever else the pattern has it, so
+    /// `struct{ a int }{a}` matches a literal whose element is `a` and no
+    /// other, as with Go's `gofmt`. Returns false when a name already stands
+    /// for something else.
+    private static func capturesFieldNames(
+        of type: GoTypeExpression, captures: inout [String: String]
+    ) -> Bool {
+        switch type {
+        case .structure(let fields, _):
+            for field in fields {
+                if isWildcard(field.name) {
+                    if let existing = captures[field.name], existing != field.name { return false }
+                    captures[field.name] = field.name
+                }
+                guard capturesFieldNames(of: field.type, captures: &captures) else { return false }
+            }
+            return true
+        case .pointer(let inner, _), .array(_, let inner, _), .slice(let inner, _),
+            .channel(_, let inner, _):
+            return capturesFieldNames(of: inner, captures: &captures)
+        case .map(let key, let value, _):
+            return capturesFieldNames(of: key, captures: &captures)
+                && capturesFieldNames(of: value, captures: &captures)
+        case .named, .interface:
+            return true
         }
     }
 
@@ -568,9 +599,13 @@ public enum GoSourceRewriter {
                 let close = matchingDelimiter(open, open: 0x7B, close: 0x7D, bytes: bytes)
             else { return nil }
             end = close + 1
-        case .compositeLiteral(_, _, let position):
+        case .compositeLiteral(let type, _, let position):
             start = position.offset
-            guard let open = nextByte(0x7B, from: start, bytes: bytes),
+            // The literal's own brace is the first after its type, which
+            // may have braces of its own; a literal without a type is
+            // where its brace is.
+            let typeEnd = type.isElided ? start : typeEnd(type, bytes: bytes)
+            guard let open = nextByte(0x7B, from: typeEnd, bytes: bytes),
                 let close = matchingDelimiter(open, open: 0x7B, close: 0x7D, bytes: bytes)
             else { return nil }
             end = close + 1
@@ -604,8 +639,10 @@ public enum GoSourceRewriter {
             else { return nil }
             start = leftRange.lowerBound
             end = rightRange.upperBound
-        case .typeExpression(let type, _):
-            start = type.position.offset
+        case .typeExpression(let type, let position):
+            // A function type is where its parameters are; it is written
+            // from its `func`.
+            start = min(position.offset, type.position.offset)
             end = typeEnd(type, bytes: bytes)
         }
         guard start >= 0, start <= end, end <= bytes.count else { return nil }
@@ -683,6 +720,9 @@ public enum GoSourceRewriter {
         case .map(_, let value, _), .channel(_, let value, _):
             return typeEnd(value, bytes: bytes)
         case .interface(_, let position):
+            if let signature = type.functionSignature {
+                return functionTypeEnd(signature.results, parameters: position.offset, bytes: bytes)
+            }
             guard let open = nextByte(0x7B, from: position.offset, bytes: bytes),
                 let close = matchingDelimiter(open, open: 0x7B, close: 0x7D, bytes: bytes)
             else { return position.offset }
@@ -693,6 +733,24 @@ public enum GoSourceRewriter {
             else { return position.offset }
             return close + 1
         }
+    }
+
+    /// Where a function type ends whose parameters open at `parameters`:
+    /// after them, or after its results, in parentheses or not.
+    private static func functionTypeEnd(
+        _ results: [GoTypeExpression], parameters: Int, bytes: [UInt8]
+    ) -> Int {
+        guard let close = matchingDelimiter(parameters, open: 0x28, close: 0x29, bytes: bytes)
+        else { return parameters }
+        guard let last = results.last else { return close + 1 }
+        var next = close + 1
+        while next < bytes.count, bytes[next] == 0x20 || bytes[next] == 0x09 { next += 1 }
+        if next < bytes.count, bytes[next] == 0x28,
+            let end = matchingDelimiter(next, open: 0x28, close: 0x29, bytes: bytes)
+        {
+            return end + 1
+        }
+        return typeEnd(last, bytes: bytes)
     }
 
     private static func render(_ expression: GoExpression, captures: [String: String]) -> String {
@@ -774,10 +832,18 @@ public enum GoSourceRewriter {
     }
 
     private static func typeText(_ type: GoTypeExpression) -> String {
+        // A literal that leaves its type out has none to write.
+        if type.isElided { return "" }
+        if let signature = type.functionSignature {
+            let results = signature.results.map(typeText).joined(separator: ", ")
+            return "func(" + signature.parameters.map(typeText).joined(separator: ", ") + ")"
+                + (signature.results.count > 1 ? " (\(results))" : results.isEmpty ? "" : " " + results)
+        }
         switch type {
         case .named(let name, _): return name
         case .pointer(let pointee, _): return "*" + typeText(pointee)
-        case .array(let length, let element, _): return "[\(length)]" + typeText(element)
+        case .array(let length, let element, _):
+            return (type.isOpenArray ? "[...]" : "[\(length)]") + typeText(element)
         case .slice(let element, _): return "[]" + typeText(element)
         case .map(let key, let value, _): return "map[" + typeText(key) + "]" + typeText(value)
         case .channel(let direction, let element, _):

@@ -27,6 +27,7 @@ enum GoNative {
         "$errors.New": 1,
         "$copy": 2,
         "$new": 1,
+        "$clear": 2,
         "$append": 3,
         "$strings.ToUpper": 1,
         "$strings.ToLower": 1,

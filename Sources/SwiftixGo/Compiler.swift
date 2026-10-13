@@ -190,13 +190,14 @@ public enum GoCompiler {
         var initializers: [String] = []
         var globalInitializers: [GoIRFunction] = []
         var functionCursor = 0
-        // The files of a unit as they are after every alias has its type:
-        // name resolution keeps their number and their order.
         var fileCursor = 0
         for unit in units {
-            let unitGlobals = files[fileCursor..<(fileCursor + unit.files.count)]
-                .flatMap(\.globalDeclarations)
+            // The unit's files as name resolution left them, one for one:
+            // an initializer names types and writes literals like any
+            // other code.
+            let unitFiles = files[fileCursor..<min(files.count, fileCursor + unit.files.count)]
             fileCursor += unit.files.count
+            let unitGlobals = unitFiles.flatMap(\.globalDeclarations)
             if !unitGlobals.isEmpty {
                 var lowerer = IRLowerer(
                     functionReturnCounts: functionReturnCounts,
@@ -1932,7 +1933,7 @@ private struct IRLowerer {
             let zero = try zeroValue(for: valueType, position: expression.position)
             operations.append(.getMapIndex(
                 destination: value, okDestination: ok,
-                base: try lower(base), key: try lower(key), zero: zero))
+                base: try lower(base), key: try lowerKey(key, ofMap: base), zero: zero))
             let registers = [value, ok]
             let types: [GoType] = [valueType, .bool]
             for index in names.indices {
@@ -2039,7 +2040,7 @@ private struct IRLowerer {
             let zero = try zeroValue(for: valueType, position: expression.position)
             operations.append(.getMapIndex(
                 destination: value, okDestination: ok,
-                base: try lower(base), key: try lower(key), zero: zero))
+                base: try lower(base), key: try lowerKey(key, ofMap: base), zero: zero))
             for (target, register) in zip(targets, [value, ok]) {
                 try store(register, to: target)
             }
@@ -2381,6 +2382,9 @@ private struct IRLowerer {
 
     mutating func lowerForRangeStatement(_ statement: GoStatement) throws {
         guard case .forRangeStatement(let indexName, let valueName, let collection, let body, _) = statement else { return }
+        if let ranged = try rangeThroughArrayPointer(statement) {
+            return try lowerForRangeStatement(ranged)
+        }
         scopes.append([:])
         defer { scopes.removeLast() }
 
@@ -2702,6 +2706,9 @@ private struct IRLowerer {
         if let target = conversionTarget(callee), let argument = arguments.first {
             return try lowerConversion(to: target, argument: argument)
         }
+        if let results = try lowerPredeclaredCall(callee: callee, arguments: arguments) {
+            return results.first
+        }
         if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
             return results.first
         }
@@ -2741,7 +2748,7 @@ private struct IRLowerer {
             if functionName == "delete" {
                 guard arguments.count == 2 else { return nil }
                 let base = try lower(arguments[0])
-                let key = try lower(arguments[1])
+                let key = try lowerKey(arguments[1], ofMap: arguments[0])
                 let destination = allocateRegister()
                 operations.append(.deleteMap(destination: destination, base: base, key: key))
                 // Store updated map back to the source variable
@@ -3636,7 +3643,7 @@ private struct IRLowerer {
                 right: right)
         }
         let leftRegister = try lower(left)
-        let rightRegister = try lower(right)
+        let rightRegister = comparand(try lower(right), right, against: left, by: binaryOperator)
         let destination = allocateRegister()
         operations.append(
             .binary(
@@ -3775,7 +3782,7 @@ private struct IRLowerer {
                     fieldNames: fields.map(\.name),
                     values: values))
         case .array(let length, let elementType):
-            var values = try elements.map { try lowerConverted($0.value, to: elementType) }
+            var values = try lowerListElements(elements, element: elementType, position: position)
             while values.count < length {
                 values.append(try zeroValue(for: elementType, position: position))
             }
@@ -3786,7 +3793,8 @@ private struct IRLowerer {
                 .makeSlice(
                     destination: destination,
                     zero: zero,
-                    values: try elements.map { try lowerConverted($0.value, to: elementType) }))
+                    values: try lowerListElements(
+                        elements, element: elementType, position: position)))
         case .map(let keyType, let valueType):
             var keys: [Int] = []
             var values: [Int] = []
@@ -3811,6 +3819,9 @@ private struct IRLowerer {
         guard case .index(let base, let index, _) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
+        if let followed = throughArrayPointer(indexOrSlice: expression) {
+            return try lowerIndexExpression(followed)
+        }
         let destination = allocateRegister()
         let baseType = try type(of: base)
         if case .map = underlying(baseType) {
@@ -3823,7 +3834,7 @@ private struct IRLowerer {
                     destination: destination,
                     okDestination: nil,
                     base: try lower(base),
-                    key: try lower(index),
+                    key: try lowerKey(index, ofMap: base),
                     zero: zero))
         } else {
             operations.append(
@@ -3838,6 +3849,9 @@ private struct IRLowerer {
     mutating func lowerSlicingExpression(_ expression: GoExpression) throws -> Int {
         guard case .slicing(let base, let low, let high, let position) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if let followed = throughArrayPointer(indexOrSlice: expression) {
+            return try lowerSlicingExpression(followed)
         }
         let baseType = try type(of: base)
         let lowRegister = try low.map { try lower($0) } ?? constant(.int(0))
@@ -4087,6 +4101,9 @@ private struct IRLowerer {
     }
 
     mutating func store(_ value: Int, to target: GoExpression) throws {
+        if let followed = throughArrayPointer(indexOrSlice: target) {
+            return try store(value, to: followed)
+        }
         switch target {
         case .identifier(let name, let position):
             // The blank identifier takes a value and keeps none.
@@ -4134,7 +4151,7 @@ private struct IRLowerer {
                     .setMapIndex(
                         destination: updated,
                         base: try lower(base),
-                        key: try lower(index),
+                        key: try lowerKey(index, ofMap: base),
                         value: value))
                 try store(updated, to: base)
             } else {
@@ -4356,6 +4373,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerAddress(of expression: GoExpression) throws -> Int {
+        if let address = try lowerElementAddress(throughPointerOf: expression) { return address }
         switch expression {
         case .identifier(let name, let position):
             let destination = allocateRegister()
@@ -4454,14 +4472,14 @@ private struct IRLowerer {
         case .compositeLiteral(let typeExpression, _, _):
             return resolve(typeExpression)
         case .index(let base, _, _):
-            switch underlying(try type(of: base)) {
+            switch underlying(throughArrayPointer(try type(of: base))) {
             case .array(_, let element), .slice(let element): return element
             case .string: return GoPredeclared.byte
             case .map(_, let value): return value
             default: return .void
             }
         case .slicing(let base, _, _, _):
-            switch underlying(try type(of: base)) {
+            switch underlying(throughArrayPointer(try type(of: base))) {
             case .array(_, let element), .slice(let element): return .slice(element)
             case .string: return .string
             default: return .void
@@ -4505,6 +4523,7 @@ private struct IRLowerer {
             if let target = conversionTarget(callee) {
                 return target
             }
+            if let builtin = try predeclaredCallType(of: expression) { return builtin }
             if let native = nativeFunction(for: callee) {
                 return native.function.results.first ?? .void
             }
@@ -4653,7 +4672,7 @@ private struct IRLowerer {
                 functionReturnCounts[name] == nil, functionParameterTypes[name] == nil
             else { return nil }
             switch name {
-            case "int", "string", "bool", "byte", "uint8":
+            case "int", "string", "bool", "byte", "uint8", "any", "error":
                 return resolve(.named(name, position: position))
             default:
                 return typeDefinitions[name] == nil ? nil : .named(name)
@@ -4693,6 +4712,10 @@ private struct IRLowerer {
             }
         case .slice where sourceShape == .string:
             native = GoPredeclared.stringToBytes
+        case .interface, .structure:
+            // `any(x)` holds the value with its type, as an assignment
+            // makes it, and `T(x)` is a struct under the name `T`.
+            return converted(value, from: staticType(of: argument), to: target)
         default:
             return value
         }
@@ -4811,6 +4834,7 @@ private struct IRLowerer {
     /// value and its type. Returns `register`, a value of type `source`,
     /// boxed with its descriptor when `target` is an interface type.
     mutating func converted(_ register: Int, from source: GoType?, to target: GoType?) -> Int {
+        if let renamed = renamedStruct(register, from: source, to: target) { return renamed }
         guard let target, isInterfaceType(target), let source,
             let descriptor = typeDescriptor(for: source)
         else { return register }
@@ -4954,6 +4978,7 @@ private struct IRLowerer {
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> (name: String, registers: [Int])? {
+        if let wrapper = try clearWrapper(callee: callee, arguments: arguments) { return wrapper }
         guard let native = nativeFunction(for: callee) else { return nil }
         let registers = try lowerNativeOperands(
             native.function, receiver: native.receiver, arguments: arguments)
@@ -5078,6 +5103,335 @@ private struct IRLowerer {
         case .logicalAnd: return .logicalAnd
         case .logicalOr: return .logicalOr
         }
+    }
+}
+
+// MARK: - Composite literals
+
+extension IRLowerer {
+    /// The values of an array or slice literal, each where its index puts
+    /// it. An element stands after the one before it or at the index it is
+    /// written with, and an index the literal leaves out has the zero value.
+    /// The elements are evaluated in the order the source has them.
+    mutating func lowerListElements(
+        _ elements: [GoCompositeElement], element elementType: GoType, position: GoSourcePosition
+    ) throws -> [Int] {
+        guard elements.contains(where: { $0.keyExpression != nil }) else {
+            return try elements.map { try lowerConverted($0.value, to: elementType) }
+        }
+        var slots: [Int?] = []
+        var next = 0
+        for element in elements {
+            let index = element.keyExpression?.literalIndex ?? next
+            let value = try lowerConverted(element.value, to: elementType)
+            guard index >= 0, index < GoCompositeLiterals.maximumLength else {
+                throw GoDiagnostic(position: element.position, message: "invalid index in literal")
+            }
+            if slots.count <= index {
+                slots.append(contentsOf: repeatElement(nil, count: index + 1 - slots.count))
+            }
+            slots[index] = value
+            next = index + 1
+        }
+        var zero: Int?
+        return try slots.map { slot in
+            if let slot { return slot }
+            if let zero { return zero }
+            let register = try zeroValue(for: elementType, position: position)
+            zero = register
+            return register
+        }
+    }
+}
+
+// MARK: - `new`, `min`, `max`, and `clear`
+
+extension IRLowerer {
+    /// Whether `name` means what Go predeclares: the program declares
+    /// nothing of that name where it is read.
+    func isPredeclared(_ name: String) -> Bool {
+        lookup(name) == nil && globalInfos[name] == nil && functionReturnCounts[name] == nil
+            && functionParameterTypes[name] == nil && typeDefinitions[name] == nil
+    }
+
+    /// The length of the array `argument` points to when it is the operand
+    /// of `len` or `cap`: a constant, for which the pointer is not followed.
+    func lengthBehindPointer(callee: GoExpression, arguments: [GoExpression]) -> Int? {
+        guard case .identifier(let name, _) = callee, name == "len" || name == "cap",
+            isPredeclared(name), arguments.count == 1,
+            let argumentType = try? type(of: arguments[0]),
+            throughArrayPointer(argumentType) != argumentType,
+            case .array(let length, _) = underlying(throughArrayPointer(argumentType))
+        else { return nil }
+        return length
+    }
+
+    /// The builtin `callee` names, when it is `new`, `min`, `max`, or
+    /// `clear` and the program has given the name no other meaning.
+    func predeclaredFunction(_ callee: GoExpression) -> String? {
+        guard case .identifier(let name, _) = callee,
+            name == "new" || name == "min" || name == "max" || name == "clear",
+            isPredeclared(name)
+        else { return nil }
+        return name
+    }
+
+    /// The type of a call of one of those builtins, or nil for any other.
+    func predeclaredCallType(of call: GoExpression) throws -> GoType? {
+        guard case .call(let callee, let arguments, _) = call,
+            let name = predeclaredFunction(callee)
+        else { return nil }
+        switch name {
+        case "new":
+            guard case .typeExpression(let type, _)? = arguments.first else { return nil }
+            return .pointer(resolve(type))
+        case "clear":
+            return .void
+        default:
+            // The checker made the operands agree: one that is not an `int`
+            // has the type the constants among them took.
+            let types = try arguments.map { try type(of: $0) }
+            let named = types.first { type in
+                if case .named = type { return true }
+                return false
+            }
+            return named ?? types.first { $0 != .int } ?? .int
+        }
+    }
+
+    /// Lowers a call of one of those builtins and returns a register for
+    /// each result, or nil when `callee` is none of them.
+    mutating func lowerPredeclaredCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> [Int]? {
+        if let length = lengthBehindPointer(callee: callee, arguments: arguments) {
+            // Go reads the operand only for what it may do besides.
+            if !arguments[0].isRepeatable { _ = try lower(arguments[0]) }
+            return [constant(.int(Int64(length)))]
+        }
+        guard let name = predeclaredFunction(callee) else { return nil }
+        switch name {
+        case "new":
+            // A pointer to a new variable that holds the zero value, made
+            // as `&T{}` makes one.
+            guard case .typeExpression(let type, let position)? = arguments.first else {
+                throw GoDiagnostic(position: callee.position, message: "new requires a type")
+            }
+            let destination = allocateRegister()
+            operations.append(
+                .call(
+                    function: GoPredeclared.newVariable,
+                    arguments: [try zeroValue(for: resolve(type), position: position)],
+                    destinations: [destination]))
+            return [destination]
+        case "clear":
+            guard let cleared = arguments.first else { return [] }
+            operations.append(
+                .call(
+                    function: GoPredeclared.clearElements,
+                    arguments: try clearOperands(cleared), destinations: []))
+            return []
+        default:
+            return [try lowerExtreme(isMinimum: name == "min", of: arguments)]
+        }
+    }
+
+    /// `min` or `max`: every operand is read, in order, and the result is
+    /// the first of them that none after it is before (`min`) or after
+    /// (`max`), by the comparison `<` makes.
+    mutating func lowerExtreme(isMinimum: Bool, of arguments: [GoExpression]) throws -> Int {
+        let operands = try arguments.map { try lower($0) }
+        let result = allocateRegister()
+        guard let first = operands.first else { return constant(.int(0)) }
+        operations.append(.copy(destination: result, source: first))
+        for operand in operands.dropFirst() {
+            let kept = allocateLabel()
+            let isBetter = allocateRegister()
+            operations.append(
+                .binary(
+                    destination: isBetter, operator: .less,
+                    left: isMinimum ? operand : result, right: isMinimum ? result : operand))
+            operations.append(.jumpIfFalse(condition: isBetter, target: kept))
+            operations.append(.copy(destination: result, source: operand))
+            operations.append(.label(kept))
+        }
+        return result
+    }
+
+    /// What the VM clears and what it leaves in each element of a slice:
+    /// the zero value of the element type. A map loses its entries.
+    mutating func clearOperands(_ cleared: GoExpression) throws -> [Int] {
+        let collection = try lower(cleared)
+        if case .slice(let element) = underlying(try type(of: cleared)) {
+            return [collection, try zeroValue(for: element, position: cleared.position)]
+        }
+        return [collection, constant(.nilValue)]
+    }
+
+    /// The function a `go` or `defer` of `clear` runs: the VM starts and
+    /// defers functions, and `clear` is one instruction.
+    mutating func clearWrapper(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> (name: String, registers: [Int])? {
+        guard predeclaredFunction(callee) == "clear", let cleared = arguments.first else {
+            return nil
+        }
+        let name = "$native.\(wrapperNamespace).\(GoPredeclared.clearElements)"
+        if nativeWrappers[name] == nil {
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: 2,
+                registerCount: 2,
+                operations: [
+                    .call(function: GoPredeclared.clearElements, arguments: [0, 1], destinations: []),
+                    .return,
+                ])
+        }
+        return (name, try clearOperands(cleared))
+    }
+}
+
+// MARK: - Struct types with and without a name
+
+extension IRLowerer {
+    /// A struct value carries the name of its type, which is part of what
+    /// the VM compares. A value of `struct{ a int }` that becomes a `T` of
+    /// that structure, or the reverse, by assignment or by conversion, is
+    /// therefore written again under the name of its new type; its fields
+    /// have the types they had. Nil when `source` and `target` are not two
+    /// such types.
+    mutating func renamedStruct(_ register: Int, from source: GoType?, to target: GoType?) -> Int? {
+        guard let source, let target, source != target,
+            typeName(of: source) != typeName(of: target),
+            case .structure(let fields) = underlying(target),
+            underlying(source) == underlying(target)
+        else { return nil }
+        let values = fields.map { field -> Int in
+            let value = allocateRegister()
+            operations.append(.getField(destination: value, base: register, name: field.name))
+            return value
+        }
+        let destination = allocateRegister()
+        operations.append(
+            .makeStruct(
+                destination: destination, typeName: typeName(of: target),
+                fieldNames: fields.map(\.name), values: values))
+        return destination
+    }
+
+    /// The key `key` of an index of the map `map`, under the name of the
+    /// map's key type when it is a struct of another name: the VM finds an
+    /// entry by a key that is equal.
+    mutating func lowerKey(_ key: GoExpression, ofMap map: GoExpression) throws -> Int {
+        let register = try lower(key)
+        guard let mapType = try? type(of: map), case .map(let keyType, _) = underlying(mapType)
+        else { return register }
+        return renamedStruct(register, from: staticType(of: key), to: keyType) ?? register
+    }
+
+    /// The right operand of `==` or `!=` as a value of the left operand's
+    /// type, when the two are a struct type and its structure written out.
+    mutating func comparand(
+        _ register: Int, _ operand: GoExpression, against other: GoExpression,
+        by binaryOperator: GoBinaryOperator
+    ) -> Int {
+        guard binaryOperator == .equal || binaryOperator == .notEqual else { return register }
+        return renamedStruct(register, from: staticType(of: operand), to: staticType(of: other))
+            ?? register
+    }
+}
+
+// MARK: - Pointers to arrays
+
+extension IRLowerer {
+    /// The array a pointer to an array points to, and any other type as it
+    /// is.
+    func throughArrayPointer(_ type: GoType) -> GoType {
+        guard case .pointer(let pointee) = underlying(type), case .array = underlying(pointee)
+        else { return type }
+        return pointee
+    }
+
+    /// `*base` when `base` is a pointer to an array: `p[i]` and `p[a:b]` are
+    /// `(*p)[i]` and `(*p)[a:b]`, and a nil `p` panics as `*p` does.
+    func arrayBehindPointer(_ base: GoExpression) -> GoExpression? {
+        guard let baseType = try? type(of: base), throughArrayPointer(baseType) != baseType
+        else { return nil }
+        return .unary(operator: .dereference, operand: base, position: base.position)
+    }
+
+    /// `p[i]` or `p[a:b]` as `(*p)[i]` or `(*p)[a:b]` when `p` is a pointer
+    /// to an array, and nil for any other expression.
+    func throughArrayPointer(indexOrSlice expression: GoExpression) -> GoExpression? {
+        switch expression {
+        case .index(let base, let index, let position):
+            return arrayBehindPointer(base).map { .index(base: $0, index: index, position: position) }
+        case .slicing(let base, let low, let high, let position):
+            return arrayBehindPointer(base).map {
+                .slicing(base: $0, low: low, high: high, position: position)
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// `&p[i]` for a pointer `p` to an array: the address of the element
+    /// inside the array it points to. Nil for any other expression.
+    mutating func lowerElementAddress(throughPointerOf expression: GoExpression) throws -> Int? {
+        guard case .index(let base, let index, _) = expression, arrayBehindPointer(base) != nil
+        else { return nil }
+        let pointer = try lower(base)
+        let element = try lower(index)
+        operations.append(
+            .call(function: GoPredeclared.requireValue, arguments: [pointer], destinations: []))
+        let destination = allocateRegister()
+        operations.append(.indexAddress(destination: destination, base: pointer, index: element))
+        return destination
+    }
+
+    /// A `range` over a pointer to an array as a `range` the VM knows, or
+    /// nil for any other.
+    ///
+    /// With a value variable the loop reads the elements of the array the
+    /// pointer points to as they are when it reaches them, which is a range
+    /// over a slice of the whole array. With an index alone Go does not
+    /// follow the pointer at all: the loop counts to the length of the
+    /// array type, also when the pointer is nil.
+    mutating func rangeThroughArrayPointer(_ statement: GoStatement) throws -> GoStatement? {
+        guard case .forRangeStatement(let indexName, let valueName, let collection, let body, let position) = statement,
+            let collectionType = try? type(of: collection),
+            throughArrayPointer(collectionType) != collectionType,
+            case .array(let length, let elementType) = underlying(
+                throughArrayPointer(collectionType))
+        else { return nil }
+        let hasValue = valueName != nil && valueName != GoValueList.blank
+        if hasValue, length > 0 {
+            return .forRangeStatement(
+                indexName: indexName, valueName: valueName,
+                collection: .slicing(
+                    base: collection, low: nil,
+                    high: .integer(Int64(length), position: collection.position),
+                    position: collection.position),
+                body: body, position: position)
+        }
+        if !collection.isRepeatable { _ = try lower(collection) }
+        // Something of that length to count: the VM ranges over values. A
+        // value variable of an array without elements is never given one.
+        let counted = allocateRegister()
+        let size = constant(.int(Int64(length)))
+        let zero =
+            hasValue
+            ? try zeroValue(for: elementType, position: collection.position)
+            : constant(.bool(false))
+        operations.append(
+            .allocateSlice(destination: counted, zero: zero, length: size, capacity: size))
+        let name = "$ranged.\(counted)"
+        scopes[scopes.count - 1][name] = LoweredBinding(
+            register: counted, type: .slice(hasValue ? elementType : .bool))
+        return .forRangeStatement(
+            indexName: indexName, valueName: hasValue ? valueName : nil,
+            collection: .identifier(name, position: collection.position), body: body,
+            position: position)
     }
 }
 

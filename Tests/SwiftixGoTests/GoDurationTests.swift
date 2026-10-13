@@ -430,7 +430,7 @@ struct GoDurationTests: GoTestHarness {
                         return sum
                     }
                     """)
-                == "cannot use int as time.Duration value")
+                == "cannot use int as time.Duration value in struct literal")
         #expect(
             goMainDiagnostic(
                 """

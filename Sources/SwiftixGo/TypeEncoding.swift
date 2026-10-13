@@ -133,6 +133,11 @@ struct GoTypeEncoder {
             if methods.isEmpty { return "interface {}" }
             if methods == [GoInterfaceMethod(name: "Error", results: [.string])] { return "error" }
             return "interface {...}"
+        case .structure(let fields):
+            // As `GoTypeDescriptor.name(of:)` prints a struct type.
+            if fields.isEmpty { return "struct {}" }
+            return "struct { "
+                + fields.map { $0.name + " " + goTypeName($0.type) }.joined(separator: "; ") + " }"
         default: return type.description
         }
     }

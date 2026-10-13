@@ -34,7 +34,8 @@ public enum GoFormatter {
             }
         }
         var printer = FormatPrinter(
-            tokens: sortingImports(tokens), spacing: spacing, functionLiterals: literals)
+            tokens: sortingImports(tokens), spacing: spacing, functionLiterals: literals,
+            literalBraces: parsed.parentheses.literalBraces)
         return printer.render()
     }
 
@@ -459,6 +460,18 @@ private struct FormatValueSpecification: Equatable {
     var keepsTypeColumn = false
 }
 
+/// What the printer knows of a header it is in the middle of: the signature
+/// of a function, or the clause of a `for`, `if`, or `switch`.
+private struct FormatHeader {
+    let pendingFunction: Bool
+    let pendingFunctionIsType: Bool
+    let pendingIf: Bool
+    let pendingSwitch: Bool
+    let forHeader: Bool
+
+    var isOpen: Bool { pendingFunction || pendingIf || pendingSwitch || forHeader }
+}
+
 /// An open `import (`, `var (`, `const (`, or `type (` group.
 private struct FormatGroup {
     let keyword: String
@@ -484,6 +497,9 @@ private struct FormatPrinter {
     let spacing: GoOperatorSpacing
     /// The offsets of the `func` keywords that begin function literals.
     let functionLiterals: Set<Int>
+    /// The offsets of the `{` that open composite literals, as the parser
+    /// found them: every other brace opens a block or the body of a type.
+    let literalBraces: Set<Int>
     var lines: [FormatLine] = []
     /// The cells of the line being written, and the text after the last one.
     var cells: [String] = []
@@ -578,15 +594,11 @@ private struct FormatPrinter {
     /// Whether the previous token was the `]` of such a bracket, after which
     /// a `*` is a pointer type and a `[` is another type.
     var afterTypeBracket = false
-    /// Brace depths of `interface{}` and `struct{}`, which stay on their
-    /// line, and whether the previous token closed one: a `{` after it
-    /// opens a composite literal of that type (`[]interface{}{x}`).
-    var emptyTypeDepths: Set<Int> = []
-    var closedEmptyType = false
-    /// Whether the tokens so far spell a literal type (`[]T`, `[3]*T`,
-    /// `map[K]V`), after which a `{` opens a composite literal even in the
-    /// header of a statement.
-    var spellsLiteralType = false
+    /// The header a type body stands in, by the brace depth of the body: a
+    /// struct type written out in the parameters of a function or in the
+    /// clause of a `for`, `if`, or `switch`. Its lines are those of a type,
+    /// and what it interrupted goes on where it ends.
+    var suspendedHeaders: [Int: FormatHeader] = [:]
 
     mutating func render() -> String {
         for (index, token) in tokens.enumerated() {
@@ -1234,20 +1246,13 @@ private struct FormatPrinter {
         let closedParameterList = closesParameterList
         closesParameterList = false
         let followsFunctionType = pendingFunction && pendingFunctionIsType
-        if followsFunctionType, token.text == "{" {
+        if followsFunctionType, token.text == "{", literalBraces.contains(token.offset) {
             // The type was the last part of a literal's type.
             pendingFunction = false
             pendingFunctionIsType = false
         }
         let followsTypeBracket = afterTypeBracket
         afterTypeBracket = false
-        let followsLiteralType = spellsLiteralType && !pendingFunction
-        let followsEmptyType = closedEmptyType && !pendingFunction
-        closedEmptyType = false
-        // A type goes on through names, pointers, and further brackets.
-        spellsLiteralType =
-            spellsLiteralType
-            && (token.kind == .word || ["*", ".", "[", "]"].contains(token.text))
         if lineIsEmpty { beginSpecification() }
         advanceSpecification(at: token)
 
@@ -1363,7 +1368,6 @@ private struct FormatPrinter {
             append("]")
             afterTypeBracket = typeBrackets.popLast() ?? false
             _ = sliceBrackets.popLast()
-            if afterTypeBracket { spellsLiteralType = true }
         case "{":
             // `interface{}` stays on its line; an interface with methods is
             // a block like a struct.
@@ -1376,27 +1380,23 @@ private struct FormatPrinter {
                 append("{")
                 braceDepth += 1
                 compositeDepths.insert(braceDepth)
-                emptyTypeDepths.insert(braceDepth)
                 break
             }
-            let isLiteral =
-                followsLiteralType || followsEmptyType || followsFunctionType
-                // Inside a literal every brace is an element's, but the
-                // body of a function literal that is one.
-                || (compositeDepths.contains(braceDepth) && !pendingFunction
-                    && (previous?.kind == .word || ["{", ",", ":", "]"].contains(previous?.text)))
-                // Inside parentheses a type name before `{` cannot be the
-                // operand before a block, in a statement header either.
-                || (parenthesisDepth > 0 && !pendingFunction && previous?.kind == .word
-                    && endsOperand(previous))
-                || (isCompositeLiteralBrace
-                    && !(previous?.text == "interface" && next?.text != "}"))
+            // The syntax tree says which braces open a composite literal:
+            // after a type that is a name, one that is written out, or none
+            // at all, as an element of the literal around it.
+            let isLiteral = literalBraces.contains(token.offset)
+            // The body of a type, wherever the type is written: also in a
+            // signature, where a `{` otherwise opens the function's body.
+            let opensTypeBody = previous?.text == "struct" || previous?.text == "interface"
             if isLiteral {
                 append("{")
                 braceDepth += 1
                 compositeDepths.insert(braceDepth)
                 continuations.append(continuation(.list(opener: token.offset, isLiteral: true)))
-            } else if pendingFunction ? staysOnOneLineAsFunctionBody() : staysOnOneLineAsTypeBody() {
+            } else if opensTypeBody
+                ? staysOnOneLineAsTypeBody() : pendingFunction && staysOnOneLineAsFunctionBody()
+            {
                 openOneLineBody(next: next)
             } else {
                 if pendingFunction, lineIsFunctionDeclaration {
@@ -1413,6 +1413,7 @@ private struct FormatPrinter {
                 blockBases.append(parenthesisDepth)
                 braceDepth += 1
                 indent += 1
+                if opensTypeBody { suspendHeader() }
                 if previous?.text == "struct" || previous?.text == "interface" {
                     typeBodyDepths.insert(braceDepth)
                 }
@@ -1434,7 +1435,6 @@ private struct FormatPrinter {
             } else if compositeDepths.remove(braceDepth) != nil {
                 trimTrailingWhitespace()
                 append("}")
-                closedEmptyType = emptyTypeDepths.remove(braceDepth) != nil
                 if let last = continuations.last, case .list(_, true) = last.kind,
                     last.braceDepth == braceDepth
                 {
@@ -1694,11 +1694,13 @@ private struct FormatPrinter {
     /// Opens a body that stays on its line: `{ a(); b() }`, or `{}`.
     mutating func openOneLineBody(next: FormatToken?) {
         let isType = previous?.text == "struct" || previous?.text == "interface"
-        if pendingFunction, lineIsFunctionDeclaration {
+        if isType {
+            // `struct{ a int }`: the body follows the keyword directly.
+        } else if pendingFunction, lineIsFunctionDeclaration {
             // The bodies of one-line functions that follow one another are
             // a column.
             endCell()
-        } else if !isType {
+        } else {
             ensureSpace()
         }
         append("{")
@@ -1706,8 +1708,34 @@ private struct FormatPrinter {
         braceDepth += 1
         oneLineBodies[braceDepth] = (Self.width(current), next?.text == "}" ? 0 : 1)
         if isType { typeBodyDepths.insert(braceDepth) }
-        pendingFunction = false
+        // A type in a signature is not the end of it: the body of the
+        // function is still to come.
+        if !isType { pendingFunction = false }
         pendingTypeDeclaration = false
+    }
+
+    /// Sets aside the header the type body that has just opened stands in.
+    mutating func suspendHeader() {
+        let header = FormatHeader(
+            pendingFunction: pendingFunction, pendingFunctionIsType: pendingFunctionIsType,
+            pendingIf: pendingIf, pendingSwitch: pendingSwitch, forHeader: forHeader)
+        guard header.isOpen else { return }
+        suspendedHeaders[braceDepth] = header
+        pendingFunction = false
+        pendingFunctionIsType = false
+        pendingIf = false
+        pendingSwitch = false
+        forHeader = false
+    }
+
+    /// Takes up the header again that the type body closing here stood in.
+    mutating func resumeHeader() {
+        guard let header = suspendedHeaders.removeValue(forKey: braceDepth) else { return }
+        pendingFunction = header.pendingFunction
+        pendingFunctionIsType = header.pendingFunctionIsType
+        pendingIf = header.pendingIf
+        pendingSwitch = header.pendingSwitch
+        forHeader = header.forHeader
     }
 
     mutating func beginCase(_ keyword: String) {
@@ -1724,6 +1752,7 @@ private struct FormatPrinter {
     mutating func closeBrace() {
         if !lineIsEmpty { finishLine() }
         endStatement()
+        resumeHeader()
         _ = blockBases.popLast()
         activeCaseDepths.remove(braceDepth)
         switchDepths.remove(braceDepth)
@@ -1778,13 +1807,6 @@ private struct FormatPrinter {
         case .lineComment, .blockComment:
             return false
         }
-    }
-
-    var isCompositeLiteralBrace: Bool {
-        guard let previous, previous.kind == .word else { return false }
-        guard !forHeader, !pendingSwitch, !pendingIf, !pendingFunction else { return false }
-        return !["if", "else", "for", "switch", "select", "func", "struct", "type"].contains(
-            previous.text)
     }
 
     var isPointerTypeContext: Bool {
@@ -1862,8 +1884,6 @@ private struct FormatPrinter {
         lineIsStructField = false
         lineIsFunctionDeclaration = false
         lineSpecification = nil
-        // A type spelled on one line is no start of a literal on the next.
-        spellsLiteralType = false
         pendingVariableDeclaration = false
         pendingTypeDeclaration = false
     }

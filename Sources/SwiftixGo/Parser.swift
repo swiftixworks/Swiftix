@@ -26,6 +26,14 @@ struct GoParentheses: Equatable, Sendable {
     private(set) var redundant: Set<Int> = []
     /// The `(` of every pair.
     private(set) var opens: Set<Int> = []
+    /// The `{` of every composite literal: the tree has a literal where
+    /// its type begins, and `gofmt` tells its brace from that of a block
+    /// or of the body of a type.
+    private(set) var literalBraces: Set<Int> = []
+
+    mutating func recordLiteral(openingAt offset: Int) {
+        literalBraces.insert(offset)
+    }
 
     mutating func record(around expression: GoExpression, open: Int, close: Int) {
         opens.insert(open)
@@ -39,7 +47,8 @@ struct GoParentheses: Equatable, Sendable {
     }
 
     static func == (lhs: GoParentheses, rhs: GoParentheses) -> Bool {
-        lhs.redundant == rhs.redundant && lhs.pairs.count == rhs.pairs.count
+        lhs.redundant == rhs.redundant && lhs.literalBraces == rhs.literalBraces
+            && lhs.pairs.count == rhs.pairs.count
             && lhs.pairs.allSatisfy { key, value in
                 rhs.pairs[key].map { $0.open == value.open && $0.close == value.close } ?? false
             }
@@ -61,6 +70,8 @@ private struct Parser {
     /// frame of the parser holds the parser.
     var scopeDepth: UInt16 = 1
     var iotaDepth: UInt16 = 0
+    /// Whether a composite literal leaves something for its type to settle.
+    var hasOpenLiterals = false
     /// The names of each declaration of several names, which the tree keeps
     /// as text. For a function: its name, the end of its body, and the names
     /// of its results.
@@ -168,6 +179,7 @@ private struct Parser {
             globalDeclarations: globalDeclarations,
             functions: functions)
         file.declaresLocalTypes = declaresLocalTypes
+        file.hasOpenLiterals = hasOpenLiterals
         file.namePositions = namePositions
         return file
     }
@@ -457,6 +469,15 @@ private struct Parser {
             if check(.rightBracket) {
                 advance()
                 return .slice(element: try parseTypeExpression(), position: position)
+            }
+            if case .identifier(GoSpread.spelling) = current.kind, lookahead(1).kind == .rightBracket {
+                // `[...]T`: an array as long as the literal it is the type of.
+                advance()
+                advance()
+                hasOpenLiterals = true
+                return .array(
+                    length: GoCompositeLiterals.openLength, element: try parseTypeExpression(),
+                    position: position)
             }
             guard case .integer(let length) = current.kind,
                 length >= 0,
@@ -1333,10 +1354,17 @@ private struct Parser {
         }
         if let unaryOperator {
             advance()
-            return .unary(
-                operator: unaryOperator,
-                operand: try parseUnary(allowCompositeLiteral: allowCompositeLiteral),
-                position: position)
+            let operand = try parseUnary(allowCompositeLiteral: allowCompositeLiteral)
+            if unaryOperator == .receive,
+                case .typeExpression(.channel(.bidirectional, let element, _), _) = operand
+            {
+                // `(<-chan int)(c)`: the arrow before a channel type is
+                // part of the type, not a receive from it.
+                return .typeExpression(
+                    .channel(direction: .receiveOnly, element: element, position: position),
+                    position: position)
+            }
+            return .unary(operator: unaryOperator, operand: operand, position: position)
         }
         return try parsePostfix(allowCompositeLiteral: allowCompositeLiteral)
     }
@@ -1398,6 +1426,13 @@ private struct Parser {
                     }
                 }
                 try expect(.rightParen, message: "expected ')'")
+                if case .identifier(let name, _) = expression, GoCompositeLiterals.takesType(name),
+                    let first = arguments.first
+                {
+                    // `new(T)`, `make(T, n)`: whether the name is a type is
+                    // for what declares it to say.
+                    if case .typeExpression = first {} else { hasOpenLiterals = true }
+                }
                 expression = .call(callee: expression, arguments: arguments, position: position)
                 continue
             }
@@ -1430,6 +1465,7 @@ private struct Parser {
 
     mutating func parseCompositeLiteral(type: GoTypeExpression) throws -> GoExpression {
         let position = type.position
+        parentheses.recordLiteral(openingAt: current.position.offset)
         try expect(.leftBrace, message: "expected '{'")
         skipSemicolons()
         var elements: [GoCompositeElement] = []
@@ -1437,42 +1473,54 @@ private struct Parser {
             let elementPosition = current.position
             var key: String?
             var keyExpression: GoExpression?
-            if case .map = type {
-                keyExpression = try parseExpression()
-                try expect(.colon, message: "expected ':' after map key")
-            } else if case .identifier(let name) = current.kind, lookahead(1).kind == .colon {
-                key = name
+            var value = try parseLiteralValue()
+            if check(.colon) {
+                // What stands before a colon is a key. Whether it names a
+                // field, or is the key of a map or an index, is for the
+                // type of the literal to say.
                 advance()
-                advance()
-            } else if case .string(let name) = current.kind, lookahead(1).kind == .colon {
-                key = name
-                advance()
-                advance()
-            } else if case .integer = current.kind, lookahead(1).kind == .colon {
-                // integer keys for maps — store as string representation
-                if case .integer(let value) = current.kind {
-                    key = String(value)
+                (key, keyExpression) = GoCompositeElement.key(value, in: type)
+                value = try parseLiteralValue()
+                switch type {
+                case .map, .structure: break
+                default: hasOpenLiterals = true
                 }
-                advance()
-                advance()
             }
             elements.append(
                 GoCompositeElement(
                     key: key,
                     keyExpression: keyExpression,
-                    value: try parseExpression(),
+                    value: value,
                     position: elementPosition))
             if check(.comma) {
                 advance()
                 skipSemicolons()
-            } else if check(.semicolon) {
-                skipSemicolons()
             } else if !check(.rightBrace) {
+                // Also the end of a line: an element that ends one is
+                // followed by a comma.
                 throw diagnostic("expected ',' or '}' in composite literal")
+            }
+        }
+        // A struct literal that gives too few values is reported where it
+        // ends, which the tree does not keep.
+        if !elements.isEmpty, elements.allSatisfy({ $0.key == nil && $0.keyExpression == nil }) {
+            switch type {
+            case .named, .structure:
+                namePositions[GoCompositeLiterals.endKey(of: position)] = [current.position]
+            default: break
             }
         }
         advance()
         return .compositeLiteral(type: type, elements: elements, position: position)
+    }
+
+    /// An element of a composite literal, or its key: an expression, or a
+    /// literal in braces that leaves its type to the literal around it.
+    mutating func parseLiteralValue() throws -> GoExpression {
+        guard check(.leftBrace) else { return try parseExpression() }
+        hasOpenLiterals = true
+        return try parseCompositeLiteral(
+            type: .named(GoCompositeLiterals.elidedTypeName, position: current.position))
     }
 
     mutating func parsePrimary() throws -> GoExpression {
@@ -1507,8 +1555,13 @@ private struct Parser {
         case .chanKeyword:
             let type = try parseTypeExpression()
             return .typeExpression(type, position: token.position)
+        case .structKeyword:
+            // `struct{ a int }{1}`, and the type alone in a conversion or
+            // as the argument of `new`.
+            let type = try parseTypeExpression()
+            return .typeExpression(type, position: token.position)
         case .function:
-            return try parseFunctionLiteral()
+            return try parseFunctionLiteralOrType()
         default:
             throw diagnostic("expected expression")
         }
@@ -1562,6 +1615,23 @@ private struct Parser {
         let position = current.position
         advance()
         return .spread(argument, position: position)
+    }
+
+    /// A function literal, or a function type where an expression may be
+    /// one: `(func())(nil)`, `new(func(int) string)`. What does not read as
+    /// a literal is a type when no body follows it.
+    mutating func parseFunctionLiteralOrType() throws -> GoExpression {
+        // A signature that is no literal's has recorded nothing by the time
+        // it fails, so going back is going back in the tokens.
+        let start = index
+        do {
+            return try parseFunctionLiteral()
+        } catch let failure as GoDiagnostic {
+            index = start
+            let position = current.position
+            guard let type = try? parseTypeExpression(), !check(.leftBrace) else { throw failure }
+            return .typeExpression(type, position: position)
+        }
     }
 
     mutating func parseFunctionLiteral() throws -> GoExpression {

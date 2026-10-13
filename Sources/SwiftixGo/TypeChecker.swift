@@ -47,7 +47,10 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
         case .bool: return "bool"
         case .void: return "void"
         case .named(let name): return name
-        case .structure: return "struct"
+        case .structure(let fields):
+            // As Go writes a struct type in a message: `struct{a int; b string}`.
+            return "struct{"
+                + fields.map { "\($0.name) \($0.type)" }.joined(separator: "; ") + "}"
         case .pointer(let pointee): return "*\(pointee)"
         case .nilType: return "nil"
         case .array(let length, let element):
@@ -539,7 +542,8 @@ public enum GoTypeChecker {
             return .structure(resolvedFields)
         case .pointer(let pointee, _):
             return .pointer(try resolve(pointee, availableTypes: availableTypes))
-        case .array(let length, let element, _):
+        case .array(let length, let element, let position):
+            try GoCompositeLiterals.requireLength(length, at: position)
             return .array(
                 length: length,
                 element: try resolve(element, availableTypes: availableTypes))
@@ -1133,9 +1137,8 @@ private struct FunctionChecker {
             arguments.forEach { read($0) }
         case .compositeLiteral(_, let elements, _):
             for element in elements {
-                // The key of a map may be a variable; a field's name that
-                // is also a variable's only spares that variable a report.
-                if let key = element.key { use(key) }
+                // The key of a map may be a variable. The name of a field
+                // is none, whatever variable has the same name.
                 if let key = element.keyExpression { read(key) }
                 read(element.value)
             }
@@ -1318,7 +1321,7 @@ private struct FunctionChecker {
                     position: position,
                     message: "expression in \(keyword) must be function call")
             }
-            try checkCallStatement(expression)
+            try checkCall(expression, droppedBy: keyword)
         case .sendStatement: try checkSendStatement(statement)
         case .ifStatement: try checkIfStatement(statement)
         case .forStatement: try checkForStatement(statement)
@@ -1635,7 +1638,7 @@ private struct FunctionChecker {
                 position: expression.position,
                 message: "expression evaluated but not used")
         }
-        try checkCallStatement(expression)
+        try checkCall(expression, droppedBy: nil)
     }
 
     private mutating func checkReturnValuesStatement(_ statement: GoStatement) throws {
@@ -1758,7 +1761,7 @@ private struct FunctionChecker {
         defer { scopes.removeLast() }
         let collectionType = try type(of: collection)
         let elementType: GoType
-        switch underlying(collectionType) {
+        switch rangedType(collectionType) {
         case .array(_, let element): elementType = element
         case .slice(let element): elementType = element
         case .string: elementType = .int
@@ -2037,70 +2040,23 @@ private struct FunctionChecker {
         guard case .compositeLiteral(let typeExpression, let elements, let position) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
+        try requireLiteralType(typeExpression, at: position)
         let literalType = try declaredType(typeExpression)
         switch underlying(literalType) {
         case .structure(let fields):
-            let keyed = elements.contains { $0.key != nil }
-            if keyed, elements.contains(where: { $0.key == nil }) {
-                throw GoDiagnostic(position: position, message: "mixture of field:value and value elements")
-            }
-            if keyed {
-                var seen: Set<String> = []
-                for element in elements {
-                    guard let key = element.key,
-                        let field = fields.first(where: { $0.name == key })
-                    else {
-                        throw GoDiagnostic(
-                            position: element.position,
-                            message: "unknown field \(element.key ?? "") in struct literal of type \(literalType)")
-                    }
-                    try requireVisibleKey(element, in: literalType)
-                    guard seen.insert(key).inserted else {
-                        throw GoDiagnostic(
-                            position: element.position,
-                            message: "duplicate field name \(key) in struct literal")
-                    }
-                    try require(element.value, assignableTo: field.type)
-                }
-            } else if !elements.isEmpty {
-                // `T{}` is the zero value; a literal without field names
-                // gives every field.
-                try requireVisibleFields(fields, of: literalType, for: elements)
-                guard elements.count == fields.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message:
-                            "too \(elements.count < fields.count ? "few" : "many") values in struct literal of type \(literalType)"
-                    )
-                }
-                for (element, field) in zip(elements, fields) {
-                    try require(element.value, assignableTo: field.type)
-                }
-            }
+            try checkStructLiteral(elements, fields: fields, type: literalType, position: position)
         case .array(let length, let elementType):
-            guard !elements.contains(where: { $0.key != nil }) else {
-                throw GoDiagnostic(position: position, message: "keyed array literals are not supported yet")
-            }
-            guard elements.count <= length else {
-                throw GoDiagnostic(position: position, message: "index out of bounds in array literal")
-            }
-            for element in elements { try require(element.value, assignableTo: elementType) }
+            try checkListLiteral(elements, element: elementType, length: length)
         case .slice(let elementType):
-            guard !elements.contains(where: { $0.key != nil }) else {
-                throw GoDiagnostic(position: position, message: "keyed slice literals are not supported yet")
-            }
-            for element in elements { try require(element.value, assignableTo: elementType) }
+            try checkListLiteral(elements, element: elementType, length: nil)
         case .map(let keyType, let valueType):
-            for element in elements {
-                if let keyExpression = element.keyExpression {
-                    try require(keyExpression, assignableTo: keyType)
-                } else if element.key == nil {
-                    throw GoDiagnostic(position: element.position, message: "missing key in map literal")
-                }
-                try require(element.value, assignableTo: valueType)
-            }
+            try checkMapLiteral(elements, key: keyType, value: valueType)
         default:
-            throw GoDiagnostic(position: position, message: "invalid composite literal type \(literalType)")
+            // A literal that left its type out stands where its type does not.
+            let isElement = typeExpression.position.offset != position.offset
+            throw GoDiagnostic(
+                position: position,
+                message: "invalid composite literal \(isElement ? "element " : "")type \(literalType)")
         }
         return literalType
     }
@@ -2109,7 +2065,7 @@ private struct FunctionChecker {
         guard case .index(let base, let index, let position) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
-        let baseType = underlying(try type(of: base))
+        let baseType = try indexedType(of: base)
         switch baseType {
         case .array(_, let element), .slice(let element):
             guard isInteger(try type(of: index)) else {
@@ -2141,7 +2097,7 @@ private struct FunctionChecker {
         for bound in [low, high].compactMap({ $0 }) where !isInteger(try type(of: bound)) {
             throw GoDiagnostic(position: bound.position, message: "slice index must be integer")
         }
-        switch underlying(try type(of: base)) {
+        switch try indexedType(of: base) {
         case .array(_, let element), .slice(let element): return .slice(element)
         case .string: return .string
         default:
@@ -2312,6 +2268,9 @@ private struct FunctionChecker {
             guard let result = native.results.first else { return .void }
             return result
         }
+        if let builtin = try predeclaredCallType(callee: callee, arguments: arguments) {
+            return builtin
+        }
         if case .identifier(let name, let namePosition) = callee {
             return try namedCallType(
                 name: name, namePosition: namePosition, arguments: arguments, position: position)
@@ -2345,7 +2304,7 @@ private struct FunctionChecker {
             guard arguments.count == 1 else {
                 throw GoDiagnostic(position: position, message: "invalid argument count for \(name)")
             }
-            let argumentType = underlying(try type(of: arguments[0]))
+            let argumentType = try indexedType(of: arguments[0])
             if name == "len" {
                 guard argumentType == .string || isArrayOrSlice(argumentType)
                     || isMap(argumentType) || isChannel(argumentType)
@@ -3035,6 +2994,8 @@ private struct FunctionChecker {
                     throw GoDiagnostic(position: index.position, message: "index must be integer")
                 }
                 return element
+            case .pointer where throughArrayPointer(baseType) != baseType:
+                return try elementType(behind: baseType, index: index)
             case .map(let keyType, let valueType):
                 let indexType = try type(of: index)
                 guard try isAssignable(index, ofType: indexType, to: keyType) else {
@@ -3553,7 +3514,8 @@ private struct FunctionChecker {
                 })
         case .pointer(let pointee, _):
             return .pointer(try declaredType(pointee))
-        case .array(let length, let element, _):
+        case .array(let length, let element, let position):
+            try GoCompositeLiterals.requireLength(length, at: position)
             return .array(length: length, element: try declaredType(element))
         case .slice(let element, _):
             return .slice(try declaredType(element))
@@ -3629,6 +3591,7 @@ private struct FunctionChecker {
             }
             return folded.overflow ? nil : folded.partialValue
         case .call:
+            if let extreme = orderedConstantValue(expression) { return extreme }
             guard let operation = expression.bitwiseOperation,
                 let first = untypedConstantValue(operation.operands[0])
             else { return nil }
@@ -3674,6 +3637,9 @@ private struct FunctionChecker {
         rightType: GoType
     ) throws -> GoType? {
         if leftType == rightType { return leftType }
+        // Not integers alone: a value of a type without a name goes with one
+        // of a named type of the same structure, as it is assigned to one.
+        if differOnlyInName(leftType, rightType) { return leftType }
         if isInteger(rightType), let value = untypedConstantValue(left) {
             try requireConstant(value, representableAs: rightType, at: left.position)
             return rightType
@@ -3731,7 +3697,7 @@ private struct FunctionChecker {
         case .identifier(let name, let position):
             guard lookup(name) == nil, functionSignatures[name] == nil else { return nil }
             switch name {
-            case "int", "string", "bool", "byte", "uint8":
+            case "int", "string", "bool", "byte", "uint8", "any", "error":
                 break
             default:
                 guard availableTypes.contains(name)
@@ -3785,15 +3751,19 @@ private struct FunctionChecker {
         case .slice(let element) where isByte(element) && sourceShape == .string:
             return target
         case .bool, .slice, .map, .pointer, .channel, .function:
-            // Named types convert to and from their identical underlying type.
-            // Struct and array values carry their type name at run time, so
-            // those conversions are not supported.
+            // Named types convert to and from their identical underlying type,
+            // and a channel to one of its directions, as it is assigned.
             if source == .nilType {
                 // `Handler(nil)`: nil is a value of every type that has one.
                 guard underlying(target) != .bool else { throw failure }
                 return target
             }
-            guard sourceShape == underlying(target) else { throw failure }
+            guard sourceShape == underlying(target) || isAssignable(source, to: target) else {
+                throw failure
+            }
+            return target
+        case .interface, .structure, .array:
+            guard isConvertible(source, to: target) else { throw failure }
             return target
         default:
             throw failure
@@ -4695,6 +4665,10 @@ extension FunctionChecker {
         case .call(let callee, let arguments, _):
             if case .identifier(let name, _) = callee {
                 if name.hasPrefix("$") { return arguments.contains { isNotConstant($0) } }
+                // `min` and `max` of constants are constants.
+                if name == "min" || name == "max", isPredeclared(name) {
+                    return arguments.contains { isNotConstant($0) }
+                }
                 if name == "len" || name == "cap", lookup(name) == nil,
                     functionSignatures[name] == nil
                 {
@@ -4877,5 +4851,412 @@ extension FunctionChecker {
                 message:
                     "implicit assignment to unexported field \(field.name) in struct literal of type \(type)")
         }
+    }
+}
+// MARK: - Composite literals
+
+extension FunctionChecker {
+    /// A literal without a type is an element or a key of a literal of an
+    /// array, a slice, or a map, which gave it one before the checker saw
+    /// it. Anywhere else it has none.
+    func requireLiteralType(_ type: GoTypeExpression, at position: GoSourcePosition) throws {
+        guard type.isElided else { return }
+        throw GoDiagnostic(position: position, message: "missing type in composite literal")
+    }
+
+    /// Requires `expression` to be a value of `expected`, as an element, a
+    /// field, or a key of a literal: `context` names the literal, as Go does.
+    mutating func requireElement(
+        _ expression: GoExpression, assignableTo expected: GoType, in context: String
+    ) throws {
+        try requireSingleResult(of: expression)
+        let actual = try type(of: expression)
+        guard actual != .void else {
+            throw GoDiagnostic(position: expression.position, message: "no value used as value")
+        }
+        guard try isAssignable(expression, ofType: actual, to: expected) else {
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "cannot use \(actual) as \(expected) value in \(context)")
+        }
+    }
+
+    /// The elements of a struct literal: every one names its field, or none
+    /// does and there is a value for each field in order. `T{}` is the zero
+    /// value.
+    mutating func checkStructLiteral(
+        _ elements: [GoCompositeElement], fields: [GoStructFieldType], type literalType: GoType,
+        position: GoSourcePosition
+    ) throws {
+        func hasKey(_ element: GoCompositeElement) -> Bool {
+            element.key != nil || element.keyExpression != nil
+        }
+        guard let first = elements.first else { return }
+        let mixture = "mixture of field:value and value elements in struct literal"
+        guard hasKey(first) else {
+            try requireVisibleFields(fields, of: literalType, for: elements)
+            for (index, element) in elements.enumerated() {
+                guard !hasKey(element) else {
+                    throw GoDiagnostic(position: element.position, message: mixture)
+                }
+                guard index < fields.count else {
+                    throw GoDiagnostic(
+                        position: element.position,
+                        message: "too many values in struct literal of type \(literalType)")
+                }
+                try requireElement(
+                    element.value, assignableTo: fields[index].type, in: "struct literal")
+            }
+            guard elements.count == fields.count else {
+                // Go reports the values a literal lacks where it ends.
+                throw GoDiagnostic(
+                    position: namePositions[GoCompositeLiterals.endKey(of: position)]?.first
+                        ?? position,
+                    message: "too few values in struct literal of type \(literalType)")
+            }
+            return
+        }
+        var seen: Set<String> = []
+        for element in elements {
+            guard hasKey(element) else {
+                throw GoDiagnostic(position: element.position, message: mixture)
+            }
+            guard let key = element.key else {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "invalid field name "
+                        + "\(element.keyExpression?.sourceSpelling ?? "") in struct literal")
+            }
+            guard let field = fields.first(where: { $0.name == key }) else {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "unknown field \(key) in struct literal of type \(literalType)")
+            }
+            try requireVisibleKey(element, in: literalType)
+            guard seen.insert(key).inserted else {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "duplicate field name \(key) in struct literal")
+            }
+            try requireElement(element.value, assignableTo: field.type, in: "struct literal")
+        }
+    }
+
+    /// The elements of an array or slice literal. Each stands at the index
+    /// after that of the one before it, or at the constant index it is
+    /// written with, which `GoCompositeLiterals` has replaced by its value;
+    /// no index is given twice, and none is beyond an array's length.
+    mutating func checkListLiteral(
+        _ elements: [GoCompositeElement], element elementType: GoType, length: Int?
+    ) throws {
+        let hasIndexes = elements.contains { $0.keyExpression != nil }
+        var seen: Set<Int> = []
+        var next = 0
+        for element in elements {
+            var index = next
+            if let written = element.keyExpression {
+                index = try literalIndex(written)
+                if let length, index >= length {
+                    throw GoDiagnostic(
+                        position: written.position,
+                        message: "invalid argument: index \(index) out of bounds [0:\(length)]")
+                }
+            } else if let length, index >= length {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "index \(index) is out of bounds (>= \(length))")
+            }
+            guard index < GoCompositeLiterals.maximumLength else {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "index \(index) is beyond the \(GoCompositeLiterals.maximumLength) "
+                        + "elements a composite literal may have")
+            }
+            if hasIndexes, !seen.insert(index).inserted {
+                throw GoDiagnostic(
+                    position: element.position,
+                    message: "duplicate index \(index) in array or slice literal")
+            }
+            try requireElement(
+                element.value, assignableTo: elementType, in: "array or slice literal")
+            next = index + 1
+        }
+    }
+
+    /// Whether one of two types has a name and the other is that type
+    /// written out: `struct{ a int }` and a `type T struct{ a int }`. Each is
+    /// assignable to the other, and their values compare.
+    func differOnlyInName(_ first: GoType, _ second: GoType) -> Bool {
+        first != second && isUnnamedComposite(first) != isUnnamedComposite(second)
+            && underlying(first) == underlying(second)
+            && (isNamedComposite(first) || isNamedComposite(second))
+            && !isInterface(first)
+    }
+
+    /// Whether a value of `source` converts to `target`, an interface, a
+    /// struct, or an array type: `any(x)` and `error(nil)` take what could
+    /// be assigned to them, and two types of one structure convert to each
+    /// other whatever either is called.
+    func isConvertible(_ source: GoType, to target: GoType) -> Bool {
+        if isInterface(target) { return isAssignable(source, to: target) }
+        return underlying(source) == underlying(target)
+    }
+
+    /// The array a pointer to an array points to, and any other type as it
+    /// is: `p[i]`, `p[a:b]`, `len(p)`, `cap(p)`, and `range p` follow such a
+    /// pointer without a `*`.
+    func throughArrayPointer(_ type: GoType) -> GoType {
+        guard case .pointer(let pointee) = underlying(type), case .array = underlying(pointee)
+        else { return type }
+        return pointee
+    }
+
+    /// The type of the target `p[i]` for a pointer `p` to an array: the
+    /// element of the array it points to, a variable whatever `p` is.
+    mutating func elementType(behind pointer: GoType, index: GoExpression) throws -> GoType {
+        guard case .array(_, let element) = underlying(throughArrayPointer(pointer)),
+            isInteger(try type(of: index))
+        else {
+            throw GoDiagnostic(position: index.position, message: "index must be integer")
+        }
+        return element
+    }
+
+    /// The type an index, a slice expression, `len`, `cap`, or `range`
+    /// works on in `operand`: its underlying type, past a pointer to an
+    /// array.
+    mutating func indexedType(of operand: GoExpression) throws -> GoType {
+        underlying(throughArrayPointer(try type(of: operand)))
+    }
+
+    /// What a `range` over a value of `type` goes through: its underlying
+    /// type, past a pointer to an array.
+    func rangedType(_ type: GoType) -> GoType {
+        underlying(throughArrayPointer(type))
+    }
+
+    /// The index an element is written with: a constant that is an integer
+    /// and not negative.
+    mutating func literalIndex(_ written: GoExpression) throws -> Int {
+        guard case .integer(let value, let position) = written else {
+            let writtenType = try type(of: written)
+            guard isInteger(writtenType) else {
+                throw GoDiagnostic(
+                    position: written.position,
+                    message: "cannot convert \(writtenType) to type int")
+            }
+            throw GoDiagnostic(
+                position: written.position,
+                message: "index \(written.sourceSpelling) must be integer constant")
+        }
+        guard value >= 0, let index = Int(exactly: value) else {
+            throw GoDiagnostic(
+                position: position,
+                message: "invalid argument: index \(value) (constant of type int) must not be negative")
+        }
+        return index
+    }
+
+    /// The entries of a map literal: each a key and a value, and no
+    /// constant key twice.
+    mutating func checkMapLiteral(
+        _ elements: [GoCompositeElement], key keyType: GoType, value valueType: GoType
+    ) throws {
+        var constants: Set<SwitchCaseConstant> = []
+        for element in elements {
+            if let key = element.keyExpression {
+                try requireElement(key, assignableTo: keyType, in: "map literal")
+                let constant = switchCaseConstant(key) ?? untypedConstantValue(key).map { .int($0) }
+                if let constant, !constants.insert(constant).inserted {
+                    throw GoDiagnostic(
+                        position: key.position,
+                        message: "duplicate key \(key.sourceSpelling) in map literal")
+                }
+            } else if element.key == nil {
+                throw GoDiagnostic(position: element.position, message: "missing key in map literal")
+            }
+            try requireElement(element.value, assignableTo: valueType, in: "map literal")
+        }
+    }
+}
+
+// MARK: - `new`, `min`, `max`, and `clear`
+
+extension FunctionChecker {
+    /// Whether `name` means what Go predeclares: the program declares no
+    /// variable, function, or type of that name where it is read.
+    func isPredeclared(_ name: String) -> Bool {
+        lookup(name) == nil && functionSignatures[name] == nil && !availableTypes.contains(name)
+    }
+
+    /// The types `<`, `min`, and `max` put in order.
+    func isOrdered(_ type: GoType) -> Bool {
+        isInteger(type) || isString(type)
+    }
+
+    /// An operand as Go describes it in a message: a variable by its name
+    /// and type, anything else by its type.
+    func operandDescription(_ expression: GoExpression, ofType type: GoType) -> String {
+        if case .identifier(let name, _) = expression, let binding = lookup(name),
+            !binding.isConstant
+        {
+            return "\(name) (variable of type \(type))"
+        }
+        return "\(expression.sourceSpelling) (value of type \(type))"
+    }
+
+    /// The type of a call of `new`, `min`, `max`, or `clear`, or nil when
+    /// `callee` is none of them or the program has given the name another
+    /// meaning.
+    mutating func predeclaredCallType(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> GoType? {
+        guard case .identifier(let name, let position) = callee, isPredeclared(name) else {
+            return nil
+        }
+        switch name {
+        case "new":
+            try requireArgumentCount(1, of: name, arguments: arguments, position: position)
+            guard case .typeExpression(let type, _) = arguments[0] else {
+                // What names nothing is reported as that.
+                _ = try self.type(of: arguments[0])
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "\(arguments[0].sourceSpelling) is not a type")
+            }
+            return .pointer(try declaredType(type))
+        case "make":
+            // The rest is checked with the builtins that were here before;
+            // what is no type is reported for what it is.
+            if let first = arguments.first, case .typeExpression = first { return nil }
+            if let first = arguments.first {
+                _ = try type(of: first)
+                throw GoDiagnostic(
+                    position: first.position, message: "\(first.sourceSpelling) is not a type")
+            }
+            return nil
+        case "min", "max":
+            return try orderedCallType(name, arguments: arguments, position: position)
+        case "clear":
+            try requireArgumentCount(1, of: name, arguments: arguments, position: position)
+            let cleared = try type(of: arguments[0])
+            guard isMap(cleared) || isSlice(cleared) else {
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "invalid argument: cannot clear "
+                        + operandDescription(arguments[0], ofType: cleared)
+                        + ": argument must be (or constrained by) map or slice")
+            }
+            return .void
+        default:
+            return nil
+        }
+    }
+
+    /// Go's report of a builtin called with too few or too many operands.
+    func requireArgumentCount(
+        _ count: Int, of name: String, arguments: [GoExpression], position: GoSourcePosition,
+        orMore: Bool = false
+    ) throws {
+        if arguments.count == count || (orMore && arguments.count > count) { return }
+        let call = name + "(" + arguments.map(\.sourceSpelling).joined(separator: ", ") + ")"
+        throw GoDiagnostic(
+            position: position,
+            message: "invalid operation: "
+                + (arguments.count < count ? "not enough" : "too many")
+                + " arguments for \(call) (expected \(count), found \(arguments.count))")
+    }
+
+    /// Whether `expression` is a constant that takes the type of what it is
+    /// used with: an untyped integer constant, or a string literal.
+    func isUntypedConstant(_ expression: GoExpression) -> Bool {
+        if case .string = expression { return true }
+        return untypedConstantValue(expression) != nil
+    }
+
+    /// The type of `min(x, y...)` or `max(x, y...)`: the one type of the
+    /// operands that have one, which the constants among them take, or the
+    /// type of a constant when all are constants.
+    mutating func orderedCallType(
+        _ name: String, arguments: [GoExpression], position: GoSourcePosition
+    ) throws -> GoType {
+        try requireArgumentCount(1, of: name, arguments: arguments, position: position, orMore: true)
+        guard !arguments.contains(where: { $0.spreadOperand != nil }) else {
+            throw GoDiagnostic(
+                position: position,
+                message: "invalid operation: invalid use of ... with built-in \(name)")
+        }
+        // The type so far and how Go names it, and whether a constant gave it.
+        var shared: (type: GoType, name: String, isConstant: Bool)?
+        for argument in arguments {
+            try requireSingleValue(argument, at: argument.position)
+            let argumentType = try type(of: argument)
+            guard argumentType != .void else {
+                throw GoDiagnostic(position: argument.position, message: "no value used as value")
+            }
+            guard isOrdered(argumentType) else {
+                throw GoDiagnostic(
+                    position: argument.position,
+                    message: "invalid argument: "
+                        + operandDescription(argument, ofType: argumentType)
+                        + " cannot be ordered")
+            }
+            let isConstant = isUntypedConstant(argument)
+            let typeName = isConstant ? "untyped \(argumentType)" : "\(argumentType)"
+            guard let previous = shared else {
+                shared = (argumentType, typeName, isConstant)
+                continue
+            }
+            // A constant goes with any type of its kind; two types are one.
+            let agrees =
+                isConstant || previous.isConstant
+                ? isInteger(argumentType) == isInteger(previous.type)
+                : argumentType == previous.type
+            guard agrees else {
+                throw GoDiagnostic(
+                    position: argument.position,
+                    message: "invalid argument: mismatched types \(previous.name) "
+                        + "(previous argument) and \(typeName) "
+                        + "(type of \(argument.sourceSpelling))")
+            }
+            if previous.isConstant, !isConstant { shared = (argumentType, typeName, false) }
+        }
+        let result = shared?.type ?? .int
+        for argument in arguments {
+            if let value = untypedConstantValue(argument) {
+                try requireConstant(value, representableAs: result, at: argument.position)
+            }
+        }
+        return result
+    }
+
+    /// The value of `min` or `max` of constants, which is a constant.
+    func orderedConstantValue(_ expression: GoExpression) -> Int64? {
+        guard case .call(.identifier(let name, _), let arguments, _) = expression,
+            name == "min" || name == "max", isPredeclared(name), !arguments.isEmpty
+        else { return nil }
+        var values: [Int64] = []
+        for argument in arguments {
+            guard let value = untypedConstantValue(argument) else { return nil }
+            values.append(value)
+        }
+        return name == "min" ? values.min() : values.max()
+    }
+
+    /// Checks a call that is a statement of its own, or what `go` or
+    /// `defer` starts. Go refuses one that calls a builtin for its value,
+    /// which nothing takes: `len(s)` alone, or `defer new(int)`.
+    mutating func checkCall(_ expression: GoExpression, droppedBy keyword: String?) throws {
+        if case .call(.identifier(let name, let position), _, _) = expression,
+            ["len", "cap", "append", "make", "new", "min", "max"].contains(name),
+            isPredeclared(name)
+        {
+            _ = try type(of: expression)
+            throw GoDiagnostic(
+                position: position,
+                message: keyword.map { "\($0) discards result of \(expression.sourceSpelling)" }
+                    ?? "\(expression.sourceSpelling) is not used")
+        }
+        try checkCallStatement(expression)
     }
 }

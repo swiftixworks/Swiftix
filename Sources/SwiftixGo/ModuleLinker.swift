@@ -646,7 +646,11 @@ private struct FileRewriter {
                 elements: try elements.map { element in
                     GoCompositeElement(
                         key: element.key,
-                        keyExpression: try element.keyExpression.map { try rewrite($0) },
+                        keyExpression: try element.keyExpression.map {
+                            // A key that may be the name of a field is no
+                            // use of a package that has that name.
+                            element.hasOpenKey ? (try? rewrite($0)) ?? $0 : try rewrite($0)
+                        },
                         value: try rewrite(element.value),
                         position: element.position)
                 },

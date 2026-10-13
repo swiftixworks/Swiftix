@@ -144,7 +144,7 @@ struct GoConversionTests: GoTestHarness {
         #expect(
             goMainDiagnostic(
                 "fmt.Println(B(A{1}))",
-                declarations: "type A struct { X int }\ntype B struct { X int }")
+                declarations: "type A struct { X int }\ntype B struct { Y int }")
                 == "cannot convert A to type B")
         #expect(goMainDiagnostic("a, b := int(1)\nfmt.Println(a, b)") != nil)
     }

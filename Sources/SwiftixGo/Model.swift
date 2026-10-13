@@ -146,6 +146,10 @@ public struct GoFile: Sendable, Equatable {
     /// Where the file selects from a package under a name of its own, so
     /// that a diagnostic can say `f.Printl` as the source does.
     var importRenames: [GoImportRename] = []
+    /// Whether the file has a composite literal that its type has yet to
+    /// settle (an element without a type, a key, or the length of `[...]T`)
+    /// or a name where `new` or `make` takes a type. See `GoCompositeLiterals`.
+    var hasOpenLiterals = false
 
     /// Where `namePositions` keeps what the symbols of the file's package
     /// begin with: at an offset no token has.
@@ -206,6 +210,7 @@ public struct GoFile: Sendable, Equatable {
         file.aliasTargets = aliasTargets
         file.hasResolvedImports = hasResolvedImports
         file.importRenames = importRenames
+        file.hasOpenLiterals = hasOpenLiterals
         return file
     }
 

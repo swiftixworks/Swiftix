@@ -3714,6 +3714,25 @@ public struct GoVirtualMachine: Sendable {
                 // each time, which lives as long as a pointer reaches it.
                 let cell = try heap.allocate(try pop(&stack))
                 stack.append(.pointer(GoPointer(cell: cell)))
+            case "$clear":
+                // `clear`: a map keeps its identity and loses its entries,
+                // and every element of a slice becomes the zero value that
+                // is the second operand. A nil map or slice has nothing.
+                let zero = try pop(&stack)
+                switch try pop(&stack) {
+                case .nilValue:
+                    break
+                case .map(let mapValue):
+                    guard mapValue.storage.path.isEmpty, heap.contains(mapValue.storage.cell),
+                        case .mapStorage = heap[mapValue.storage.cell]
+                    else { throw GoRuntimeError.typeMismatch }
+                    try heap.replace(mapValue.storage.cell, with: .mapStorage(GoMapStorage()))
+                case .slice(let slice):
+                    let range = try validatedSliceRange(slice)
+                    try storeElements(Array(repeating: zero, count: range.count), into: slice)
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
             case "$strings.ToUpper", "$strings.ToLower":
                 guard case .string(let text) = try pop(&stack) else {
                     throw GoRuntimeError.typeMismatch

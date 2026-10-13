@@ -357,7 +357,7 @@ extension GoStandardLibrary {
             + GoPredeclared.conversionCallNames
             + [
                 GoPredeclared.copyElements, GoPredeclared.appendElements,
-                GoPredeclared.newVariable,
+                GoPredeclared.newVariable, GoPredeclared.clearElements,
                 "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
                 "$errors.Unwrap", "$errors.Is", GoPredeclared.errorsAs,
                 "$fmt.Fprint", "$fmt.Fprintln", "$fmt.Fprint.n", "$fmt.Fprintln.n",
@@ -459,6 +459,10 @@ enum GoPredeclared {
     /// Native call `append(slice, source...)` lowers to, with the element
     /// zero value as its third operand.
     static let appendElements = "$append"
+
+    /// Native call the builtin `clear` lowers to: a map, which loses its
+    /// entries, or a slice and the zero value every element of it gets.
+    static let clearElements = "$clear"
 
     /// Method the compiler synthesizes so `err.Error()` works on the runtime's
     /// native error values, whose dynamic type name is `error`.
