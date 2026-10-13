@@ -346,3 +346,53 @@ extension GoExpression {
         return false
     }
 }
+
+/// `iota`, the index of a constant's specification in its `const`
+/// declaration. The parser replaces it by that integer, which leaves the
+/// node its source position: a constant expression needs no environment,
+/// and a specification that repeats the one before it gets its own value.
+enum GoIota {
+    static let name = "iota"
+}
+
+extension GoExpression {
+    func replacingIota(with index: Int) -> GoExpression {
+        func replaced(_ expression: GoExpression) -> GoExpression {
+            expression.replacingIota(with: index)
+        }
+        switch self {
+        case .identifier(GoIota.name, let position):
+            return .integer(Int64(index), position: position)
+        case .integer, .string, .identifier, .typeExpression, .functionLiteral:
+            return self
+        case .selector(let base, let name, let position):
+            return .selector(base: replaced(base), name: name, position: position)
+        case .compositeLiteral(let type, let elements, let position):
+            return .compositeLiteral(
+                type: type,
+                elements: elements.map {
+                    GoCompositeElement(
+                        key: $0.key, keyExpression: $0.keyExpression.map(replaced),
+                        value: replaced($0.value), position: $0.position)
+                },
+                position: position)
+        case .index(let base, let index, let position):
+            return .index(base: replaced(base), index: replaced(index), position: position)
+        case .slicing(let base, let low, let high, let position):
+            return .slicing(
+                base: replaced(base), low: low.map(replaced), high: high.map(replaced),
+                position: position)
+        case .call(let callee, let arguments, let position):
+            return .call(
+                callee: replaced(callee), arguments: arguments.map(replaced), position: position)
+        case .typeAssertion(let base, let type, let position):
+            return .typeAssertion(base: replaced(base), type: type, position: position)
+        case .unary(let unaryOperator, let operand, let position):
+            return .unary(operator: unaryOperator, operand: replaced(operand), position: position)
+        case .binary(let left, let binaryOperator, let right, let position):
+            return .binary(
+                left: replaced(left), operator: binaryOperator, right: replaced(right),
+                position: position)
+        }
+    }
+}

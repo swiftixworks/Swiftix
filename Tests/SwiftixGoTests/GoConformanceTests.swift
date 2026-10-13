@@ -105,6 +105,10 @@ struct GoConformanceTests {
     @Test func eachIterationHasItsOwnVariables() throws {
         try expectSameOutput(eachIterationHasItsOwnVariablesSource, eachIterationHasItsOwnVariablesExpected)
     }
+
+    @Test func groupedDeclarationsAndIota() throws {
+        try expectSameOutput(groupedDeclarationsAndIotaSource, groupedDeclarationsAndIotaExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -2604,5 +2608,99 @@ nested: 0 1 10 11
 1 2
 10
 channel: 1 2
+
+"""#
+
+private let groupedDeclarationsAndIotaSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type (
+	color int
+	point struct {
+		X int
+		Y int
+	}
+	shape interface {
+		area() int
+	}
+)
+
+const (
+	red color = iota
+	green
+	blue
+)
+
+const (
+	_  = iota
+	kb = 1 << (10 * iota)
+	mb
+	gb
+)
+
+const (
+	a, b = iota, iota * 10
+	c, d
+	e, f
+)
+
+const (
+	first  = "one"
+	second = len(first)
+	third
+)
+
+const single = iota
+
+var (
+	origin    point
+	names     = []string{"red", "green", "blue"}
+	width, _  = 80, 24
+	total     int
+	errClosed     = errors.New("closed")
+	limit     int = kb / 2
+)
+
+func (c color) String() string {
+	return names[c]
+}
+
+func (p point) area() int {
+	return p.X * p.Y
+}
+
+func main() {
+	const (
+		small = iota + 1
+		medium
+		large
+	)
+	var (
+		s     shape = point{X: 2, Y: 3}
+		label       = strings.ToUpper("ok")
+		n, m  int
+		x, y  = 1, "y"
+	)
+	const local = iota
+	fmt.Println(red, green, blue, kb, mb, gb)
+	fmt.Println(a, b, c, d, e, f, first, second, third, single)
+	fmt.Println(origin, names, width, total, errClosed, limit)
+	fmt.Println(small, medium, large, s.area(), label, n, m, x, y, local)
+	fmt.Printf("%T %T %v %d\n", blue, kb, blue, blue)
+}
+"""#
+
+private let groupedDeclarationsAndIotaExpected = #"""
+red green blue 1024 1048576 1073741824
+0 0 1 10 2 20 one 3 3 0
+{0 0} [red green blue] 80 0 closed 512
+1 2 3 6 OK 0 0 1 y 0
+main.color int blue 2
 
 """#

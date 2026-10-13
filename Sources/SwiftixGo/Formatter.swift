@@ -21,8 +21,105 @@ public enum GoFormatter {
                     ? token.withLeadingNewlines(carriedNewlines) : token)
             carriedNewlines = 0
         }
-        var printer = FormatPrinter(tokens: tokens, spacing: spacing)
+        var printer = FormatPrinter(tokens: sortingImports(tokens), spacing: spacing)
         return printer.render()
+    }
+
+    /// Sorts the imports of each `import ( ... )` group as Go's `gofmt`
+    /// does: a run of imports on successive lines is put in the order of
+    /// their paths, each with the comment at the end of its line, and an
+    /// import that is there twice is kept once. An empty line or a comment
+    /// on a line of its own ends a run.
+    private static func sortingImports(_ tokens: [FormatToken]) -> [FormatToken] {
+        var result = tokens
+        var index = 0
+        while index + 1 < result.count {
+            defer { index += 1 }
+            guard result[index].kind == .word, result[index].text == "import",
+                result[index + 1].kind == .symbol, result[index + 1].text == "(",
+                let close = result[(index + 2)...].firstIndex(where: {
+                    $0.kind == .symbol && $0.text == ")"
+                })
+            else { continue }
+            // Each import with what belongs to it: an alias before the path
+            // and a comment after it on the same line.
+            var runs: [[Range<Int>]] = []
+            var cursor = index + 2
+            var continuesRun = false
+            while cursor < close {
+                let token = result[cursor]
+                if token.kind == .symbol, token.text == ";" {
+                    // Two imports on one line are on successive lines too.
+                    cursor += 1
+                    continue
+                }
+                if token.kind == .lineComment || token.kind == .blockComment {
+                    continuesRun = false
+                    cursor += 1
+                    continue
+                }
+                var end = cursor
+                while end < close, result[end].kind != .literal { end += 1 }
+                guard end < close else { break }
+                end += 1
+                while end < close, result[end].leadingNewlines == 0,
+                    result[end].kind == .lineComment || result[end].kind == .blockComment
+                {
+                    end += 1
+                }
+                if continuesRun, token.leadingNewlines <= 1, !runs.isEmpty {
+                    runs[runs.count - 1].append(cursor..<end)
+                } else {
+                    runs.append([cursor..<end])
+                }
+                continuesRun = true
+                cursor = end
+            }
+            // Later runs first, so that the indexes of earlier ones hold.
+            for run in runs.reversed() where run.count > 1 {
+                func path(_ range: Range<Int>) -> String {
+                    result[range].first { $0.kind == .literal }?.text ?? ""
+                }
+                func name(_ range: Range<Int>) -> String {
+                    result[range].prefix { $0.kind != .literal }.map(\.text).joined()
+                }
+                func comment(_ range: Range<Int>) -> String {
+                    result[range].filter { $0.kind == .lineComment || $0.kind == .blockComment }
+                        .map(\.text).joined(separator: " ")
+                }
+                func precedes(_ left: String, _ right: String) -> Bool {
+                    left.utf8.lexicographicallyPrecedes(right.utf8)
+                }
+                // By path, then alias, then comment: of two that are the
+                // same, the one without a comment comes first.
+                var sorted = run.enumerated().sorted { left, right in
+                    let (a, b) = (left.element, right.element)
+                    if path(a) != path(b) { return precedes(path(a), path(b)) }
+                    if name(a) != name(b) { return precedes(name(a), name(b)) }
+                    if comment(a) != comment(b) { return precedes(comment(a), comment(b)) }
+                    return left.offset < right.offset
+                }.map(\.element)
+                // And goes, when the one after it is the same import.
+                sorted = sorted.enumerated().filter { position, range in
+                    guard position + 1 < sorted.count else { return true }
+                    let following = sorted[position + 1]
+                    return path(following) != path(range) || name(following) != name(range)
+                        || !comment(range).isEmpty
+                }.map(\.element)
+                guard let first = run.first, let last = run.last else { continue }
+                let leading = result[first.lowerBound].leadingNewlines
+                var replacement: [FormatToken] = []
+                for (position, range) in sorted.enumerated() {
+                    // Without the `;` that may have stood between two.
+                    var specification = Array(result[range])
+                    specification[0] = specification[0].withLeadingNewlines(
+                        position == 0 ? leading : 1)
+                    replacement += specification
+                }
+                result.replaceSubrange(first.lowerBound..<last.upperBound, with: replacement)
+            }
+        }
+        return result
     }
 }
 
@@ -254,13 +351,18 @@ private struct FormatLine: Equatable {
                 }
                 let start = index
                 var widest = 0
+                var isEmpty = true
                 while index < range.upperBound, lines[index].cells.count > column,
                     lines[index].indent == lines[start].indent,
                     index == start || !lines[index].startsSection
                 {
                     widest = max(widest, width(lines[index].cells[column]) + 1)
+                    if !lines[index].cells[column].isEmpty { isEmpty = false }
                     index += 1
                 }
+                // A column no line has anything in takes no room, as with
+                // the tabwriter Go's printer writes through.
+                if isEmpty { widest = 0 }
                 for line in start..<index { widths[line][column] = widest }
                 align(start..<index, column: column + 1)
             }
@@ -272,7 +374,7 @@ private struct FormatLine: Equatable {
             for (column, cell) in line.cells.enumerated() {
                 text += cell
                 text += String(
-                    repeating: " ", count: max(1, widths[index][column] - width(cell)))
+                    repeating: " ", count: max(0, widths[index][column] - width(cell)))
             }
             return text + line.tail
         }
@@ -332,6 +434,35 @@ private struct FormatContinuation {
     }
 }
 
+/// How a specification of a `var` or `const` group is written in columns,
+/// as Go's printer decides for the group as a whole.
+private struct FormatValueSpecification: Equatable {
+    var hasType = false
+    var hasValues = false
+    /// Whether the column of types is kept although this one has none:
+    /// some value in the same run of specifications has a type.
+    var keepsTypeColumn = false
+}
+
+/// An open `import (`, `var (`, `const (`, or `type (` group.
+private struct FormatGroup {
+    let keyword: String
+    let parenthesisDepth: Int
+    let braceDepth: Int
+    /// The shapes of the specifications of a `var` or `const` group that
+    /// has several; empty for any other group.
+    var specifications: [FormatValueSpecification] = []
+    /// Whether the group has several specifications.
+    var hasSeveral = false
+    /// How many specifications have begun.
+    var begun = 0
+    /// Whether it is written `()`, having nothing in it.
+    var isEmpty = false
+    /// Whether its lines are indented: Go's printer indents the
+    /// specifications, so a group that holds only a comment has none.
+    var indents = true
+}
+
 private struct FormatPrinter {
     let tokens: [FormatToken]
     /// Which operators and slice colons Go's printer spaces differently.
@@ -377,6 +508,17 @@ private struct FormatPrinter {
     /// False in a copy of the printer that writes something only to measure
     /// it: such a copy measures nothing itself.
     var measuresElements = true
+    /// The declaration groups that are open, innermost last.
+    var groups: [FormatGroup] = []
+    /// Whether the next line written in the innermost group begins a
+    /// specification of it.
+    var groupAwaitsSpecification = false
+    /// The shape of the `var` or `const` specification the line being
+    /// written begins, when its group aligns columns, and how far the line
+    /// has come: 0 while a name is expected, 1 after a name, 2 in the type,
+    /// 3 in the values.
+    var lineSpecification: FormatValueSpecification?
+    var specificationPhase = 0
     var indent = 0
     var braceDepth = 0
     var parenthesisDepth = 0
@@ -462,9 +604,11 @@ private struct FormatPrinter {
             if kept, token.leadingNewlines > 1, lineIsEmpty, !lines.isEmpty { appendBlankLine() }
             return
         }
-        if !lineIsEmpty, parenthesisDepth == statementBase, !forHeader,
+        if parenthesisDepth == statementBase, !forHeader,
             !compositeDepths.contains(braceDepth), canEndLine(previous)
         {
+            // The statement ends here, also where a comment at the end of
+            // its line has ended the line already.
             finishLine()
             endStatement()
         }
@@ -474,7 +618,14 @@ private struct FormatPrinter {
         let isAtEdgeOfTypeBody =
             typeBodyDepths.contains(braceDepth)
             && (previous?.text == "{" || (token.text == "}" && token.kind == .symbol))
-        if token.leadingNewlines > 1, lineIsEmpty, !lines.isEmpty, !isAtEdgeOfTypeBody {
+        // A group of declarations is laid out the same way.
+        let isAtEdgeOfGroup =
+            isAtGroupLevel
+            && ((groups.last?.begun == 0 && previous?.text == "(")
+                || (token.text == ")" && token.kind == .symbol))
+        if token.leadingNewlines > 1, lineIsEmpty, !lines.isEmpty, !isAtEdgeOfTypeBody,
+            !isAtEdgeOfGroup
+        {
             appendBlankLine()
         }
     }
@@ -653,6 +804,185 @@ private struct FormatPrinter {
     /// The constructs of the statement end with it.
     mutating func endStatement() {
         continuations.removeAll { $0.braceDepth >= braceDepth }
+        if isAtGroupLevel { groupAwaitsSpecification = true }
+    }
+
+    // MARK: Declaration groups
+
+    /// Whether the tokens being handled stand directly in the innermost
+    /// declaration group, not inside a bracket or a block within it.
+    var isAtGroupLevel: Bool {
+        guard let group = groups.last else { return false }
+        return group.parenthesisDepth == parenthesisDepth && group.braceDepth == braceDepth
+            && sliceBrackets.isEmpty && !group.isEmpty
+    }
+
+    /// The shapes of the specifications of the `var` or `const` group that
+    /// opens at `position`, and how many there are. A specification begins
+    /// where a line does after one is complete.
+    func groupSpecifications() -> [FormatValueSpecification] {
+        var specifications: [FormatValueSpecification] = []
+        var depth = 0
+        var index = position + 1
+        var beginsSpecification = true
+        var lastCode: FormatToken?
+        // Where in its specification the scan is: 0 expects a name, 1 has
+        // one, 2 is past the names.
+        var phase = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            index += 1
+            if token.kind == .lineComment || token.kind == .blockComment { continue }
+            if depth == 0, token.kind == .symbol, token.text == ")" { break }
+            if depth == 0, token.kind == .symbol, token.text == ";" {
+                beginsSpecification = true
+                continue
+            }
+            if depth == 0, token.leadingNewlines > 0, canEndLine(lastCode) {
+                beginsSpecification = true
+            }
+            lastCode = token
+            if depth == 0, beginsSpecification {
+                specifications.append(FormatValueSpecification())
+                beginsSpecification = false
+                phase = 0
+            }
+            if token.kind == .symbol {
+                switch token.text {
+                case "(", "[", "{": depth += 1
+                case ")", "]", "}": depth -= 1
+                default: break
+                }
+            }
+            guard depth == 0 || phase < 2, !specifications.isEmpty else { continue }
+            let last = specifications.count - 1
+            if phase == 0, token.kind == .word {
+                phase = 1
+            } else if phase == 1, token.kind == .symbol, token.text == "," {
+                phase = 0
+            } else if phase < 2 {
+                // The first token after the names: `=`, or a type.
+                phase = 2
+                if token.text == "=" {
+                    specifications[last].hasValues = true
+                } else {
+                    specifications[last].hasType = true
+                }
+            } else if depth == 0, token.kind == .symbol, token.text == "=" {
+                specifications[last].hasValues = true
+            }
+        }
+        // Go's printer keeps the column of types for a run of consecutive
+        // specifications with values when one of them has a type.
+        var runStart: Int?
+        var keepsType = false
+        func close(_ end: Int) {
+            if let start = runStart, keepsType {
+                for index in start..<end { specifications[index].keepsTypeColumn = true }
+            }
+        }
+        for index in specifications.indices {
+            if specifications[index].hasValues {
+                if runStart == nil {
+                    runStart = index
+                    keepsType = false
+                }
+            } else if runStart != nil {
+                close(index)
+                runStart = nil
+            }
+            if specifications[index].hasType { keepsType = true }
+        }
+        close(specifications.count)
+        return specifications
+    }
+
+    /// Opens the group whose `(` is the token at `position`.
+    mutating func openGroup(_ keyword: String, next: FormatToken?) {
+        ensureSpace()
+        append("(")
+        var group = FormatGroup(
+            keyword: keyword, parenthesisDepth: parenthesisDepth, braceDepth: braceDepth)
+        if next?.kind == .symbol, next?.text == ")" {
+            group.isEmpty = true
+            groups.append(group)
+            return
+        }
+        let specifications = groupSpecifications()
+        group.hasSeveral = specifications.count > 1
+        if keyword == "var" || keyword == "const", group.hasSeveral {
+            group.specifications = specifications
+        }
+        group.indents = !specifications.isEmpty
+        finishLine(unlessCommentFollows: next)
+        blockBases.append(parenthesisDepth)
+        if group.indents { indent += 1 }
+        groups.append(group)
+        groupAwaitsSpecification = true
+    }
+
+    /// Closes the innermost group at its `)`.
+    mutating func closeGroup() {
+        guard let group = groups.popLast() else { return }
+        if group.isEmpty {
+            append(")")
+            return
+        }
+        if !lineIsEmpty { finishLine() }
+        endStatement()
+        _ = blockBases.popLast()
+        groupAwaitsSpecification = false
+        if group.indents { indent -= 1 }
+        append(")")
+    }
+
+    /// Begins a specification of the innermost group on the line that is
+    /// about to be written.
+    mutating func beginSpecification() {
+        guard groupAwaitsSpecification, isAtGroupLevel, let index = groups.indices.last else {
+            return
+        }
+        groupAwaitsSpecification = false
+        let group = groups[index]
+        groups[index].begun += 1
+        switch group.keyword {
+        case "var", "const":
+            // What follows the names is a type, until the `=`.
+            pendingVariableDeclaration = true
+            if group.begun < group.specifications.count {
+                lineSpecification = group.specifications[group.begun]
+                specificationPhase = 0
+            }
+        case "type":
+            pendingTypeDeclaration = true
+            // The names of the types of a group are a column.
+            lineIsStructField = group.hasSeveral
+        default:
+            break
+        }
+    }
+
+    /// Ends the cells of a `var` or `const` specification where Go's
+    /// printer does: after the names when a type follows or its column is
+    /// kept, and before the `=`.
+    mutating func advanceSpecification(at token: FormatToken) {
+        guard let specification = lineSpecification, isAtGroupLevel else { return }
+        if specificationPhase == 0, token.kind == .word {
+            specificationPhase = 1
+            return
+        }
+        if specificationPhase == 1, token.kind == .symbol, token.text == "," {
+            specificationPhase = 0
+            return
+        }
+        if specificationPhase < 2 {
+            if specification.hasType || specification.keepsTypeColumn { endCell() }
+            specificationPhase = 2
+        }
+        if specificationPhase == 2, token.kind == .symbol, token.text == "=" {
+            endCell()
+            specificationPhase = 3
+        }
     }
 
     /// Ends the binary expressions whose right operand `token` is past: an
@@ -787,25 +1117,40 @@ private struct FormatPrinter {
 
     mutating func handle(_ token: FormatToken, next: FormatToken?) {
         if token.kind == .lineComment {
-            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty
+            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty && groups.isEmpty
             beginTopLevelCommentIfNeeded(isStandaloneTopLevelComment)
             if !lineIsEmpty {
                 // A comment after code is a column of its own, aligned with
                 // the comments of the lines around it.
                 endStructFieldName()
                 endCell()
+                if let specification = lineSpecification, isAtGroupLevel {
+                    // Go's printer has four columns in a `var` or `const`
+                    // group, names, types, values, and comments; the ones a
+                    // specification lacks are empty cells before its comment.
+                    let present =
+                        (specification.hasType || specification.keepsTypeColumn ? 1 : 0)
+                        + (specification.hasValues ? 1 : 0)
+                    for _ in 0..<(2 - present) { endCell() }
+                }
             }
             let standsAlone = lineIsEmpty
+            // A comment on a line of its own begins no specification of a
+            // group, and is no field of a struct.
+            let awaitsSpecification = groupAwaitsSpecification
+            if standsAlone { groupAwaitsSpecification = false }
             append(token.text)
-            // A comment on a line of its own is no field of a struct.
-            if standsAlone { lineIsStructField = false }
+            if standsAlone {
+                lineIsStructField = false
+                groupAwaitsSpecification = awaitsSpecification
+            }
             finishLine()
             previous = token
             previousWasUnaryOperator = false
             return
         }
         if token.kind == .blockComment {
-            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty
+            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty && groups.isEmpty
             beginTopLevelCommentIfNeeded(isStandaloneTopLevelComment)
             if !lineIsEmpty, next.map({ $0.leadingNewlines > 0 }) ?? true {
                 // The last thing on its line, it is a column like a `//`
@@ -847,6 +1192,9 @@ private struct FormatPrinter {
         spellsLiteralType =
             spellsLiteralType
             && (token.kind == .word || ["*", ".", "[", "]"].contains(token.text))
+        if lineIsEmpty { beginSpecification() }
+        advanceSpecification(at: token)
+
         // The syntax tree says this operator is binary and joined to its
         // operands, whatever the tokens around it suggest.
         let isTightOperator = token.kind == .symbol && spacing.tight.contains(token.offset)
@@ -887,6 +1235,13 @@ private struct FormatPrinter {
         case "else" where previous?.text == "}":
             ensureSpace()
             append("else")
+        case "(" where previous?.kind == .word
+            && ["import", "var", "const", "type"].contains(previous?.text ?? ""):
+            openGroup(previous?.text ?? "", next: next)
+        case ")" where groups.last.map({
+            $0.parenthesisDepth == parenthesisDepth && $0.braceDepth == braceDepth
+        }) ?? false:
+            closeGroup()
         case "(":
             // After a keyword a parenthesis opens an operand, not a call.
             if let previous, previous.kind == .word,
@@ -1408,7 +1763,7 @@ private struct FormatPrinter {
             // A line is indented as its first token finds things, whatever
             // the tokens after it open or close.
             lineIndent = indent + continuationIndent
-            lineIsStructField = structBodyDepths.contains(braceDepth)
+            lineIsStructField = lineIsStructField || structBodyDepths.contains(braceDepth)
         }
         current += text
     }
@@ -1433,6 +1788,9 @@ private struct FormatPrinter {
         lineStartsSection = false
         lineIsStructField = false
         lineIsFunctionDeclaration = false
+        lineSpecification = nil
+        // A type spelled on one line is no start of a literal on the next.
+        spellsLiteralType = false
         pendingVariableDeclaration = false
         pendingTypeDeclaration = false
     }

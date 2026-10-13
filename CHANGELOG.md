@@ -39,6 +39,16 @@ format, behavior and platform changes are recorded here.
 - Interface methods with several results can be called in a multi-value
   context (`value, ok := store.Get(key)`, `return store.Get(key)`).
 - A function with results may end in a call to `panic` instead of a `return`.
+- Declaration groups: `import ( ... )`, `var ( ... )`, `const ( ... )`, and
+  `type ( ... )`, at package level and, for `var` and `const`, in functions.
+- `iota`, the index of a specification in its `const` declaration, and the
+  implicit repetition of the previous specification's type and expression:
+  `const ( red color = iota; green; blue )`,
+  `const ( _ = iota; KB = 1 << (10 * iota); MB )`.
+- `gofmt` lays out declaration groups as Go's does: a specification on each
+  line, the imports of a group sorted by path and without duplicates, and
+  the names, types, values, and comments of a `var` or `const` group in
+  columns.
 - The address of a composite literal, `&T{...}`: a pointer to a new variable
   each time it is evaluated, for structs, arrays, slices, and maps. A
   constructor can `return &Server{...}`, and a loop that appends `&node{...}`
@@ -96,6 +106,8 @@ format, behavior and platform changes are recorded here.
   never).
 - A type assertion to an interface type used to compile and always fail; it
   now tests the method set.
+- A `const` without a value is reported as `missing init expr for x`, Go's
+  wording (was `missing value in const declaration`).
 - Diagnostics reworded to Go's: a multi-value `:=` without a new name is
   `no new variables on left side of :=` (was `x redeclared in this block`),
   a count that does not match is `assignment mismatch: 2 variables but 1

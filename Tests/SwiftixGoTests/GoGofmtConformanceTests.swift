@@ -57,6 +57,18 @@ struct GoGofmtConformanceTests {
     @Test func elementSizesAndFinalCommas() throws {
         try expectGofmt(elementSizesAndFinalCommasSource, elementSizesAndFinalCommasExpected)
     }
+
+    @Test func declarationGroups() throws {
+        try expectGofmt(declarationGroupsSource, declarationGroupsExpected)
+    }
+
+    @Test func commentsInDeclarationGroups() throws {
+        try expectGofmt(commentsInDeclarationGroupsSource, commentsInDeclarationGroupsExpected)
+    }
+
+    @Test func unusualDeclarationGroups() throws {
+        try expectGofmt(unusualDeclarationGroupsSource, unusualDeclarationGroupsExpected)
+    }
 }
 
 private let columnsOfFieldsAndCommentsSource = #"""
@@ -1175,6 +1187,462 @@ func keys() {
 	go func() {}()
 	defer func() { a(); b() }()
 	return
+}
+
+"""#
+
+private let declarationGroupsSource = #"""
+package main
+
+import (
+"os"
+"fmt" // printing
+"strings"
+
+"example/z"
+"example/a"
+// about errors
+"errors"
+"errors"
+)
+import ("io")
+import (
+)
+
+var (
+
+a int
+bb string = "s"
+ccc, d = 1, 2
+e []int // list
+
+f = 3 // three
+gggg int // g
+)
+
+const (
+x = 1
+yy = 22 // two
+zzz
+)
+const (
+kb int = 1 << 10 // kilo
+mb = kb * 1024 // mega
+gb
+tb = 4
+)
+const (
+one = iota + 1
+two
+_
+four
+)
+var (single = 1)
+var ()
+type (
+point struct {
+X int
+}
+list []int
+m map[string]int // m
+)
+type (only int)
+
+func main() {
+var (
+p = 1
+qq string
+)
+const (
+r = 2
+)
+fmt.Println(p, qq, r)
+}
+
+"""#
+
+private let declarationGroupsExpected = #"""
+package main
+
+import (
+	"fmt" // printing
+	"os"
+	"strings"
+
+	"example/a"
+	"example/z"
+	// about errors
+	"errors"
+)
+import (
+	"io"
+)
+import ()
+
+var (
+	a      int
+	bb     string = "s"
+	ccc, d        = 1, 2
+	e      []int  // list
+
+	f    = 3 // three
+	gggg int // g
+)
+
+const (
+	x  = 1
+	yy = 22 // two
+	zzz
+)
+const (
+	kb int = 1 << 10   // kilo
+	mb     = kb * 1024 // mega
+	gb
+	tb = 4
+)
+const (
+	one = iota + 1
+	two
+	_
+	four
+)
+
+var (
+	single = 1
+)
+var ()
+
+type (
+	point struct {
+		X int
+	}
+	list []int
+	m    map[string]int // m
+)
+type (
+	only int
+)
+
+func main() {
+	var (
+		p  = 1
+		qq string
+	)
+	const (
+		r = 2
+	)
+	fmt.Println(p, qq, r)
+}
+
+"""#
+
+private let commentsInDeclarationGroupsSource = #"""
+package main
+
+// Imports.
+import (
+	// standard
+	"os" // operating system
+	"fmt"
+
+	/* block */
+	"strings"; "errors"
+	"io" /* tail */
+	"io"
+	"bufio" // b
+	"bufio"
+)
+
+// Variables.
+var (
+	// documented
+	alpha = 1 // a
+
+	// group two
+	betaLongName string // b
+	gamma, delta = 2, 3 // gd
+	epsilon int = 4
+	zeta = map[string]int{
+		"k": 1,
+		"long key": 2,
+	}
+	eta = 5 // after multi-line
+	theta int
+)
+
+const (
+	typed color = iota // zero
+	untyped // one
+	other = "s" // str
+	plain
+)
+
+type (
+	// doc
+	a int // a
+	bb struct{} // bb
+
+	ccc []int
+	dddd interface{ m() }
+)
+
+var x = 1
+var (
+	y = 2
+)
+const z = 3
+
+func f() {
+	var (
+		local = 1 // l
+		another string
+	)
+	const (
+		one = iota
+		two
+	)
+	use(local, another, one, two)
+}
+
+"""#
+
+private let commentsInDeclarationGroupsExpected = #"""
+package main
+
+// Imports.
+import (
+	// standard
+	"fmt"
+	"os" // operating system
+
+	/* block */
+	"bufio" // b
+	"errors"
+	"io" /* tail */
+	"strings"
+)
+
+// Variables.
+var (
+	// documented
+	alpha = 1 // a
+
+	// group two
+	betaLongName string        // b
+	gamma, delta        = 2, 3 // gd
+	epsilon      int    = 4
+	zeta                = map[string]int{
+		"k":        1,
+		"long key": 2,
+	}
+	eta   = 5 // after multi-line
+	theta int
+)
+
+const (
+	typed   color = iota // zero
+	untyped              // one
+	other   = "s"        // str
+	plain
+)
+
+type (
+	// doc
+	a  int      // a
+	bb struct{} // bb
+
+	ccc  []int
+	dddd interface{ m() }
+)
+
+var x = 1
+var (
+	y = 2
+)
+
+const z = 3
+
+func f() {
+	var (
+		local   = 1 // l
+		another string
+	)
+	const (
+		one = iota
+		two
+	)
+	use(local, another, one, two)
+}
+
+"""#
+
+private let unusualDeclarationGroupsSource = #"""
+package main
+import("fmt")
+import (
+
+"os"
+
+)
+import "io"
+import (
+"b"
+"a"
+)
+var(a=1;b=2)
+var ( // why
+c int
+
+)
+var (
+// only a comment
+)
+var (
+table = map[string]int{
+"one": 1,
+"three": 3,
+}
+short = 1
+longer int = 2
+list = []int{1, 2,
+3}
+after = 4
+x, y int
+z string = "s" // z
+w = 5
+
+q int = 6
+r = 7
+
+t = 8
+)
+const (
+aa = 1 +
+2
+bb = iota // i
+cc
+dd int = 4
+)
+type (
+one struct {
+a int
+bb string
+}
+two struct{ a int }
+three interface {
+m()
+}
+four int
+)
+func f() {
+var (
+a = 1
+bb, cc = 2, 3
+)
+var (
+only = 1
+)
+const (
+k = iota
+l
+)
+if a > 0 {
+var (
+d = 1
+ee = 22
+)
+use(d, ee)
+}
+use(a, bb, cc, only, k, l)
+}
+
+"""#
+
+private let unusualDeclarationGroupsExpected = #"""
+package main
+
+import (
+	"fmt"
+)
+import (
+	"os"
+)
+import "io"
+import (
+	"a"
+	"b"
+)
+
+var (
+	a = 1
+	b = 2
+)
+var ( // why
+	c int
+)
+var (
+// only a comment
+)
+var (
+	table = map[string]int{
+		"one":   1,
+		"three": 3,
+	}
+	short      = 1
+	longer int = 2
+	list       = []int{1, 2,
+		3}
+	after = 4
+	x, y  int
+	z     string = "s" // z
+	w            = 5
+
+	q int = 6
+	r     = 7
+
+	t = 8
+)
+
+const (
+	aa = 1 +
+		2
+	bb = iota // i
+	cc
+	dd int = 4
+)
+
+type (
+	one struct {
+		a  int
+		bb string
+	}
+	two   struct{ a int }
+	three interface {
+		m()
+	}
+	four int
+)
+
+func f() {
+	var (
+		a      = 1
+		bb, cc = 2, 3
+	)
+	var (
+		only = 1
+	)
+	const (
+		k = iota
+		l
+	)
+	if a > 0 {
+		var (
+			d  = 1
+			ee = 22
+		)
+		use(d, ee)
+	}
+	use(a, bb, cc, only, k, l)
 }
 
 """#

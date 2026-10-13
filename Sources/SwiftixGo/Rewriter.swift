@@ -56,10 +56,14 @@ public enum GoSourceRewriter {
             if matches(pattern, expression, source: bytes, captures: &captures),
                 let range = expressionRange(expression, bytes: bytes)
             {
-                edits.append(
-                    Edit(
-                        range: range,
-                        replacement: render(replacement, captures: captures)))
+                // A constant that repeats the specification before it has
+                // that one's expression, which the source holds once.
+                if !edits.contains(where: { $0.range == range }) {
+                    edits.append(
+                        Edit(
+                            range: range,
+                            replacement: render(replacement, captures: captures)))
+                }
                 return
             }
             for child in children(of: expression) { consider(child) }
@@ -249,7 +253,9 @@ public enum GoSourceRewriter {
         // An operator is never an ordinary call, whatever the pattern's callee.
         if target.bitwiseOperation != nil || target.spreadOperand != nil { return false }
         switch (pattern, target) {
-        case (.integer(let lhs, _), .integer(let rhs, _)): return lhs == rhs
+        case (.integer(let lhs, _), .integer(let rhs, let position)):
+            // A number of a rule is no `iota` of the source.
+            return lhs == rhs && !spellsIota(at: position.offset, in: source)
         case (.string(let lhs, _), .string(let rhs, _)): return lhs == rhs
         case (.identifier(let lhs, _), .identifier(let rhs, _)): return lhs == rhs
         case (.selector(let lhsBase, let lhsName, _), .selector(let rhsBase, let rhsName, _)):
@@ -355,7 +361,8 @@ public enum GoSourceRewriter {
         switch expression {
         case .integer(let value, let position):
             start = position.offset
-            end = start + String(value).utf8.count
+            // The parser writes `iota` as the integer it stands for.
+            end = start + (spellsIota(at: start, in: bytes) ? GoIota.name.utf8.count : String(value).utf8.count)
         case .string(_, let position):
             start = position.offset
             end = stringEnd(start, bytes: bytes)
@@ -419,6 +426,14 @@ public enum GoSourceRewriter {
         }
         guard start >= 0, start <= end, end <= bytes.count else { return nil }
         return start..<end
+    }
+
+    /// Whether the source has `iota` at `offset`, where the tree has the
+    /// integer it stands for.
+    private static func spellsIota(at offset: Int, in bytes: [UInt8]) -> Bool {
+        let name = Array(GoIota.name.utf8)
+        return offset >= 0 && offset + name.count <= bytes.count
+            && bytes[offset..<(offset + name.count)].elementsEqual(name)
     }
 
     private static func matchingDelimiter(

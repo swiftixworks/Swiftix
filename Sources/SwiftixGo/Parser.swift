@@ -65,11 +65,31 @@ private struct Parser {
         while check(.import) {
             let position = current.position
             advance()
-            guard case .string(let importPath) = current.kind else {
-                throw diagnostic("expected import path")
+            if check(.leftParen) {
+                // `import ( "a"; "b" )`: an import for each path.
+                advance()
+                skipSemicolons()
+                while !check(.rightParen) {
+                    let pathPosition = current.position
+                    guard case .string(let importPath) = current.kind else {
+                        throw diagnostic("expected import path")
+                    }
+                    advance()
+                    imports.append(GoImportDeclaration(path: importPath, position: pathPosition))
+                    if check(.semicolon) {
+                        skipSemicolons()
+                    } else if !check(.rightParen) {
+                        throw diagnostic("expected semicolon or newline")
+                    }
+                }
+                advance()
+            } else {
+                guard case .string(let importPath) = current.kind else {
+                    throw diagnostic("expected import path")
+                }
+                advance()
+                imports.append(GoImportDeclaration(path: importPath, position: position))
             }
-            advance()
-            imports.append(GoImportDeclaration(path: importPath, position: position))
             try expectTerminator()
         }
 
@@ -80,7 +100,7 @@ private struct Parser {
             skipSemicolons()
             if check(.eof) { break }
             if check(.typeKeyword) {
-                typeDeclarations.append(try parseTypeDeclaration())
+                typeDeclarations.append(contentsOf: try parseTypeDeclarations())
             } else if check(.variable) || check(.constant) {
                 globalDeclarations.append(contentsOf: try parseGlobalDeclarations())
             } else {
@@ -97,22 +117,25 @@ private struct Parser {
             functions: functions)
     }
 
-    /// A package-level `var` or `const`, which may name several variables:
-    /// `var a, b int` and `var a, b = 1, 2` are a declaration each.
-    mutating func parseGlobalDeclarations() throws -> [GoGlobalDeclaration] {
+    /// One specification of a `var` or `const`: `names [type] [= values]`.
+    struct ValueSpecification {
+        var names: [String]
+        var type: GoTypeExpression?
+        var values: [GoExpression]
+        let position: GoSourcePosition
+    }
+
+    mutating func parseValueSpecification() throws -> ValueSpecification {
         let position = current.position
-        let isConstant = check(.constant)
-        advance()
         var names = [try expectIdentifier(message: "expected name in declaration")]
         while check(.comma) {
             advance()
             names.append(try expectIdentifier(message: "expected name in declaration"))
         }
-        guard names.count > 1 else {
-            return [try parseGlobalDeclaration(named: names[0], isConstant: isConstant, at: position)]
+        var type: GoTypeExpression?
+        if !check(.assign), !check(.semicolon), !check(.rightParen), !check(.eof) {
+            type = try parseTypeExpression()
         }
-        var explicitType: GoTypeExpression?
-        if !check(.assign) { explicitType = try parseTypeExpression() }
         var values: [GoExpression] = []
         if check(.assign) {
             advance()
@@ -122,59 +145,133 @@ private struct Parser {
                 values.append(try parseExpression())
             }
         }
-        if isConstant, values.isEmpty {
-            throw GoDiagnostic(position: position, message: "missing value in const declaration")
-        }
-        guard values.isEmpty || values.count == names.count else {
-            // One call for several package-level variables has no single
-            // declaration to stand for it.
-            throw GoDiagnostic(
-                position: position,
-                message:
-                    "assignment mismatch: \(names.count) variables but \(values.count) value\(values.count == 1 ? "" : "s")"
-            )
-        }
-        return names.enumerated().map { index, name in
-            GoGlobalDeclaration(
-                name: name,
-                explicitType: explicitType,
-                expression: values.isEmpty ? nil : values[index],
-                isConstant: isConstant,
-                position: position)
-        }
+        return ValueSpecification(names: names, type: type, values: values, position: position)
     }
 
-    mutating func parseGlobalDeclaration(
-        named name: String,
-        isConstant: Bool,
-        at position: GoSourcePosition
-    ) throws -> GoGlobalDeclaration {
-        var explicitType: GoTypeExpression?
-        if case .identifier = current.kind {
-            explicitType = try parseTypeExpression()
-        } else if check(.structKeyword) || check(.star) || check(.leftBracket)
-            || check(.mapKeyword) || check(.interfaceKeyword) || check(.chanKeyword)
-            || check(.arrow)
-        {
-            explicitType = try parseTypeExpression()
+    /// The specifications of the `var` or `const` declaration at the
+    /// keyword: one, or those of a parenthesized group, each with the
+    /// position its declarations report. In a `const` group a specification
+    /// without values repeats the type and the values of the one before it,
+    /// and `iota` is the index of the specification.
+    mutating func parseValueSpecifications() throws -> (isConstant: Bool, list: [ValueSpecification]) {
+        let keywordPosition = current.position
+        let isConstant = check(.constant)
+        advance()
+        func checked(_ specification: ValueSpecification) throws -> ValueSpecification {
+            let names = specification.names.count
+            let values = specification.values.count
+            if isConstant, values == 0 {
+                throw GoDiagnostic(
+                    position: specification.position,
+                    message: "missing init expr for \(specification.names[0])")
+            }
+            if specification.type == nil, values == 0 {
+                throw GoDiagnostic(
+                    position: specification.position,
+                    message: "missing variable type or initialization")
+            }
+            // One call can give several variables their values, in a
+            // function; otherwise there is a value for each name.
+            guard values == 0 || values == names || (values == 1 && names > 1 && !isConstant)
+            else {
+                throw GoDiagnostic(
+                    position: specification.position,
+                    message:
+                        "assignment mismatch: \(names) variable\(names == 1 ? "" : "s") but \(values) value\(values == 1 ? "" : "s")"
+                )
+            }
+            return specification
         }
-        var expression: GoExpression?
-        if check(.assign) {
-            advance()
-            expression = try parseExpression()
+        guard check(.leftParen) else {
+            var specification = try parseValueSpecification()
+            specification = ValueSpecification(
+                names: specification.names, type: specification.type,
+                values: isConstant
+                    ? specification.values.map { $0.replacingIota(with: 0) } : specification.values,
+                position: keywordPosition)
+            return (isConstant, [try checked(specification)])
         }
-        if isConstant, expression == nil {
-            throw GoDiagnostic(position: position, message: "missing value in const declaration")
+        advance()
+        skipSemicolons()
+        var list: [ValueSpecification] = []
+        var repeated: ValueSpecification?
+        while !check(.rightParen) {
+            guard !check(.eof) else { throw diagnostic("expected ')'") }
+            var specification = try parseValueSpecification()
+            if isConstant {
+                if specification.values.isEmpty, specification.type == nil, let repeated {
+                    specification.type = repeated.type
+                    specification.values = repeated.values
+                } else {
+                    repeated = specification
+                }
+                let index = list.count
+                specification.values = specification.values.map { $0.replacingIota(with: index) }
+            }
+            list.append(try checked(specification))
+            if check(.semicolon) {
+                skipSemicolons()
+            } else if !check(.rightParen) {
+                throw diagnostic("expected semicolon or newline")
+            }
         }
-        if explicitType == nil, expression == nil {
-            throw GoDiagnostic(position: position, message: "missing variable type or initialization")
+        advance()
+        return (isConstant, list)
+    }
+
+    /// A package-level `var` or `const`, alone or in a group: a declaration
+    /// for each name, as `var a, b int` and `var a, b = 1, 2` are.
+    mutating func parseGlobalDeclarations() throws -> [GoGlobalDeclaration] {
+        let specifications = try parseValueSpecifications()
+        var declarations: [GoGlobalDeclaration] = []
+        for specification in specifications.list {
+            guard specification.values.isEmpty
+                || specification.values.count == specification.names.count
+            else {
+                // One call for several package-level variables has no single
+                // declaration to stand for it.
+                throw GoDiagnostic(
+                    position: specification.position,
+                    message:
+                        "assignment mismatch: \(specification.names.count) variables but 1 value")
+            }
+            for (index, name) in specification.names.enumerated() {
+                // A blank constant only takes its place in the count of `iota`.
+                if specifications.isConstant, name == GoValueList.blank { continue }
+                declarations.append(
+                    GoGlobalDeclaration(
+                        name: name,
+                        explicitType: specification.type,
+                        expression: specification.values.isEmpty
+                            ? nil : specification.values[index],
+                        isConstant: specifications.isConstant,
+                        position: specification.position))
+            }
         }
-        return GoGlobalDeclaration(
-            name: name,
-            explicitType: explicitType,
-            expression: expression,
-            isConstant: isConstant,
-            position: position)
+        return declarations
+    }
+
+    /// `type name T`, or a group `type ( a T; b U )`.
+    mutating func parseTypeDeclarations() throws -> [GoTypeDeclaration] {
+        guard lookahead(1).kind == .leftParen else { return [try parseTypeDeclaration()] }
+        advance()
+        advance()
+        skipSemicolons()
+        var declarations: [GoTypeDeclaration] = []
+        while !check(.rightParen) {
+            guard !check(.eof) else { throw diagnostic("expected ')'") }
+            let position = current.position
+            let name = try expectIdentifier(message: "expected type name")
+            declarations.append(
+                GoTypeDeclaration(name: name, type: try parseTypeExpression(), position: position))
+            if check(.semicolon) {
+                skipSemicolons()
+            } else if !check(.rightParen) {
+                throw diagnostic("expected semicolon or newline")
+            }
+        }
+        advance()
+        return declarations
     }
 
     mutating func parseTypeDeclaration() throws -> GoTypeDeclaration {
@@ -461,7 +558,7 @@ private struct Parser {
         skipSemicolons()
         while !check(.rightBrace) {
             guard !check(.eof) else { throw diagnostic("expected '}'") }
-            statements.append(try parseStatement())
+            statements.append(contentsOf: try parseStatements())
             if check(.semicolon) {
                 skipSemicolons()
             } else if !check(.rightBrace) {
@@ -472,8 +569,14 @@ private struct Parser {
         return GoBlock(statements: statements, position: position)
     }
 
+    /// The statement at the current token, or the several a `var` or
+    /// `const` declaration stands for.
+    mutating func parseStatements() throws -> [GoStatement] {
+        if check(.variable) || check(.constant) { return try parseDeclarations() }
+        return [try parseStatement()]
+    }
+
     mutating func parseStatement() throws -> GoStatement {
-        if check(.variable) || check(.constant) { return try parseDeclaration() }
         if check(.return) { return try parseReturn() }
         if check(.if) { return try parseIf() }
         if check(.for) { return try parseFor() }
@@ -505,65 +608,29 @@ private struct Parser {
         return try parseSimpleStatement()
     }
 
-    mutating func parseDeclaration() throws -> GoStatement {
-        let position = current.position
-        let isConstant = check(.constant)
-        advance()
-        let name = try expectIdentifier(message: "expected name in declaration")
-        if check(.comma) {
-            // `var a, b T`, `var a, b = x, y`, `var n, err = f()`.
-            var names = [name]
-            while check(.comma) {
-                advance()
-                names.append(try expectIdentifier(message: "expected name in declaration"))
+    /// A `var` or `const` in a function, alone or in a group: a statement
+    /// for each specification.
+    mutating func parseDeclarations() throws -> [GoStatement] {
+        let specifications = try parseValueSpecifications()
+        return specifications.list.compactMap { specification in
+            if specification.names.count > 1 {
+                // `var a, b T`, `var a, b = x, y`, `var n, err = f()`.
+                return .multiDeclaration(
+                    names: specification.names,
+                    expression: .variables(
+                        type: specification.type, values: specification.values,
+                        isConstant: specifications.isConstant, position: specification.position),
+                    position: specification.position)
             }
-            var listType: GoTypeExpression?
-            if !check(.assign) { listType = try parseTypeExpression() }
-            var values: [GoExpression] = []
-            if check(.assign) {
-                advance()
-                values.append(try parseExpression())
-                while check(.comma) {
-                    advance()
-                    values.append(try parseExpression())
-                }
-            }
-            if isConstant, values.isEmpty {
-                throw GoDiagnostic(
-                    position: position, message: "missing value in const declaration")
-            }
-            return .multiDeclaration(
-                names: names,
-                expression: .variables(
-                    type: listType, values: values, isConstant: isConstant, position: position),
-                position: position)
+            // A blank constant only takes its place in the count of `iota`.
+            if specifications.isConstant, specification.names[0] == GoValueList.blank { return nil }
+            return .declaration(
+                name: specification.names[0],
+                explicitType: specification.type,
+                expression: specification.values.first,
+                isConstant: specifications.isConstant,
+                position: specification.position)
         }
-        var explicitType: GoTypeExpression?
-        if case .identifier = current.kind {
-            explicitType = try parseTypeExpression()
-        } else if check(.structKeyword) || check(.star) || check(.leftBracket)
-            || check(.mapKeyword) || check(.interfaceKeyword) || check(.chanKeyword)
-            || check(.arrow)
-        {
-            explicitType = try parseTypeExpression()
-        }
-        var expression: GoExpression?
-        if check(.assign) {
-            advance()
-            expression = try parseExpression()
-        }
-        if isConstant, expression == nil {
-            throw GoDiagnostic(position: position, message: "missing value in const declaration")
-        }
-        if explicitType == nil, expression == nil {
-            throw GoDiagnostic(position: position, message: "missing variable type or initialization")
-        }
-        return .declaration(
-            name: name,
-            explicitType: explicitType,
-            expression: expression,
-            isConstant: isConstant,
-            position: position)
     }
 
     mutating func parseReturn() throws -> GoStatement {
@@ -776,7 +843,7 @@ private struct Parser {
             skipSemicolons()
             while !check(.caseKeyword) && !check(.defaultKeyword) && !check(.rightBrace) {
                 guard !check(.eof) else { throw diagnostic("expected '}'") }
-                statements.append(try parseStatement())
+                statements.append(contentsOf: try parseStatements())
                 if check(.semicolon) {
                     skipSemicolons()
                 } else if !check(.caseKeyword) && !check(.defaultKeyword) && !check(.rightBrace) {
@@ -823,7 +890,7 @@ private struct Parser {
             skipSemicolons()
             while !check(.caseKeyword) && !check(.defaultKeyword) && !check(.rightBrace) {
                 guard !check(.eof) else { throw diagnostic("expected '}'") }
-                statements.append(try parseStatement())
+                statements.append(contentsOf: try parseStatements())
                 if check(.semicolon) {
                     skipSemicolons()
                 } else if !check(.caseKeyword) && !check(.defaultKeyword) && !check(.rightBrace) {
