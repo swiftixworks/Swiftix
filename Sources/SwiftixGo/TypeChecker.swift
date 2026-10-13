@@ -64,7 +64,14 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
         case .interface(let methods):
             if methods.isEmpty { return "interface{}" }
             return "interface{...}"
-        case .function: return "func"
+        case .function(let parameters, let results):
+            let list = "func(" + parameters.map(\.description).joined(separator: ", ") + ")"
+            switch results.count {
+            case 0: return list
+            case 1: return list + " " + results[0].description
+            default:
+                return list + " (" + results.map(\.description).joined(separator: ", ") + ")"
+            }
         }
     }
 }
@@ -84,6 +91,9 @@ public struct GoTypedPackage: Sendable, Equatable {
     public let files: [GoFile]
     public let typeDefinitions: [String: GoTypeDefinition]
     public let globalTypes: [String: GoType]
+    /// The variables of the functions around it that each function literal
+    /// reads or assigns, by the literal's name, in the order it meets them.
+    var literalCaptures: [String: [String]] = [:]
 
     public init(
         name: String,
@@ -378,6 +388,7 @@ public enum GoTypeChecker {
                 message: "func main must have no arguments and no return values")
         }
 
+        var literalCaptures: [String: [String]] = [:]
         for (file, importedPaths) in zip(files, importedPathsByFile) {
             for function in file.functions {
                 var checker = FunctionChecker(
@@ -390,14 +401,17 @@ public enum GoTypeChecker {
                     globalBindings: globalBindings,
                     namePositions: file.namePositions)
                 try checker.check(function)
+                literalCaptures.merge(checker.captures) { first, _ in first }
             }
         }
 
-        return GoTypedPackage(
+        var package = GoTypedPackage(
             name: first.packageName,
             files: files,
             typeDefinitions: typeDefinitions,
             globalTypes: globalBindings.mapValues(\.type))
+        package.literalCaptures = literalCaptures
+        return package
     }
 
     private static func reservePackageName(
@@ -427,6 +441,7 @@ public enum GoTypeChecker {
             var checker = FunctionChecker(
                 importedPaths: [path], functionSignatures: [:], methodSignatures: [:],
                 typeDefinitions: [:], availableTypes: [])
+            checker.isProbing = true
             do {
                 _ = try checker.type(of: probe)
                 return true
@@ -500,6 +515,15 @@ public enum GoTypeChecker {
                 direction: direction,
                 element: try resolve(element, availableTypes: availableTypes))
         case .interface(let methods, _):
+            if let signature = expression.functionSignature {
+                return .function(
+                    parameters: try signature.parameters.map {
+                        try resolve($0, availableTypes: availableTypes)
+                    },
+                    results: try signature.results.map {
+                        try resolve($0, availableTypes: availableTypes)
+                    })
+            }
             return .interface(try methods.map { method in
                 GoInterfaceMethod(
                     name: method.name,
@@ -640,6 +664,15 @@ private struct FunctionChecker {
     /// learn which of its variables are read: a statement that fails is
     /// passed over.
     var isRecovering = false
+    /// Whether the checker is being asked what a library package declares,
+    /// which a report must not ask in turn.
+    var isProbing = false
+    /// The function literals being checked, innermost last: the name of
+    /// each and the first scope that is its own.
+    var literals: [(name: String, base: Int)] = []
+    /// The variables of the functions around it that each literal reads or
+    /// assigns. The compiler passes the literal a pointer to each.
+    var captures: [String: [String]] = [:]
 
     init(
         importedPaths: Set<String>,
@@ -670,13 +703,218 @@ private struct FunctionChecker {
         return name
     }
 
+    // MARK: Function values
+
+    func isFunction(_ type: GoType) -> Bool {
+        if case .function = underlying(type) { return true }
+        return false
+    }
+
+    /// Whether `type` is written out and has no name: a pointer, a slice, a
+    /// function, and the like.
+    func isUnnamedComposite(_ type: GoType) -> Bool {
+        switch type {
+        case .pointer, .array, .slice, .map, .channel, .structure, .function: return true
+        default: return false
+        }
+    }
+
+    /// Whether `type` is a named type of the program whose structure is one
+    /// of those.
+    func isNamedComposite(_ type: GoType) -> Bool {
+        guard case .named(let name) = type, typeDefinitions[name] != nil else { return false }
+        return isUnnamedComposite(underlying(type))
+    }
+
+    /// What Go says of two values that `==` cannot compare. A function, a
+    /// slice, and a map compare with nil alone.
+    func incomparableMessage(_ type: GoType) -> String {
+        let kind: String
+        switch underlying(type) {
+        case .function: kind = "func"
+        case .slice: kind = "slice"
+        case .map: kind = "map"
+        default: return "values are not comparable"
+        }
+        return "invalid operation: \(kind) can only be compared to nil"
+    }
+
+    /// What Go says of a call of `name` when it names a value that is no
+    /// function; nil when it names nothing.
+    func uncallableMessage(_ name: String) -> String? {
+        if name == "nil" { return "invalid operation: cannot call non-function nil" }
+        guard let binding = lookup(name) else { return nil }
+        let kind = binding.isConstant ? "constant" : "variable"
+        return "invalid operation: cannot call non-function \(name) (\(kind) of type \(binding.type))"
+    }
+
+    /// The report for `package.name` where a value is expected and the
+    /// package has a function of that name: a function of the run-time
+    /// library has no value here, and can only be called.
+    func libraryFunctionValueMessage(_ packageName: String, _ name: String) -> String? {
+        guard !isProbing,
+            let path = importedPaths.first(where: {
+                GoImportName.defaultName(ofPath: $0) == packageName
+            }),
+            GoTypeChecker.libraryDeclares(path: path, member: name)
+        else { return nil }
+        return "\(packageName).\(name) is a function of the run-time library, which can only be called: "
+            + "wrap the call in a function literal to pass it"
+    }
+
+    /// The type of `T.m` or `(*T).m`, a method expression: the method as a
+    /// function that takes its receiver first. Nil when `base` names no
+    /// type of the program.
+    func methodExpressionType(
+        base: GoExpression, name: String, position: GoSourcePosition
+    ) throws -> GoType? {
+        guard let receiver = GoMethodExpression.receiver(of: base),
+            lookup(receiver.typeName) == nil, typeDefinitions[receiver.typeName] != nil
+        else { return nil }
+        let typeName = receiver.typeName
+        let value = methodSignatures[methodKey(baseName: typeName, pointer: false, method: name)]
+        let pointer = methodSignatures[methodKey(baseName: typeName, pointer: true, method: name)]
+        guard let method = value ?? (receiver.pointer ? pointer : nil) else {
+            let isField = structFields(of: .named(typeName))?.contains { $0.name == name } == true
+            throw GoDiagnostic(
+                position: position,
+                message: pointer == nil
+                    ? "\(GoMethodExpression.spelling(receiver, name)) undefined "
+                        + "(type \(receiver.pointer ? "*" : "")\(typeName) has no "
+                        + "\(isField ? "" : "field or ")method \(name))"
+                    : "invalid method expression \(typeName).\(name) "
+                        + "(needs pointer receiver (*\(typeName)).\(name))")
+        }
+        let receiverType: GoType = receiver.pointer ? .pointer(.named(typeName)) : .named(typeName)
+        return .function(parameters: [receiverType] + method.parameters, results: method.results)
+    }
+
+    /// The results of calling `callee` when it is a method expression,
+    /// `T.m(receiver, arguments)`; nil when it is anything else.
+    mutating func methodExpressionResults(
+        _ callee: GoExpression, arguments: [GoExpression], position: GoSourcePosition
+    ) throws -> [GoType]? {
+        guard case .selector(let base, let name, _) = callee,
+            let receiver = GoMethodExpression.receiver(of: base),
+            let method = try methodExpressionType(base: base, name: name, position: callee.position)
+        else { return nil }
+        return try resultsOfCall(
+            through: method, named: GoMethodExpression.spelling(receiver, name),
+            arguments: arguments, position: position)
+    }
+
+    /// The results of calling a value of `type` with `arguments`, or nil
+    /// when the type is no function.
+    mutating func resultsOfCall(
+        through calleeType: GoType, named name: String, arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> [GoType]? {
+        guard case .function(let declared, let results) = underlying(calleeType) else {
+            return nil
+        }
+        let (arguments, parameters) = matched(arguments, to: declared)
+        guard arguments.count <= parameters.count else {
+            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
+        }
+        guard arguments.count == parameters.count else {
+            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
+        }
+        for (argument, parameterType) in zip(arguments, parameters) {
+            let argumentType = try type(of: argument)
+            guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
+                throw GoDiagnostic(
+                    position: argument.position,
+                    message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
+            }
+        }
+        return results
+    }
+
+    /// What the method `name` of a value of `type` takes and gives, without
+    /// its receiver.
+    func methodSignature(of type: GoType, named name: String) -> FunctionSignature? {
+        let candidates: [String]
+        switch type {
+        case .named(let baseName):
+            candidates = [
+                methodKey(baseName: baseName, pointer: false, method: name),
+                methodKey(baseName: baseName, pointer: true, method: name),
+            ]
+        case .pointer(.named(let baseName)):
+            candidates = [
+                methodKey(baseName: baseName, pointer: true, method: name),
+                methodKey(baseName: baseName, pointer: false, method: name),
+            ]
+        default:
+            candidates = []
+        }
+        return candidates.lazy.compactMap { methodSignatures[$0] }.first
+    }
+
+    /// The type of a function literal. Its body is checked as a function's
+    /// is, inside the scopes of the function it is written in: a variable
+    /// of those that it names is one it captures.
+    mutating func functionLiteralType(
+        parameters: [GoParameter], resultNames: [String?], resultTypes: [GoTypeExpression],
+        body: GoBlock, position: GoSourcePosition
+    ) throws -> GoType {
+        let parameterTypes = try parameters.map { try declaredType($0.type) }
+        let resolvedResults = try resultTypes.map(declaredType)
+        let savedResults = expectedResults
+        let savedNamedCount = namedResultCount
+        let savedDepths = (breakableDepth, loopDepth)
+        scopes.append([:])
+        literals.append((GoFunctionType.literalName(at: position), scopes.count - 1))
+        defer {
+            literals.removeLast()
+            scopes.removeLast()
+            expectedResults = savedResults
+            namedResultCount = savedNamedCount
+            (breakableDepth, loopDepth) = savedDepths
+        }
+        expectedResults = resolvedResults
+        namedResultCount = 0
+        // A `break` in the literal does not leave a loop around it.
+        (breakableDepth, loopDepth) = (0, 0)
+        for (parameter, parameterType) in zip(parameters, parameterTypes) {
+            scopes[scopes.count - 1][parameter.name] = Binding(
+                type: parameterType.parameterType, isConstant: false)
+        }
+        for (name, resultType) in zip(resultNames, resolvedResults) {
+            if let name {
+                scopes[scopes.count - 1][name] = Binding(type: resultType, isConstant: false)
+                namedResultCount += 1
+            }
+        }
+        try checkBlock(body, createsScope: false)
+        endScope()
+        if !resolvedResults.isEmpty, !blockTerminates(body) {
+            throw GoDiagnostic(
+                position: namePositions[position.offset]?.last ?? position,
+                message: "missing return")
+        }
+        return .function(parameters: parameterTypes, results: resolvedResults)
+    }
+
     // MARK: Unused variables
 
     /// A statement reads the variable `name`.
     mutating func use(_ name: String) {
         for index in scopes.indices.dropFirst().reversed() where scopes[index][name] != nil {
             scopes[index][name]?.isUsed = true
+            capture(name, declaredIn: index)
             return
+        }
+    }
+
+    /// A function literal names `name`, a variable of the scope at `index`.
+    /// It is captured by every literal being checked that the scope is
+    /// outside of: an inner literal reaches it through the outer ones.
+    mutating func capture(_ name: String, declaredIn index: Int) {
+        for literal in literals where literal.base > index {
+            if captures[literal.name]?.contains(name) != true {
+                captures[literal.name, default: []].append(name)
+            }
         }
     }
 
@@ -1585,33 +1823,10 @@ private struct FunctionChecker {
             }
             return try declaredType(assertedType)
         case .functionLiteral(
-            let parameters, let resultNames, let resultTypes, let body, _):
-            let parameterTypes = try parameters.map { try declaredType($0.type) }
-            let resolvedResults = try resultTypes.map(declaredType)
-            let savedResults = expectedResults
-            let savedNamedCount = namedResultCount
-            scopes.append([:])
-            defer {
-                scopes.removeLast()
-                expectedResults = savedResults
-                namedResultCount = savedNamedCount
-            }
-            expectedResults = resolvedResults
-            namedResultCount = 0
-            for (parameter, parameterType) in zip(parameters, parameterTypes) {
-                scopes[scopes.count - 1][parameter.name] = Binding(
-                    type: parameterType, isConstant: false)
-            }
-            for (name, resultType) in zip(resultNames, resolvedResults) {
-                if let name {
-                    scopes[scopes.count - 1][name] = Binding(
-                        type: resultType, isConstant: false)
-                    namedResultCount += 1
-                }
-            }
-            try checkBlock(body, createsScope: false)
-            endScope()
-            return .function(parameters: parameterTypes, results: resolvedResults)
+            let parameters, let resultNames, let resultTypes, let body, let position):
+            return try functionLiteralType(
+                parameters: parameters, resultNames: resultNames, resultTypes: resultTypes,
+                body: body, position: position)
         case .call(let callee, let arguments, let position):
             // Typed in functions of their own. This one calls itself for
             // every operand, so its frame is what each level of a nested
@@ -1630,6 +1845,10 @@ private struct FunctionChecker {
         if name == "true" || name == "false" { return .bool }
         if name == "nil" { return .nilType }
         guard let binding = lookup(name) else {
+            // A function of the program is a value of its type.
+            if let signature = functionSignatures[name] {
+                return .function(parameters: signature.parameters, results: signature.results)
+            }
             let isPackage = importedPaths.contains {
                 GoImportName.defaultName(ofPath: $0) == name
             }
@@ -1664,6 +1883,11 @@ private struct FunctionChecker {
             importedPaths.contains("fmt"),
             name == "Print" || name == "Println"
         {
+            // Called, they are typed where calls are; this is the name
+            // alone, where a value is wanted.
+            if let message = libraryFunctionValueMessage(packageName, name) {
+                throw GoDiagnostic(position: position, message: message)
+            }
             return .void
         }
         if case .identifier("os", _) = base,
@@ -1681,10 +1905,27 @@ private struct FunctionChecker {
         }
         if let packageName = importedPackage(named: base) {
             // Nothing above knows the member of the package.
-            throw GoDiagnostic(position: position, message: "undefined: \(packageName).\(name)")
+            throw GoDiagnostic(
+                position: position,
+                message: libraryFunctionValueMessage(packageName, name)
+                    ?? "undefined: \(packageName).\(name)")
+        }
+        if let method = try methodExpressionType(base: base, name: name, position: position) {
+            return method
         }
         let baseType = try type(of: base)
         guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
+            // A method selected and not called is a function that has
+            // its receiver.
+            if let method = methodSignature(of: baseType, named: name) {
+                return .function(parameters: method.parameters, results: method.results)
+            }
+            // And so is a method of an interface value, whatever is in it.
+            if case .interface(let methods) = underlying(baseType),
+                let method = methods.first(where: { $0.name == name })
+            {
+                return .function(parameters: method.parameters, results: method.results)
+            }
             throw GoDiagnostic(
                 position: position,
                 message: "\(baseType) has no field or method \(name)")
@@ -1872,6 +2113,7 @@ private struct FunctionChecker {
                         || isSlice(leftType) || isSlice(rightType)
                         || isMap(leftType) || isMap(rightType)
                         || isChannel(leftType) || isChannel(rightType)
+                        || isFunction(leftType) || isFunction(rightType)
                         || isInterface(leftType) || isInterface(rightType)))
         else {
             throw GoDiagnostic(position: position, message: "mismatched types \(leftType) and \(rightType)")
@@ -1901,12 +2143,14 @@ private struct FunctionChecker {
                     || isSlice(leftType) || isSlice(rightType)
                     || isMap(leftType) || isMap(rightType)
                     || isChannel(leftType) || isChannel(rightType)
+                    || isFunction(leftType) || isFunction(rightType)
                     || isInterface(leftType) || isInterface(rightType))
             {
                 return .bool
             }
             guard isComparable(leftType) else {
-                throw GoDiagnostic(position: position, message: "values are not comparable")
+                throw GoDiagnostic(
+                    position: position, message: incomparableMessage(leftType))
             }
             return .bool
         case .less, .lessEqual, .greater, .greaterEqual:
@@ -1967,8 +2211,20 @@ private struct FunctionChecker {
             return try namedCallType(
                 name: name, namePosition: namePosition, arguments: arguments, position: position)
         }
+        if let results = try methodExpressionResults(callee, arguments: arguments, position: position) {
+            return results.first ?? .void
+        }
         guard case .selector(let base, let name, _) = callee else {
-            throw GoDiagnostic(position: position, message: "unsupported function call")
+            // What an index, a call, or a literal gives may be a function.
+            let calleeType = try type(of: callee)
+            guard let results = try resultsOfCall(
+                through: calleeType, named: "function", arguments: arguments, position: position)
+            else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "invalid operation: cannot call non-function of type \(calleeType)")
+            }
+            return results.first ?? .void
         }
         return try selectorCallType(
             base: base, name: name, callee: callee, arguments: arguments, position: position)
@@ -2122,6 +2378,12 @@ private struct FunctionChecker {
             }
             return .void
         }
+        if let binding = lookup(name),
+            let results = try resultsOfCall(
+                through: binding.type, named: name, arguments: arguments, position: position)
+        {
+            return results.first ?? .void
+        }
         guard let signature = functionSignatures[name] else {
             // Allow calling variables of function type (e.g., context.CancelFunc)
             if let binding = lookup(name),
@@ -2135,7 +2397,8 @@ private struct FunctionChecker {
                 }
                 return .void
             }
-            throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
+            throw GoDiagnostic(
+                position: namePosition, message: uncallableMessage(name) ?? "undefined: \(name)")
         }
         let (arguments, parameters) = matched(arguments, to: signature.parameters)
         guard arguments.count <= parameters.count else {
@@ -2342,6 +2605,7 @@ private struct FunctionChecker {
                         message: "wrong number of arguments in call to http.HandleFunc")
                 }
                 try require(arguments[0], assignableTo: .string)
+                try requireHandler(arguments[1])
                 return .void
             case "ListenAndServe":
                 guard arguments.count == 2 else {
@@ -2577,6 +2841,13 @@ private struct FunctionChecker {
                 }
                 return method.results.first ?? .void
             }
+            // A field that holds a function is called like a method.
+            if let field = structFields(of: baseType)?.first(where: { $0.name == name }),
+                let results = try resultsOfCall(
+                    through: field.type, named: name, arguments: arguments, position: position)
+            {
+                return results.first ?? .void
+            }
             throw GoDiagnostic(
                 position: callee.position,
                 message: "\(baseType) has no field or method \(name)")
@@ -2614,7 +2885,15 @@ private struct FunctionChecker {
             guard !binding.isConstant else {
                 throw GoDiagnostic(position: position, message: "cannot assign to \(name)")
             }
-            if !asTarget { use(name) }
+            if asTarget {
+                // Assigned and not read, which a literal does to a variable
+                // around it through the same pointer.
+                if let index = scopes.indices.dropFirst().last(where: { scopes[$0][name] != nil }) {
+                    capture(name, declaredIn: index)
+                }
+            } else {
+                use(name)
+            }
             return binding.type
         case .selector(let base, let name, let position):
             let baseType = try assignableType(of: base)
@@ -2843,6 +3122,19 @@ private struct FunctionChecker {
         }
     }
 
+    /// The second argument of `http.HandleFunc`: a function of a response
+    /// writer and a request.
+    mutating func requireHandler(_ expression: GoExpression) throws {
+        let expected = GoType.function(
+            parameters: [.named("http.ResponseWriter"), .pointer(.named("http.Request"))], results: [])
+        let actual = try type(of: expression)
+        guard try isAssignable(expression, ofType: actual, to: expected) else {
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "cannot use \(actual) as \(expected) value in argument to http.HandleFunc")
+        }
+    }
+
     mutating func requireBool(_ expression: GoExpression) throws {
         let expressionType = try type(of: expression)
         guard isBool(expressionType) else {
@@ -2895,15 +3187,20 @@ private struct FunctionChecker {
             return .array(length: length, element: try declaredType(element))
         case .slice(let element, _):
             return .slice(try declaredType(element))
-        case .map(let key, let value, let position):
+        case .map(let key, let value, _):
             let keyType = try declaredType(key)
             guard isComparable(keyType) else {
-                throw GoDiagnostic(position: position, message: "invalid map key type \(keyType)")
+                throw GoDiagnostic(position: key.position, message: "invalid map key type \(keyType)")
             }
             return .map(key: keyType, value: try declaredType(value))
         case .channel(let direction, let element, _):
             return .channel(direction: direction, element: try declaredType(element))
         case .interface(let methods, _):
+            if let signature = expression.functionSignature {
+                return .function(
+                    parameters: try signature.parameters.map(declaredType),
+                    results: try signature.results.map(declaredType))
+            }
             return .interface(try methods.map { method in
                 GoInterfaceMethod(
                     name: method.name,
@@ -3072,6 +3369,10 @@ private struct FunctionChecker {
                 else { return nil }
             }
             return try declaredType(.named(name, position: position))
+        case .unary(.dereference, let operand, _):
+            // `(*T)(x)`: the parentheses are gone, and `*T` is a type
+            // where `T` is one.
+            return try conversionTarget(operand).map { .pointer($0) }
         default:
             return nil
         }
@@ -3111,11 +3412,16 @@ private struct FunctionChecker {
             throw failure
         case .slice(let element) where isByte(element) && sourceShape == .string:
             return target
-        case .bool, .slice, .map, .pointer, .channel:
+        case .bool, .slice, .map, .pointer, .channel, .function:
             // Named types convert to and from their identical underlying type.
             // Struct and array values carry their type name at run time, so
             // those conversions are not supported.
-            guard source != .nilType, sourceShape == underlying(target) else { throw failure }
+            if source == .nilType {
+                // `Handler(nil)`: nil is a value of every type that has one.
+                guard underlying(target) != .bool else { throw failure }
+                return target
+            }
+            guard sourceShape == underlying(target) else { throw failure }
             return target
         default:
             throw failure
@@ -3278,7 +3584,17 @@ private struct FunctionChecker {
     func isAssignable(_ actual: GoType, to expected: GoType) -> Bool {
         if actual == expected { return true }
         if actual == .nilType
-            && (isPointer(expected) || isSlice(expected) || isMap(expected) || isChannel(expected))
+            && (isPointer(expected) || isSlice(expected) || isMap(expected) || isChannel(expected)
+                || isFunction(expected))
+        {
+            return true
+        }
+        // A value of a type that has no name goes where a named type of the
+        // same structure is asked for, and the reverse: a function literal
+        // is a `HandlerFunc`, a `[]string` is a `names`.
+        if isUnnamedComposite(actual) != isUnnamedComposite(expected),
+            underlying(actual) == underlying(expected),
+            isNamedComposite(actual) || isNamedComposite(expected)
         {
             return true
         }
@@ -3455,8 +3771,16 @@ private struct FunctionChecker {
         position: GoSourcePosition
     ) throws -> [GoType] {
         if case .identifier(let name, let namePosition) = callee {
+            if let binding = lookup(name),
+                let results = try resultsOfCall(
+                    through: binding.type, named: name, arguments: arguments, position: position)
+            {
+                return results
+            }
             guard let signature = functionSignatures[name] else {
-                throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
+                throw GoDiagnostic(
+                    position: namePosition,
+                    message: uncallableMessage(name) ?? "undefined: \(name)")
             }
             let (arguments, parameters) = matched(arguments, to: signature.parameters)
             guard arguments.count == parameters.count else {
@@ -3481,6 +3805,9 @@ private struct FunctionChecker {
         }
         if let native = try nativeCall(callee: callee, arguments: arguments, position: position) {
             return native.results
+        }
+        if let results = try methodExpressionResults(callee, arguments: arguments, position: position) {
+            return results
         }
         if case .selector(let base, let name, _) = callee {
             if case .identifier(let packageName, _) = base,
@@ -3648,6 +3975,13 @@ private struct FunctionChecker {
             {
                 signature = (method.parameters, method.results)
             }
+            if signature == nil,
+                let field = structFields(of: baseType)?.first(where: { $0.name == name }),
+                let results = try resultsOfCall(
+                    through: field.type, named: name, arguments: arguments, position: position)
+            {
+                return results
+            }
             guard let signature else {
                 throw GoDiagnostic(
                     position: callee.position,
@@ -3663,6 +3997,12 @@ private struct FunctionChecker {
                 try require(argument, assignableTo: parameterType)
             }
             return signature.results
+        }
+        if let results = try resultsOfCall(
+            through: try type(of: callee), named: "function", arguments: arguments,
+            position: position)
+        {
+            return results
         }
         throw GoDiagnostic(position: position, message: "unsupported function call in multi-value context")
     }

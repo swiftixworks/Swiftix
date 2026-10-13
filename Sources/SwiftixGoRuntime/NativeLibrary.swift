@@ -90,6 +90,40 @@ enum GoNative {
         return Int(name.dropFirst(freshLocalPrefix.utf8.count))
     }
 
+    /// Prefix of the call that makes a local of the executing frame the
+    /// variable a pointer points to: `$bind.<index>`, with the pointer as
+    /// its operand. A function literal names the variables it captures so.
+    static let boundLocalPrefix = "$bind."
+
+    /// The local a `$bind.<index>` call names, or nil for any other name.
+    static func boundLocal(_ name: String) -> Int? {
+        guard name.hasPrefix(boundLocalPrefix) else { return nil }
+        return Int(name.dropFirst(boundLocalPrefix.utf8.count))
+    }
+
+    /// The call through a function value, which is its first operand.
+    static let callFunctionValue = "$call"
+
+    /// The call that panics when its operand is nil and does nothing else.
+    static let requireValue = "$nonnil"
+
+    /// Prefix of the call that makes the executing frame return what its
+    /// result variables hold when it ends, after its deferred calls have
+    /// run: `$results.<local>.<local>`, the locals of the results in order.
+    static let liveResultsPrefix = "$results."
+
+    /// The locals a `$results.` call names, or nil for any other name.
+    static func resultLocals(_ name: String) -> [Int]? {
+        guard name.hasPrefix(liveResultsPrefix) else { return nil }
+        let locals = name.dropFirst(liveResultsPrefix.utf8.count).split(separator: ".").map { Int($0) }
+        return locals.contains(nil) ? nil : locals.compactMap { $0 }
+    }
+
+    /// The type name of a function value: a struct whose first field names
+    /// the function and whose others are passed to it before the arguments
+    /// of a call. `GoValue` has no case for a function.
+    static let functionValueTypeName = "$func"
+
     /// Shifts follow Go: a negative count panics, and a count of 64 or more
     /// shifts every bit out (leaving the sign for an arithmetic right shift).
     static func integerBinary(_ name: String, _ lhs: Int64, _ rhs: Int64) throws -> Int64? {

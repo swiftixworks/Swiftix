@@ -169,23 +169,198 @@ struct GoCrossPackageTests: GoTestHarness {
         #expect(try run(module) == "deferred 42\n42 999\n")
     }
 
-    /// Function values are as limited across packages as inside one: the
-    /// same diagnostics, with the qualified spelling.
-    @Test func functionValuesKeepTheInPackageDiagnostics() {
-        let library = ("lib/lib.go", "package lib\nfunc One(x int) int { return x + 1 }\nvar Hook = func(x int) {}\n")
-        let value = GuestModule([
-            library,
-            ("main.go", Self.main + "import \"example/m/lib\"\nfunc main() {\n\tf := lib.One\n\tfmt.Println(f(1))\n}\n"),
-        ])
-        #expect(diagnostic(value) == "/m/main.go:5:7: undefined: lib.One")
-        #expect(goMainDiagnostic("f := one\nfmt.Println(f(1))", declarations: "func one(x int) int { return x + 1 }") == "undefined: one")
+    /// A method expression names a type of another package, a method value
+    /// crosses with its receiver, and a package's function types and the
+    /// functions that take them are used from outside it: a middleware
+    /// chain. What it prints is what Go 1.24.5 prints.
+    @Test func methodExpressionsAndMiddlewareCrossPackages() throws {
+        let module = GuestModule([
+            (
+                "lib/lib.go",
+                #"""
+                package lib
 
-        let variable = GuestModule([
-            library,
-            ("main.go", "package main\nimport \"example/m/lib\"\nfunc main() {\n\tlib.Hook(1)\n}\n"),
+                import "fmt"
+
+                type Counter struct{ N int }
+
+                func (c Counter) Get() int        { return c.N }
+                func (c *Counter) Inc()           { c.N++ }
+                func (c *Counter) Add(by int) int { c.N += by; return c.N }
+
+                type Shape interface {
+                    Area() int
+                    Name() string
+                }
+
+                type Square struct{ Side int }
+
+                func (s Square) Area() int    { return s.Side * s.Side }
+                func (s Square) Name() string { return fmt.Sprint("square ", s.Side) }
+
+                type Visitor func(name string, area int) bool
+
+                func Each(shapes []Shape, visit Visitor) int {
+                    seen := 0
+                    for _, s := range shapes {
+                        seen++
+                        if !visit(s.Name(), s.Area()) {
+                            break
+                        }
+                    }
+                    return seen
+                }
+
+                var Default = func(n int) int { return n + 1 }
+
+                func Compose(fs ...func(int) int) func(int) int {
+                    return func(n int) int {
+                        for _, f := range fs {
+                            n = f(n)
+                        }
+                        return n
+                    }
+                }
+
+                """#
+            ),
+            (
+                "internal/chain/chain.go",
+                #"""
+                package chain
+
+                type Handler func(string) string
+
+                type Middleware func(Handler) Handler
+
+                func (h Handler) Serve(s string) string { return h(s) }
+
+                func Wrap(h Handler, layers ...Middleware) Handler {
+                    for i := len(layers) - 1; i >= 0; i-- {
+                        h = layers[i](h)
+                    }
+                    return h
+                }
+
+                """#
+            ),
+            (
+                "main.go",
+                #"""
+                package main
+
+                import (
+                    "fmt"
+                    "strings"
+
+                    "example/m/internal/chain"
+                    l "example/m/lib"
+                )
+
+                func tag(name string) chain.Middleware {
+                    return func(next chain.Handler) chain.Handler {
+                        return func(s string) string { return name + "(" + next(s) + ")" }
+                    }
+                }
+
+                func main() {
+                    get, inc, add := l.Counter.Get, (*l.Counter).Inc, (*l.Counter).Add
+                    c := l.Counter{N: 1}
+                    inc(&c)
+                    bound := c.Add
+                    fmt.Println(get(c), add(&c, 5), bound(10), c.N)
+                    fmt.Printf("%T %T %T\n", get, inc, bound)
+
+                    shapes := []l.Shape{l.Square{Side: 2}, l.Square{Side: 3}, l.Square{Side: 4}}
+                    total := 0
+                    names := []string{}
+                    seen := l.Each(shapes, func(name string, area int) bool {
+                        total += area
+                        names = append(names, name)
+                        return area < 9
+                    })
+                    area := shapes[2].Area
+                    fmt.Println(seen, total, strings.Join(names, ","), area())
+
+                    double := func(n int) int { return n * 2 }
+                    f := l.Compose(l.Default, double, l.Default)
+                    l.Default = double
+                    fmt.Println(f(1), l.Compose()(7), l.Compose(l.Default)(7))
+
+                    h := chain.Wrap(func(s string) string { return strings.ToUpper(s) }, tag("a"), tag("b"))
+                    fmt.Println(h("x"), h.Serve("y"), chain.Handler.Serve(h, "z"))
+                    fmt.Printf("%T %T\n", h, tag)
+                }
+
+                """#
+            ),
         ])
-        #expect(diagnostic(variable) == "/m/main.go:4:2: undefined: lib.Hook")
-        #expect(goMainDiagnostic("hook(1)", declarations: "var hook = func(x int) {}") == "undefined: hook")
+        #expect(
+            try run(module)
+                == #"""
+                2 7 17 17
+                func(lib.Counter) int func(*lib.Counter) func(int) int
+                2 13 square 2,square 3 16
+                5 7 14
+                a(b(X)) a(b(Y)) a(b(Z))
+                chain.Handler func(string) chain.Middleware
+
+                """#)
+    }
+
+    /// A function of another package is a value like one of this package,
+    /// and so is a variable of another package that holds one.
+    @Test func functionValuesCrossPackages() throws {
+        let library = (
+            "lib/lib.go",
+            """
+            package lib
+
+            type Step func(int) int
+
+            var Hook = func(x int) int { return x * 100 }
+
+            var Steps []Step
+
+            func One(x int) int { return x + 1 }
+
+            func Register(s Step) { Steps = append(Steps, s) }
+
+            func Run(x int) int {
+                for _, step := range Steps {
+                    x = step(x)
+                }
+                return x
+            }
+            """
+        )
+        let module = GuestModule([
+            library,
+            (
+                "main.go",
+                Self.main
+                    + """
+                    import "example/m/lib"
+                    func main() {
+                    \tf := lib.One
+                    \tby := 3
+                    \tlib.Register(f)
+                    \tlib.Register(func(x int) int { return x * by })
+                    \tlib.Register(lib.Hook)
+                    \tby = 4
+                    \tfmt.Println(f(1), lib.Hook(2), lib.Run(1), len(lib.Steps))
+                    \tlib.Hook = lib.One
+                    \tfmt.Printf("%d %T %T\\n", lib.Hook(2), f, lib.Steps[0])
+                    }
+
+                    """
+            ),
+        ])
+        #expect(try run(module) == "2 200 800 3\n3 func(int) int lib.Step\n")
+        #expect(
+            try runGoMain("f := one\nfmt.Println(f(1))", declarations: "func one(x int) int { return x + 1 }")
+                == "2\n")
+        #expect(try runGoMain("hook(1)", declarations: "var hook = func(x int) { fmt.Println(x) }") == "1\n")
     }
 
     // MARK: Constants and variables

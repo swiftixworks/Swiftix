@@ -90,6 +90,42 @@ struct GoConversionTests: GoTestHarness {
         #expect(output == "22 23 ada! xada 9 2 65\nok 3 1065 hi\n")
     }
 
+    /// `nil` converts to any type that has it, and `(*T)(x)` is the
+    /// conversion to a pointer type: a typed nil pointer is a value an
+    /// interface can hold and call methods of. Printed as Go 1.24.5 prints.
+    @Test func nilAndPointersConvert() throws {
+        #expect(
+            try runGoMain(
+                #"""
+                a := []int(nil)
+                p := (*t)(nil)
+                m := map[string]int(nil)
+                q := (*t)(&t{4})
+                var s shape = (*t)(nil)
+                fmt.Println(a == nil, p == nil, m == nil, len(a), len(m), q.n, s.area(), s != nil)
+                fmt.Printf("%T %v\n", p, (*t)(q) == q)
+                f := &q
+                fmt.Println((*f).n, (*t)(*f).area())
+                """#,
+                declarations: """
+                    type t struct{ n int }
+
+                    type shape interface{ area() int }
+
+                    func (p *t) area() int {
+                        if p == nil {
+                            return -1
+                        }
+                        return p.n
+                    }
+                    """)
+                == "true true true 0 0 4 -1 true\n*main.t true\n4 4\n")
+        #expect(
+            goMainDiagnostic("x := 1\np := (*t)(x)\n_ = p", declarations: "type t struct{ n int }")
+                == "cannot convert int to type *t")
+        #expect(goMainDiagnostic("x := int(nil)\n_ = x") == "cannot convert nil to type int")
+    }
+
     @Test func invalidConversionsAreDiagnosed() {
         #expect(goMainDiagnostic("fmt.Println(int(\"x\"))") == "cannot convert string to type int")
         #expect(goMainDiagnostic("fmt.Println(string(true))") == "cannot convert bool to type string")
@@ -115,7 +151,9 @@ struct GoConversionTests: GoTestHarness {
 
     @Test func aDeclarationNamedLikeATypeShadowsTheConversion() throws {
         // `string` here is a variable, so `string(1)` is not a conversion.
-        #expect(goMainDiagnostic("string := 1\nfmt.Println(string(1))") == "undefined: string")
+        #expect(
+            goMainDiagnostic("string := 1\nfmt.Println(string(1))")
+                == "invalid operation: cannot call non-function string (variable of type int)")
         #expect(
             try runGoMain("fmt.Println(byte(7))", declarations: "func byte(n int) int { return n + 1 }")
                 == "8\n")

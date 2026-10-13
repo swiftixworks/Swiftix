@@ -2046,6 +2046,49 @@ public struct GoVirtualMachine: Sendable {
             return decoded
         }
 
+        /// What the result variables of `frame` hold: the locals after its
+        /// parameters.
+        func resultValues(of frame: Frame) throws -> [GoValue] {
+            let locals: [Int]
+            if let named = frame.resultLocals {
+                locals = named
+            } else {
+                // A function that did not say holds its results after its
+                // parameters.
+                let resultStart = frame.function.parameterCount
+                let resultEnd = try checkedAdd(
+                    resultStart, frame.function.returnCount, resource: "function result locals")
+                guard resultEnd <= frame.locals.count else {
+                    throw GoRuntimeError.invalidExecutable("invalid function result locals")
+                }
+                locals = Array(resultStart..<resultEnd)
+            }
+            return try locals.map { localIndex in
+                guard let cell = frame.locals[localIndex], heap.contains(cell) else {
+                    throw GoRuntimeError.invalidLocal(localIndex)
+                }
+                return heap[cell]
+            }
+        }
+
+        /// The function a function value names and what it passes before
+        /// the arguments of a call. Calling a nil one is Go's nil
+        /// dereference.
+        func functionValueTarget(_ value: GoValue) throws -> GoFunctionValueTarget {
+            guard case .structure(let structure) = value,
+                structure.typeName == GoNative.functionValueTypeName,
+                case .string(let symbol)? = structure.fields.first?.value
+            else {
+                if value == .nilValue { throw GoRuntimePanic.nilDereference }
+                throw GoRuntimeError.typeMismatch
+            }
+            guard let function = functions[symbol] else {
+                throw GoRuntimeError.missingFunction(symbol)
+            }
+            return GoFunctionValueTarget(
+                function: function, bound: structure.fields.dropFirst().map(\.value))
+        }
+
         /// Ends the run with what Go prints for the panics of `report`, or
         /// starts the method that has to say what the next of them is and
         /// returns. Go prints an error it panicked with by its text and a
@@ -2143,6 +2186,14 @@ public struct GoVirtualMachine: Sendable {
             case .slice(let slice): return address(slice.backing, offset: slice.start)
             case .map(let map): return address(map.storage)
             case .channel(let channel): return address(channel.storage)
+            case .structure(let structure)
+            where structure.typeName == GoNative.functionValueTypeName:
+                // A function is where its code is: one address for each
+                // function, made of its name.
+                guard case .string(let symbol)? = structure.fields.first?.value else { return 0 }
+                var hash: UInt64 = 0xCBF2_9CE4_8422_2325
+                for byte in symbol.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01B3 }
+                return 0x1_0000_0000 | ((hash & 0x0FFF_FFFF) << 4)
             default: return nil
             }
         }
@@ -2160,6 +2211,7 @@ public struct GoVirtualMachine: Sendable {
             case .string: return "string"
             case .bool: return "bool"
             case .structure(let structure):
+                if structure.typeName == GoNative.functionValueTypeName { return "func()" }
                 return structure.typeName.map(GoTypeDescriptor.goName) ?? "struct {...}"
             case .slice(let slice): return "[]" + element(slice.zeroValue)
             case .array(let elements):
@@ -2438,6 +2490,10 @@ public struct GoVirtualMachine: Sendable {
             case .slice:
                 return try sequence(Array(try sliceElements(value)), of: elementType())
             case .structure(let structure):
+                if structure.typeName == GoNative.functionValueTypeName {
+                    // Go prints a function as the address of its code.
+                    return try pointerLike(formatAddress(of: value) ?? 0)
+                }
                 var fieldTypes = [GoRuntimeType?](repeating: nil, count: structure.fields.count)
                 if case .structure(let declaredFields)? = kind,
                     declaredFields.count == structure.fields.count
@@ -3505,6 +3561,36 @@ public struct GoVirtualMachine: Sendable {
                 frames[frameIndex].locals[local] = nil
                 return true
             }
+            if let locals = GoNative.resultLocals(name) {
+                let frameIndex = frames.count - 1
+                guard argumentCount == 0,
+                    locals.count == frames[frameIndex].function.returnCount,
+                    locals.allSatisfy(frames[frameIndex].locals.indices.contains)
+                else {
+                    throw GoRuntimeError.invalidExecutable("invalid function result locals")
+                }
+                frames[frameIndex].resultLocals = locals
+                return true
+            }
+            if name == GoNative.requireValue {
+                guard argumentCount == 1, let value = stack.popLast() else {
+                    throw GoRuntimeError.stackUnderflow
+                }
+                if value == .nilValue { throw GoRuntimePanic.nilDereference }
+                return true
+            }
+            if let local = GoNative.boundLocal(name) {
+                // The local becomes the variable the pointer points to: a
+                // function literal's name for a variable it captures.
+                let frameIndex = frames.count - 1
+                guard argumentCount == 1, frames[frameIndex].locals.indices.contains(local),
+                    case .pointer(let pointer)? = stack.popLast(), pointer.path.isEmpty
+                else {
+                    throw GoRuntimeError.invalidLocal(local)
+                }
+                frames[frameIndex].locals[local] = pointer.cell
+                return true
+            }
             guard let expected = GoNative.argumentCounts[name] else { return false }
             guard argumentCount == expected else {
                 throw GoRuntimeError.argumentCountMismatch(
@@ -3779,7 +3865,23 @@ public struct GoVirtualMachine: Sendable {
                     let exitingIndex = frames.count - 1
                     if let deferred = frames[exitingIndex].deferredCalls.popLast() {
                         activeDeferredCallCount -= 1
-                        if let function = functions[deferred.function]
+                        if deferred.function == GoNative.callFunctionValue,
+                            let value = deferred.arguments.first
+                        {
+                            // The value was read when the call was deferred.
+                            let target = try functionValueTarget(value)
+                            guard frames.count < maximumCallDepth else {
+                                throw GoRuntimeError.callStackLimitExceeded
+                            }
+                            frames.append(
+                                try makeFrame(
+                                    function: target.function,
+                                    stackBase: stack.count,
+                                    arguments: try target.arguments(
+                                        with: deferred.arguments.dropFirst()),
+                                    heap: &heap,
+                                    isDeferredCall: true))
+                        } else if let function = functions[deferred.function]
                             ?? builtinGoroutineFunction(
                                 named: deferred.function,
                                 argumentCount: deferred.arguments.count)
@@ -3820,7 +3922,10 @@ public struct GoVirtualMachine: Sendable {
                         stack.removeSubrange(exiting.stackBase...)
                     }
                     switch pendingExit {
-                    case .returning(let values):
+                    case .returning(var values):
+                        if exiting.resultLocals != nil {
+                            values = try resultValues(of: exiting)
+                        }
                         if var report = exiting.panicReport {
                             // The method has said what the panic is.
                             if case .string(let text)? = values.first {
@@ -4029,6 +4134,26 @@ public struct GoVirtualMachine: Sendable {
                     }
                     if condition { try jump(to: target, frame: &frames[frameIndex]) }
                 case .call(let name, let argumentCount):
+                    if name == GoNative.callFunctionValue {
+                        // The function value lies under the arguments.
+                        guard argumentCount >= 1, stack.count >= argumentCount else {
+                            throw GoRuntimeError.stackUnderflow
+                        }
+                        let start = stack.count - argumentCount
+                        let operands = Array(stack[start...])
+                        stack.removeSubrange(start...)
+                        let target = try functionValueTarget(operands[0])
+                        guard frames.count < maximumCallDepth else {
+                            throw GoRuntimeError.callStackLimitExceeded
+                        }
+                        frames.append(
+                            try makeFrame(
+                                function: target.function,
+                                stackBase: stack.count,
+                                arguments: try target.arguments(with: operands.dropFirst()),
+                                heap: &heap))
+                        break
+                    }
                     guard let function = functions[name] else {
                         guard
                             try executePureNative(
@@ -4065,22 +4190,33 @@ public struct GoVirtualMachine: Sendable {
                             arguments: arguments,
                             heap: &heap))
                 case .spawn(let name, let argumentCount):
-                    guard let function = functions[name]
-                        ?? builtinGoroutineFunction(named: name, argumentCount: argumentCount)
-                    else {
-                        throw GoRuntimeError.missingFunction(name)
-                    }
                     guard argumentCount >= 0, stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    guard argumentCount == function.parameterCount else {
-                        throw GoRuntimeError.argumentCountMismatch(
-                            function: name,
-                            expected: function.parameterCount,
-                            actual: argumentCount)
-                    }
                     let argumentStart = stack.count - argumentCount
-                    let arguments = Array(stack[argumentStart...])
+                    var arguments = Array(stack[argumentStart...])
+                    let function: GoBytecodeFunction
+                    if name == GoNative.callFunctionValue {
+                        guard let value = arguments.first else {
+                            throw GoRuntimeError.stackUnderflow
+                        }
+                        let target = try functionValueTarget(value)
+                        function = target.function
+                        arguments = try target.arguments(with: arguments.dropFirst())
+                    } else {
+                        guard let named = functions[name]
+                            ?? builtinGoroutineFunction(named: name, argumentCount: argumentCount)
+                        else {
+                            throw GoRuntimeError.missingFunction(name)
+                        }
+                        guard argumentCount == named.parameterCount else {
+                            throw GoRuntimeError.argumentCountMismatch(
+                                function: name,
+                                expected: named.parameterCount,
+                                actual: argumentCount)
+                        }
+                        function = named
+                    }
                     stack.removeSubrange(argumentStart...)
                     guard resourceLimits.maximumGoroutines >= 2,
                         goroutines.count <= resourceLimits.maximumGoroutines - 2
@@ -4533,23 +4669,8 @@ public struct GoVirtualMachine: Sendable {
                         stack.append(.nilValue)
                         break
                     }
-                    let parent = frames[frameIndex - 1]
-                    var resultValues: [GoValue] = []
-                    let resultStart = parent.function.parameterCount
-                    let resultEnd = try checkedAdd(
-                        resultStart,
-                        parent.function.returnCount,
-                        resource: "function result locals")
-                    guard resultEnd <= parent.locals.count else {
-                        throw GoRuntimeError.invalidExecutable("invalid function result locals")
-                    }
-                    for localIndex in resultStart..<resultEnd {
-                        guard parent.locals.indices.contains(localIndex),
-                            let cell = parent.locals[localIndex], heap.contains(cell)
-                        else { throw GoRuntimeError.invalidLocal(localIndex) }
-                        resultValues.append(heap[cell])
-                    }
-                    frames[frameIndex - 1].pendingExit = .returning(resultValues)
+                    frames[frameIndex - 1].pendingExit = .returning(
+                        try resultValues(of: frames[frameIndex - 1]))
                     frames[frameIndex - 1].recoveredPanic = value
                     stack.append(value)
                 case .makeMap(let entryCount):
@@ -7120,6 +7241,10 @@ private struct Frame {
     /// The panic a deferred call of this frame has recovered, until that
     /// call returns.
     var recoveredPanic: GoValue?
+    /// The locals of the function's results, when it returns what they
+    /// hold as it ends: after its deferred calls, which may have changed
+    /// them or recovered a panic.
+    var resultLocals: [Int]?
     /// The report of the panics that ended the goroutine, when this frame
     /// runs the `Error` or `String` method that says what the first one
     /// still to be described is.

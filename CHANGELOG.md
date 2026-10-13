@@ -109,6 +109,31 @@ format, behavior and platform changes are recorded here.
 - A multi-value `:=` may reuse variables of the same block when one name is
   new (`n, err := f()` after an earlier `err`).
 - `GoMapStorage.count`.
+- Swiftix Go function values. Function types (`func(int, string) (bool,
+  error)`, variadic ones included) are types of variables, parameters,
+  results, fields, elements, map values, and channels, and the underlying type
+  of a named type, which may have methods (`type HandlerFunc func(string)
+  string`). A function of the program, a function literal, a method value
+  (`c.Inc`, of a concrete type or of an interface value), and a method
+  expression (`T.Get`, `(*T).Inc`) are values: assigned, passed, returned,
+  stored, held by an interface and asserted back, compared with `nil`, printed
+  by `%v` and `%T` as Go prints them, and called through whatever holds them,
+  by `go` and `defer` as well, inside one package and across packages. A call
+  through a nil function panics as a nil pointer dereference.
+- Swiftix Go closures. A function literal is an expression anywhere, called
+  where it is written or kept, and uses the variables of the functions around
+  it, parameters, receivers, and named results among them: it reads what they
+  hold when it runs, what it assigns is seen outside, and they live as long as
+  a literal that uses them. A literal made in a loop keeps the variable of its
+  iteration. A variable that a literal only assigns is still `declared and not
+  used`.
+- Swiftix Go rune literals: `'a'`, `'世'`, and the escapes `\a \b \f \n \r \t
+  \v \\ \'`, `\x41`, `\101`, `\u4e16`, and `\U0001F600`, as untyped integer
+  constants. Malformed ones are reported with Go's messages at Go's positions.
+- `(*T)(x)`, the conversion to a pointer type, and the conversion of `nil` to
+  a slice, map, or pointer type (`[]int(nil)`, `map[string]int(nil)`,
+  `(*T)(nil)`).
+
 
 ### Changed
 
@@ -229,6 +254,29 @@ format, behavior and platform changes are recorded here.
 - `time.After` and `time.Tick` deliver instants on the kernel wall clock
   instead of logical nanoseconds. The two agree unless the host anchored the
   clock with `Kernel.setWallClock`.
+- Errors in string literals are Go's, at Go's positions: `unknown escape`
+  (was `unknown escape sequence`), `invalid character 'z' in hexadecimal
+  escape` (was `invalid character in escape sequence`), `octal escape value
+  256 > 255`, and `escape is invalid Unicode code point U+D800`, reported
+  after the escape instead of at its `u`; `newline in string` is reported at
+  the end of the line instead of at the opening quote.
+- A call of a value that is no function says `invalid operation: cannot call
+  non-function x (variable of type int)` (was `undefined: x`), `==` between
+  two slices, maps, or functions says `invalid operation: slice can only be
+  compared to nil` (was `values are not comparable`), and `invalid map key
+  type` is reported at the key type instead of at `map`.
+- `http.HandleFunc` checks its handler, which must be a
+  `func(http.ResponseWriter, *http.Request)`; any second argument used to be
+  accepted.
+- `fmt.Println`, `strings.ToUpper`, and the other functions of the run-time
+  library named without a call are refused with a message that says to wrap
+  the call in a function literal.
+- The compiler checks and lowers each kind of statement and expression in a
+  function of its own, and lowers a function literal after the function it is
+  written in. An unoptimized build used more than a tenth of a 512 KB thread's
+  stack for every nested statement; twenty nested statements and twelve nested
+  literals now compile there.
+
 
 ### Fixed
 
@@ -287,6 +335,21 @@ format, behavior and platform changes are recorded here.
   connection or the handshake was abandoned. It now returns
   `dial tcp <address>: connect: connection refused` or `connection timed out`
   and closes the socket.
+- A function with several results that recovered a panic returned its first
+  result alone correctly: `n, s = 5, "five"` before the panic gave the caller
+  `5` and `0`, and unnamed `(int, string)` results gave a second value that
+  was not `""`.
+- A deferred call that changed a named result through a pointer (`defer
+  reset(&n)` before `return 5`) was not seen by the caller. A function that
+  defers now returns what its result variables hold once its deferred calls
+  have run, as in Go, whether a pointer or a closure changed them.
+- A value of a slice or map type was refused where a named type with that
+  underlying type was wanted, and the reverse: `var a ints = []int{1, 2}`
+  with `type ints []int` was `cannot use []int as ints value`. Named channel
+  and function types are assignable the same way.
+- `[]int(nil)` was `cannot convert nil to type []int`, and `(*T)(x)` was
+  `unsupported function call`.
+
 
 ## 0.13.1 — 2026-10-08
 

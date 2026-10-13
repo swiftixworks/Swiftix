@@ -109,3 +109,22 @@ struct GoPanicReport: Sendable, Equatable {
         skipsMethod = false
     }
 }
+
+/// What a call through a function value calls: the function, and what the
+/// value holds for it. Those are a pointer to each variable a literal
+/// captures, or the receiver of a method.
+struct GoFunctionValueTarget {
+    let function: GoBytecodeFunction
+    let bound: [GoValue]
+
+    /// What the function is called with.
+    func arguments<Arguments: Collection>(with arguments: Arguments) throws -> [GoValue]
+    where Arguments.Element == GoValue {
+        let all = bound + arguments
+        guard all.count == function.parameterCount else {
+            throw GoRuntimeError.argumentCountMismatch(
+                function: function.name, expected: function.parameterCount, actual: all.count)
+        }
+        return all
+    }
+}

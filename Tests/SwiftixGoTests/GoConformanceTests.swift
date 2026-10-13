@@ -137,6 +137,34 @@ struct GoConformanceTests {
     @Test func severalDotImports() throws {
         try expectSameOutput(severalDotImportsSource, severalDotImportsExpected)
     }
+
+    @Test func runeLiterals() throws {
+        try expectSameOutput(runeLiteralsSource, runeLiteralsExpected)
+    }
+
+    @Test func functionValues() throws {
+        try expectSameOutput(functionValuesSource, functionValuesExpected)
+    }
+
+    @Test func capturedVariables() throws {
+        try expectSameOutput(capturedVariablesSource, capturedVariablesExpected)
+    }
+
+    @Test func functionValuesAtTheEdges() throws {
+        try expectSameOutput(functionValuesAtTheEdgesSource, functionValuesAtTheEdgesExpected)
+    }
+
+    @Test func methodExpressions() throws {
+        try expectSameOutput(methodExpressionsSource, methodExpressionsExpected)
+    }
+
+    @Test func functionsThatTakeAndGiveFunctions() throws {
+        try expectSameOutput(functionsThatTakeAndGiveFunctionsSource, functionsThatTakeAndGiveFunctionsExpected)
+    }
+
+    @Test func methodValuesOfInterfaces() throws {
+        try expectSameOutput(methodValuesOfInterfacesSource, methodValuesOfInterfacesExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -3458,5 +3486,798 @@ UP|abab
 true 7!
 own true
 *os.File true
+
+"""#
+
+private let runeLiteralsSource = #"""
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+const (
+	tab     = '\t'
+	newline = '\n'
+	quote   = '\''
+	slash   = '\\'
+	bell    = '\a'
+	hex     = '\x41'
+	octal   = '\101'
+	small   = 'é'
+	big     = '\U0001F600'
+)
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func isSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
+}
+
+func digits(text string) int {
+	n := 0
+	for i := 0; i < len(text); i++ {
+		if isDigit(text[i]) {
+			n = n*10 + int(text[i]-'0')
+		}
+	}
+	return n
+}
+
+func upper(text string) string {
+	out := make([]byte, 0, len(text))
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		out = append(out, c)
+	}
+	return string(out)
+}
+
+func main() {
+	fmt.Println('a', 'A', '0', ' ', tab, newline, quote, slash, bell, hex, octal, small, big)
+	fmt.Println('é', '世', '😀', '"', '{', '}', '/')
+	fmt.Println(digits("a12b3"), upper("go, lang!"), isSpace(' '), isSpace('x'))
+	fmt.Println(string('a'+1), 'z'-'a'+1, 'a' < 'b', "x"+string('y'))
+	fmt.Printf("%c%c%c %d %q %U\n", 'G', 'o', '!', 'x', 'x', 'x')
+	line := "key=value"
+	for i := 0; i < len(line); i++ {
+		if line[i] == '=' {
+			fmt.Println(line[:i], line[i+1:])
+		}
+	}
+	fmt.Println(strings.Count("a,b,c", string(',')), []byte{'h', 'i'}, string([]byte{'o', 'k'}))
+	var b byte = 'q'
+	codes := map[byte]string{'+': "plus", '-': "minus"}
+	fmt.Println(b, codes['+'], codes['-'], len(codes))
+}
+"""#
+
+private let runeLiteralsExpected = #"""
+97 65 48 32 9 10 39 92 7 65 65 233 128512
+233 19990 128512 34 123 125 47
+123 GO, LANG! true false
+b 26 true xy
+Go! 120 'x' U+0078
+key value
+2 [104 105] ok
+113 plus minus 2
+
+"""#
+
+private let functionValuesSource = #"""
+package main
+
+import "fmt"
+
+type op func(int, int) int
+
+type handler struct {
+	name string
+	run  func(string) string
+}
+
+func add(a, b int) int { return a + b }
+
+func apply(f func(int, int) int, a, b int) int { return f(a, b) }
+
+func counter() func() int {
+	n := 0
+	return func() int {
+		n++
+		return n
+	}
+}
+
+func each(values []int, visit func(int)) {
+	for _, v := range values {
+		visit(v)
+	}
+}
+
+func main() {
+	// A function is a value: passed, stored, called.
+	fmt.Println(apply(add, 1, 2))
+	var f op = add
+	g := func(a, b int) int { return a * b }
+	fmt.Println(f(3, 4), g(3, 4), apply(g, 5, 6))
+
+	// A literal captures the variables around it, not their values.
+	next := counter()
+	other := counter()
+	fmt.Println(next(), next(), next(), other())
+	total := 0
+	each([]int{1, 2, 3}, func(v int) { total += v })
+	fmt.Println(total)
+
+	// Called where it is written.
+	fmt.Println(func(x int) int { return x * x }(7))
+	func() {
+		total *= 2
+	}()
+	fmt.Println(total)
+
+	// In a struct, a slice, and a map.
+	h := handler{name: "up", run: func(s string) string { return s + "!" }}
+	steps := []func(int) int{
+		func(n int) int { return n + 1 },
+		func(n int) int { return n * 10 },
+	}
+	table := map[string]op{"add": add, "mul": g}
+	n := 1
+	for _, step := range steps {
+		n = step(n)
+	}
+	fmt.Println(h.run(h.name), n, table["add"](2, 3), table["mul"](2, 3), len(table))
+
+	// The zero value is nil, and nil is what a function compares with.
+	var none func()
+	fmt.Println(none == nil, f != nil, table["none"] == nil)
+}
+"""#
+
+private let functionValuesExpected = #"""
+3
+7 12 30
+1 2 3 1
+6
+49
+12
+up! 20 5 6 2
+true true true
+
+"""#
+
+private let capturedVariablesSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type point struct {
+	X, Y int
+}
+
+func (p point) Sum() int { return p.X + p.Y }
+
+func (p *point) Scale(by int) { p.X, p.Y = p.X*by, p.Y*by }
+
+type visitor func(string) error
+
+func (v visitor) twice(s string) error {
+	if err := v(s); err != nil {
+		return err
+	}
+	return v(s)
+}
+
+type middleware func(func(string) string) func(string) string
+
+func chain(h func(string) string, all ...middleware) func(string) string {
+	for i := len(all) - 1; i >= 0; i-- {
+		h = all[i](h)
+	}
+	return h
+}
+
+func divide(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil
+}
+
+func fib() func() int {
+	a, b := 0, 1
+	return func() int {
+		defer func() { a, b = b, a+b }()
+		return a
+	}
+}
+
+func split(text string) (func() (string, bool), int) {
+	parts := strings.Fields(text)
+	i := 0
+	return func() (string, bool) {
+		if i >= len(parts) {
+			return "", false
+		}
+		i++
+		return parts[i-1], true
+	}, len(parts)
+}
+
+func sum(prefix string, values ...int) string {
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	return fmt.Sprint(prefix, total)
+}
+
+func main() {
+	// Method values keep their receiver; a pointer method sees the variable.
+	p := point{X: 1, Y: 2}
+	sum1 := p.Sum
+	scale := p.Scale
+	p.X = 10
+	scale(3)
+	fmt.Println(sum1(), p.Sum(), p)
+
+	// Each iteration of a loop has its own variable for a literal to keep.
+	var printers []func() string
+	for i := 0; i < 3; i++ {
+		printers = append(printers, func() string { return fmt.Sprint("i=", i) })
+	}
+	for _, name := range []string{"a", "b"} {
+		printers = append(printers, func() string { return "name=" + name })
+	}
+	for _, print := range printers {
+		fmt.Print(print(), " ")
+	}
+	fmt.Println()
+
+	// A literal inside a literal reaches the variables of both.
+	depth := 0
+	outer := func(label string) func() string {
+		depth++
+		return func() string {
+			depth += 10
+			return fmt.Sprint(label, depth)
+		}
+	}
+	inner := outer("d")
+	fmt.Println(inner(), inner(), depth)
+
+	// A function that calls itself through its variable.
+	var fact func(int) int
+	fact = func(n int) int {
+		if n <= 1 {
+			return 1
+		}
+		return n * fact(n-1)
+	}
+	fmt.Println(fact(5))
+
+	// Named function types, their methods, and functions that take and
+	// give functions.
+	seen := []string{}
+	var v visitor = func(s string) error {
+		seen = append(seen, s)
+		if len(seen) > 3 {
+			return errors.New("too many")
+		}
+		return nil
+	}
+	fmt.Println(v.twice("x"), v.twice("y"), seen)
+	shout := func(next func(string) string) func(string) string {
+		return func(s string) string { return strings.ToUpper(next(s)) }
+	}
+	bracket := func(next func(string) string) func(string) string {
+		return func(s string) string { return "[" + next(s) + "]" }
+	}
+	h := chain(func(s string) string { return s + "!" }, shout, bracket)
+	fmt.Println(h("hi"))
+
+	// Deferred literals assign named results and locals.
+	q, err := divide(7, 2)
+	fmt.Println(q, err)
+	q, err = divide(1, 0)
+	fmt.Println(q, err)
+	next := fib()
+	fmt.Println(next(), next(), next(), next(), next(), next())
+
+	// Several results and variadic parameters through a value.
+	word, count := split("alpha beta gamma")
+	for {
+		w, ok := word()
+		if !ok {
+			break
+		}
+		fmt.Print(w, count, " ")
+	}
+	fmt.Println()
+	total := sum
+	fmt.Println(total("="), total("=", 1), total("=", 1, 2, 3), total("=", []int{4, 5}...))
+
+	// Goroutines run literals that share variables with their function.
+	results := make(chan int, 3)
+	done := make(chan bool)
+	base := 100
+	for i := 1; i <= 3; i++ {
+		go func() { results <- base + i }()
+	}
+	go func() {
+		got := 0
+		for j := 0; j < 3; j++ {
+			got += <-results
+		}
+		base = got
+		done <- true
+	}()
+	<-done
+	fmt.Println(base)
+
+	// A function in an interface keeps its type; a nil function panics
+	// when called.
+	var any1 interface{} = fact
+	if again, ok := any1.(func(int) int); ok {
+		fmt.Printf("%T %d\n", any1, again(4))
+	}
+	fmt.Printf("%T %T %T\n", v, h, split)
+	defer func() { fmt.Println("recovered:", recover()) }()
+	var none func(int)
+	none(1)
+}
+"""#
+
+private let capturedVariablesExpected = #"""
+3 36 {30 6}
+i=0 i=1 i=2 name=a name=b\#u{20}
+d11 d21 21
+120
+<nil> too many [x x y y]
+[HI!]
+3 <nil>
+0 recovered: runtime error: integer divide by zero
+0 1 1 2 3 5
+alpha3 beta3 gamma3\#u{20}
+=0 =1 =6 =9
+306
+func(int) int 24
+main.visitor func(string) string func(string) (func() (string, bool), int)
+recovered: runtime error: invalid memory address or nil pointer dereference
+
+"""#
+
+private let functionValuesAtTheEdgesSource = #"""
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+type counter struct {
+	n     int
+	label string
+}
+
+var registry = map[string]func(int) int{}
+
+var twice = func(n int) int { return n * 2 }
+
+var pipeline = []func(string) string{
+	strings2upper,
+	func(s string) string { return s + "?" },
+}
+
+func strings2upper(s string) string { return strings.ToUpper(s) }
+
+func init() {
+	registry["twice"] = twice
+	registry["neg"] = func(n int) int { return -n }
+}
+
+// A method's literal captures the receiver and the parameters.
+func (c *counter) adder(by int) func() int {
+	return func() int {
+		c.n += by
+		return c.n
+	}
+}
+
+func (c counter) describe() func(string) string {
+	return func(sep string) string { return c.label + sep + fmt.Sprint(c.n) }
+}
+
+func accumulate(values []int, f func(sum, v int) int) (total int) {
+	defer func() {
+		if total < 0 {
+			total = 0
+		}
+	}()
+	for _, v := range values {
+		total = f(total, v)
+	}
+	return total
+}
+
+func walk(depth int, visit func(int) bool) int {
+	if depth == 0 || !visit(depth) {
+		return depth
+	}
+	return walk(depth-1, visit)
+}
+
+func sortedKeys(m map[string]func(int) int) []string {
+	keys := []string{}
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func main() {
+	c := &counter{label: "c"}
+	add2, add5 := c.adder(2), c.adder(5)
+	fmt.Println(add2(), add5(), add2(), c.n, c.describe()("="))
+
+	for _, name := range sortedKeys(registry) {
+		fmt.Print(name, "=", registry[name](21), " ")
+	}
+	text := "go"
+	for _, step := range pipeline {
+		text = step(text)
+	}
+	fmt.Println(text)
+
+	fmt.Println(
+		accumulate([]int{1, 2, 3}, func(sum, v int) int { return sum + v }),
+		accumulate([]int{1, 2, 3}, func(sum, v int) int { return sum - v }))
+
+	// A parameter of a literal hides the variable of that name outside.
+	x := 1
+	shadow := func(x int) int { return x * 10 }
+	deeper := func() int {
+		x := x + 1
+		return x
+	}
+	fmt.Println(shadow(5), deeper(), x)
+
+	// Many literals made in a loop, each with its own variable.
+	sum := 0
+	var last func() int
+	for i := 0; i < 2000; i++ {
+		last = func() int { return i }
+		sum += last() % 7
+	}
+	fmt.Println(sum, last(), walk(50, func(d int) bool { return d > 10 }))
+
+	// A deferred call sees the variable as it is when it runs; its
+	// arguments as they were when it was deferred.
+	n := 1
+	defer fmt.Println("deferred argument:", n)
+	defer func() { fmt.Println("deferred variable:", n) }()
+	n = 2
+	funcs := map[bool]func() string{true: func() string { return "yes" }}
+	if f, ok := funcs[n == 2]; ok {
+		fmt.Println(f(), len(funcs), funcs[false] == nil)
+	}
+}
+"""#
+
+private let functionValuesAtTheEdgesExpected = #"""
+2 7 9 9 c=9
+neg=-21 twice=42 GO?
+6 0
+50 2 1
+5995 1999 10
+yes 1 true
+deferred variable: 2
+deferred argument: 1
+
+"""#
+
+private let methodExpressionsSource = #"""
+package main
+
+import "fmt"
+
+type counter struct{ n int }
+
+func (c counter) get() int           { return c.n }
+func (c counter) plus(a, b int) int  { return c.n + a + b }
+func (c *counter) inc()              { c.n++ }
+func (c *counter) add(by int) int    { c.n += by; return c.n }
+func (c counter) pair() (int, string) { return c.n, "n" }
+func (c counter) sum(xs ...int) int {
+	t := c.n
+	for _, x := range xs {
+		t += x
+	}
+	return t
+}
+
+type op func(int, int) int
+
+func (f op) twice(a int) int { return f(f(a, a), a) }
+
+func main() {
+	f := counter.get
+	g := (*counter).inc
+	h := (*counter).get
+	c := counter{n: 3}
+	g(&c)
+	g(&c)
+	fmt.Println(f(c), h(&c), counter.plus(c, 1, 2), (*counter).add(&c, 10), c.n)
+	n, s := counter.pair(c)
+	m, t := (*counter).pair(&c)
+	fmt.Println(n, s, m, t, counter.sum(c), counter.sum(c, 1, 2), (*counter).sum(&c, 1))
+	fmt.Printf("%T %T %T %T\n", f, g, h, counter.sum)
+	fns := []func(counter) int{counter.get, func(c counter) int { return -c.n }}
+	for _, fn := range fns {
+		fmt.Print(fn(c), " ")
+	}
+	fmt.Println(op.twice(func(a, b int) int { return a + b }, 2))
+	defer (*counter).inc(&c)
+	func() {
+		defer fmt.Println("deferred", counter.get(c))
+	}()
+}
+"""#
+
+private let methodExpressionsExpected = #"""
+5 5 8 15 15
+15 n 15 n 15 18 16
+func(main.counter) int func(*main.counter) func(*main.counter) int func(main.counter, ...int) int
+15 -15 6
+deferred 15
+
+"""#
+
+private let functionsThatTakeAndGiveFunctionsSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type point struct{ x, y int }
+
+type operations struct {
+	add func(int, int) int
+	neg func(int) int
+}
+
+func (p point) moved(dx int) func() point {
+	return func() point {
+		p.x += dx
+		return p
+	}
+}
+
+type middleware func(next func(string) string) func(string) string
+
+func chain(final func(string) string, layers ...middleware) func(string) string {
+	for i := len(layers) - 1; i >= 0; i-- {
+		final = layers[i](final)
+	}
+	return final
+}
+
+func tag(name string) middleware {
+	return func(next func(string) string) func(string) string {
+		return func(s string) string { return "<" + name + ">" + next(s) + "</" + name + ">" }
+	}
+}
+
+func maybe(f func() int) int {
+	if f != nil {
+		return f()
+	}
+	return -1
+}
+
+func retry(times int, attempt func(n int) error) (tries int, err error) {
+	for tries = 1; tries <= times; tries++ {
+		if err = attempt(tries); err == nil {
+			return tries, nil
+		}
+	}
+	return times, err
+}
+
+func main() {
+	// A captured struct is the variable, not a copy of it.
+	p := point{1, 2}
+	grow := func() { p.x *= 10 }
+	grow()
+	grow()
+	q := &p
+	q.y = 7
+	fmt.Println(p, func() int { return p.x + p.y }())
+
+	// A value receiver is the method's own copy, whatever a literal does to it.
+	step := p.moved(5)
+	fmt.Println(step(), step(), p)
+
+	// Deferred literals in a loop, each with the variable of its iteration.
+	func() {
+		for i := 0; i < 3; i++ {
+			defer func() { fmt.Print(i, " ") }()
+		}
+	}()
+	fmt.Println()
+
+	// Middleware: functions that take and give functions.
+	upper := func(s string) string { return strings.ToUpper(s) }
+	h := chain(upper, tag("a"), tag("b"))
+	fmt.Println(h("x"), chain(upper)("y"), maybe(nil), maybe(func() int { return 3 }))
+
+	// A literal made in a literal made in a loop.
+	var all []func() string
+	for _, name := range []string{"p", "q"} {
+		for n := 1; n <= 2; n++ {
+			all = append(all, func() string {
+				return func() string { return fmt.Sprint(name, n) }()
+			})
+		}
+	}
+	for _, f := range all {
+		fmt.Print(f(), " ")
+	}
+	fmt.Println()
+
+	// A callback that fails until it does not.
+	failures := 2
+	tries, err := retry(5, func(n int) error {
+		if n <= failures {
+			return errors.New("not yet")
+		}
+		return nil
+	})
+	fmt.Println(tries, err)
+	tries, err = retry(1, func(n int) error { return fmt.Errorf("attempt %d failed", n) })
+	fmt.Println(tries, err)
+
+	// The address of a captured variable is the variable's.
+	n := 1
+	addr := &n
+	bump := func() { n++ }
+	bump()
+	*addr += 10
+	bump()
+	fmt.Println(n, *addr)
+
+	// A struct of functions and a function in it that is nil.
+	ops := operations{add: func(a, b int) int { return a + b }}
+	fmt.Println(ops.add(1, 2), ops.neg == nil, ops.add != nil)
+}
+"""#
+
+private let functionsThatTakeAndGiveFunctionsExpected = #"""
+{100 7} 107
+{105 7} {110 7} {100 7}
+2 1 0\#u{20}
+<a><b>X</b></a> Y -1 3
+p1 p2 q1 q2\#u{20}
+3 <nil>
+1 attempt 1 failed
+13 13
+3 true true
+
+"""#
+
+private let methodValuesOfInterfacesSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+type shape interface {
+	area() int
+	scaled(by int) shape
+	describe(prefix string, parts ...string) (string, int)
+}
+
+type rect struct{ w, h int }
+
+func (r rect) area() int           { return r.w * r.h }
+func (r rect) scaled(by int) shape { return rect{r.w * by, r.h * by} }
+func (r rect) describe(prefix string, parts ...string) (string, int) {
+	return prefix + "rect" + strings.Join(parts, ""), len(parts)
+}
+
+type square struct{ side int }
+
+func (s *square) area() int           { return s.side * s.side }
+func (s *square) scaled(by int) shape { return &square{s.side * by} }
+func (s *square) describe(prefix string, parts ...string) (string, int) {
+	return prefix + "square", -len(parts)
+}
+
+type handler interface{ serve(string) string }
+
+type handlerFunc func(string) string
+
+func (f handlerFunc) serve(s string) string { return f(s) }
+
+type prefixer struct{ prefix string }
+
+func (p prefixer) serve(s string) string { return p.prefix + s }
+
+func total(areas ...func() int) int {
+	sum := 0
+	for _, area := range areas {
+		sum += area()
+	}
+	return sum
+}
+
+func main() {
+	var s shape = rect{2, 3}
+	area := s.area
+	scaled := s.scaled
+	s = &square{4}
+	other := s.area
+	// A method value keeps the value the interface held when it was taken.
+	fmt.Println(area(), other(), scaled(2).area(), total(area, other, s.scaled(2).area))
+
+	text, n := s.describe("a ", "x")
+	describe := scaled(3).describe
+	more, m := describe("b ", "!", "?")
+	fmt.Println(text, n, more, m)
+	fmt.Printf("%T %T %T\n", area, scaled, describe)
+
+	// The method of an interface is what adapts a value to a function.
+	var h handler = prefixer{"> "}
+	wrapped := handlerFunc(h.serve)
+	plain := []func(string) string{h.serve, wrapped.serve, strings2lower}
+	for _, f := range plain {
+		fmt.Print(f("Go"), "|")
+	}
+	fmt.Println()
+
+	var err error = errors.New("broken")
+	message := err.Error
+	err = fmt.Errorf("wrapped: %w", err)
+	fmt.Println(message(), err.Error(), len(message()))
+
+	defer func() { fmt.Println("recovered:", recover()) }()
+	var none shape
+	bad := none.area
+	fmt.Println("unreached", bad == nil)
+}
+
+func strings2lower(s string) string { return strings.ToLower(s) }
+"""#
+
+private let methodValuesOfInterfacesExpected = #"""
+6 16 24 86
+a square -1 b rect!? 2
+func() int func(int) main.shape func(string, ...string) (string, int)
+> Go|> Go|go|
+broken wrapped: broken 6
+recovered: runtime error: invalid memory address or nil pointer dereference
 
 """#

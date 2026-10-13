@@ -86,6 +86,18 @@ struct GoGofmtConformanceTests {
     @Test func fieldListsBlocksAndAliases() throws {
         try expectGofmt(fieldListsBlocksAndAliasesSource, fieldListsBlocksAndAliasesExpected)
     }
+
+    @Test func functionTypesAndLiterals() throws {
+        try expectGofmt(functionTypesAndLiteralsSource, functionTypesAndLiteralsExpected)
+    }
+
+    @Test func functionLiteralsInsideLiterals() throws {
+        try expectGofmt(functionLiteralsInsideLiteralsSource, functionLiteralsInsideLiteralsExpected)
+    }
+
+    @Test func runeLiterals() throws {
+        try expectGofmt(runeLiteralsSource, runeLiteralsExpected)
+    }
 }
 
 private let columnsOfFieldsAndCommentsSource = #"""
@@ -2007,6 +2019,364 @@ func main() {
 	}
 	var s struct{ A, B int }
 	fmt.Println(s, point{X: 1, Y: 2}, coord{}, bytes("x"))
+}
+
+"""#
+
+private let functionTypesAndLiteralsSource = #"""
+package main
+
+import "fmt"
+
+type op func(int,int) int
+type handler func(name string,payload int)(n int,err error)
+type (
+	visit func(string)
+	longerName func() func() int
+	filter = func(string) bool
+)
+
+type bus struct {
+	handlers []handler
+	filter func(string) bool
+	log func(string) // logs
+	table map[string]func(int) int
+	done chan func()
+}
+
+var hook func(string) string
+var compose = func(fs ...func(int) int) func(int) int { return func(n int) int { for _, f := range fs { n = f(n) }; return n } }
+
+func apply(f func(int,int) int, a,b int) int { return f(a,b) }
+
+func counter() func() int {
+	n := 0
+	return func() int {
+		n++
+		return n
+	}
+}
+
+func main() {
+	g := func(a,b int) int { return a*b }
+	h := func(  ) {}
+	fmt.Println(apply(g,1,2), func(x int) int { return x*x }(7), 'a', '\n', '\'', 'é')
+	func() {
+		fmt.Println("now")
+	}()
+	defer func() { recover() }()
+	go func(n int) {
+		fmt.Println(n)
+	}(1)
+	steps := []func(int) int{
+		func(n int) int { return n+1 },
+		func(n int) int {
+			return n*10
+		},
+	}
+	table := map[string]op{"add": func(a, b int) int { return a + b }, "mul": g}
+	each([]int{1,2}, func(v int) {
+		fmt.Println(v)
+	})
+	each([]int{1,2}, func(v int) { fmt.Println(v) })
+	var none func(int,string) (bool,error)
+	b := bus{log: func(s string) { fmt.Println(s) }, filter: nil}
+	if c := counter(); c() > 0 && c() < 'z' {
+		fmt.Println(steps, table, none == nil, b, h)
+	}
+	switch r := 'x'; r {
+	case 'a', 'b':
+	case ' ', '\t':
+	}
+}
+
+func each(values []int, visit func(int)) {
+	for _, v := range values { visit(v) }
+}
+
+"""#
+
+private let functionTypesAndLiteralsExpected = #"""
+package main
+
+import "fmt"
+
+type op func(int, int) int
+type handler func(name string, payload int) (n int, err error)
+type (
+	visit      func(string)
+	longerName func() func() int
+	filter     = func(string) bool
+)
+
+type bus struct {
+	handlers []handler
+	filter   func(string) bool
+	log      func(string) // logs
+	table    map[string]func(int) int
+	done     chan func()
+}
+
+var hook func(string) string
+var compose = func(fs ...func(int) int) func(int) int {
+	return func(n int) int {
+		for _, f := range fs {
+			n = f(n)
+		}
+		return n
+	}
+}
+
+func apply(f func(int, int) int, a, b int) int { return f(a, b) }
+
+func counter() func() int {
+	n := 0
+	return func() int {
+		n++
+		return n
+	}
+}
+
+func main() {
+	g := func(a, b int) int { return a * b }
+	h := func() {}
+	fmt.Println(apply(g, 1, 2), func(x int) int { return x * x }(7), 'a', '\n', '\'', 'é')
+	func() {
+		fmt.Println("now")
+	}()
+	defer func() { recover() }()
+	go func(n int) {
+		fmt.Println(n)
+	}(1)
+	steps := []func(int) int{
+		func(n int) int { return n + 1 },
+		func(n int) int {
+			return n * 10
+		},
+	}
+	table := map[string]op{"add": func(a, b int) int { return a + b }, "mul": g}
+	each([]int{1, 2}, func(v int) {
+		fmt.Println(v)
+	})
+	each([]int{1, 2}, func(v int) { fmt.Println(v) })
+	var none func(int, string) (bool, error)
+	b := bus{log: func(s string) { fmt.Println(s) }, filter: nil}
+	if c := counter(); c() > 0 && c() < 'z' {
+		fmt.Println(steps, table, none == nil, b, h)
+	}
+	switch r := 'x'; r {
+	case 'a', 'b':
+	case ' ', '\t':
+	}
+}
+
+func each(values []int, visit func(int)) {
+	for _, v := range values {
+		visit(v)
+	}
+}
+
+"""#
+
+private let functionLiteralsInsideLiteralsSource = #"""
+package main
+
+import "fmt"
+
+type server struct {
+	name string
+	onStart func()
+	handlers map[string]func(req string) (string, error)
+	middleware []func(next func(string) string) func(string) string // wrap
+	x int
+}
+
+type callback func(
+	name string,
+	value int,
+) error
+
+func (s *server) handle(path string, h func(string) (string, error)) *server {
+	s.handlers[path] = h
+	return s
+}
+
+func run(v interface{}, fns ...func()) (func(), bool) {
+	if f, ok := v.(func()); ok {
+		return f, true
+	}
+	for _, f := range []func(){func() {}, nil} {
+		if f != nil { f() }
+	}
+	return func() {}, len(fns) > 0
+}
+
+func main() {
+	s := &server{handlers: map[string]func(string) (string, error){}}
+	s.handle("/a", func(req string) (string, error) {
+		return req + "!", nil
+	}).handle("/b", func(req string) (string, error) { return "", fmt.Errorf("no %s", req) })
+	done := make(chan func() int, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Println(r)
+			}
+		}()
+		done <- func() int { return 1 }
+	}()
+	total := (<-done)() + func() int {
+		return 2
+	}()
+	var cb callback = func(name string, value int) error {
+		total += value
+		return nil
+	}
+	fmt.Println(total, cb("x", 3) == nil, s.onStart == nil,
+		func(a, b int) int { return a + b }(1, 2))
+	var (
+		first func(int) int = func(n int) int { return n }
+		second = map[int]func(){'a': nil, 'b': func() {}}
+	)
+	fmt.Println(first(1), len(second))
+}
+
+"""#
+
+private let functionLiteralsInsideLiteralsExpected = #"""
+package main
+
+import "fmt"
+
+type server struct {
+	name       string
+	onStart    func()
+	handlers   map[string]func(req string) (string, error)
+	middleware []func(next func(string) string) func(string) string // wrap
+	x          int
+}
+
+type callback func(
+	name string,
+	value int,
+) error
+
+func (s *server) handle(path string, h func(string) (string, error)) *server {
+	s.handlers[path] = h
+	return s
+}
+
+func run(v interface{}, fns ...func()) (func(), bool) {
+	if f, ok := v.(func()); ok {
+		return f, true
+	}
+	for _, f := range []func(){func() {}, nil} {
+		if f != nil {
+			f()
+		}
+	}
+	return func() {}, len(fns) > 0
+}
+
+func main() {
+	s := &server{handlers: map[string]func(string) (string, error){}}
+	s.handle("/a", func(req string) (string, error) {
+		return req + "!", nil
+	}).handle("/b", func(req string) (string, error) { return "", fmt.Errorf("no %s", req) })
+	done := make(chan func() int, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Println(r)
+			}
+		}()
+		done <- func() int { return 1 }
+	}()
+	total := (<-done)() + func() int {
+		return 2
+	}()
+	var cb callback = func(name string, value int) error {
+		total += value
+		return nil
+	}
+	fmt.Println(total, cb("x", 3) == nil, s.onStart == nil,
+		func(a, b int) int { return a + b }(1, 2))
+	var (
+		first  func(int) int = func(n int) int { return n }
+		second               = map[int]func(){'a': nil, 'b': func() {}}
+	)
+	fmt.Println(first(1), len(second))
+}
+
+"""#
+
+private let runeLiteralsSource = #"""
+package main
+
+import "fmt"
+
+const (
+	tab = '\t'
+	quote='\''
+	brace  =  '{'
+)
+
+func classify(c byte)string{
+	switch c{
+	case ' ','\t','\n':
+		return "space"
+	case '"','\'','`':
+		return "quote"
+	case '{','}','(',')':return "bracket"
+	}
+	if c>='0'&&c<='9'{return "digit"}
+	return string(c-'a'+'A')
+}
+
+func main(){
+	x:='a'+1
+	table:=map[byte]string{'+':"plus",'-':"minus",'/':"slash" }
+	bytes:=[]byte{'h','i','\\','\x41','\101'}
+	fmt.Println(x,'世','\u00e9','\U0001F600',classify('{'),table['+'],len(bytes),tab,quote,brace)
+	if bytes[0]=='h'{fmt.Println(classify(bytes[1]),'}'-'{')}
+}
+
+"""#
+
+private let runeLiteralsExpected = #"""
+package main
+
+import "fmt"
+
+const (
+	tab   = '\t'
+	quote = '\''
+	brace = '{'
+)
+
+func classify(c byte) string {
+	switch c {
+	case ' ', '\t', '\n':
+		return "space"
+	case '"', '\'', '`':
+		return "quote"
+	case '{', '}', '(', ')':
+		return "bracket"
+	}
+	if c >= '0' && c <= '9' {
+		return "digit"
+	}
+	return string(c - 'a' + 'A')
+}
+
+func main() {
+	x := 'a' + 1
+	table := map[byte]string{'+': "plus", '-': "minus", '/': "slash"}
+	bytes := []byte{'h', 'i', '\\', '\x41', '\101'}
+	fmt.Println(x, '世', '\u00e9', '\U0001F600', classify('{'), table['+'], len(bytes), tab, quote, brace)
+	if bytes[0] == 'h' {
+		fmt.Println(classify(bytes[1]), '}'-'{')
+	}
 }
 
 """#

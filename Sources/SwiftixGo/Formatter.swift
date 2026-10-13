@@ -21,7 +21,20 @@ public enum GoFormatter {
                     ? token.withLeadingNewlines(carriedNewlines) : token)
             carriedNewlines = 0
         }
-        var printer = FormatPrinter(tokens: sortingImports(tokens), spacing: spacing)
+        // Where a `func` begins a function literal: any other that is not a
+        // declaration is a type, and no body follows it.
+        var literals: Set<Int> = []
+        func note(_ literal: GoExpression) { literals.insert(literal.position.offset) }
+        for function in parsed.file.functions {
+            GoFunctionLiterals.forEach(in: function.body, note)
+        }
+        for declaration in parsed.file.globalDeclarations {
+            if let expression = declaration.expression {
+                GoFunctionLiterals.forEach(in: expression, note)
+            }
+        }
+        var printer = FormatPrinter(
+            tokens: sortingImports(tokens), spacing: spacing, functionLiterals: literals)
         return printer.render()
     }
 
@@ -171,7 +184,7 @@ private struct FormatScanner {
                 tokens.append(scanWord(leadingNewlines: newlines))
             } else if isDigit(byte) {
                 tokens.append(scanInteger(leadingNewlines: newlines))
-            } else if byte == 0x22 {
+            } else if byte == 0x22 || byte == 0x27 {
                 tokens.append(try scanString(leadingNewlines: newlines))
             } else {
                 tokens.append(scanSymbol(leadingNewlines: newlines))
@@ -230,11 +243,13 @@ private struct FormatScanner {
         return token(.literal, from: start, leadingNewlines: leadingNewlines)
     }
 
+    /// A string or a rune literal, kept as the source has it.
     mutating func scanString(leadingNewlines: Int) throws -> FormatToken {
         let start = index
+        let quote = bytes[index]
         index += 1
         while index < bytes.count {
-            if bytes[index] == 0x22 {
+            if bytes[index] == quote {
                 index += 1
                 return token(.literal, from: start, leadingNewlines: leadingNewlines)
             }
@@ -467,6 +482,8 @@ private struct FormatPrinter {
     let tokens: [FormatToken]
     /// Which operators and slice colons Go's printer spaces differently.
     let spacing: GoOperatorSpacing
+    /// The offsets of the `func` keywords that begin function literals.
+    let functionLiterals: Set<Int>
     var lines: [FormatLine] = []
     /// The cells of the line being written, and the text after the last one.
     var cells: [String] = []
@@ -525,6 +542,17 @@ private struct FormatPrinter {
     var forHeader = false
     var pendingIf = false
     var pendingFunction = false
+    /// Whether the `func` being printed is a function type, `func(int) int`,
+    /// which no body follows: a `{` after it opens a literal of a type
+    /// that ends in it, `[]func(){a, b}`.
+    var pendingFunctionIsType = false
+    /// The parenthesis depth at which that type is written.
+    var functionTypeDepth = 0
+    /// For each open parenthesis, whether it holds the parameters of a
+    /// `func` that has no name: a literal's or a type's.
+    var parameterLists: [Bool] = []
+    /// Whether the token just printed is the `)` of such a list.
+    var closesParameterList = false
     var pendingVariableDeclaration = false
     /// From `type` to the end of its line or the `{` of a body: what
     /// follows the name is a type.
@@ -810,6 +838,11 @@ private struct FormatPrinter {
     mutating func endStatement() {
         continuations.removeAll { $0.braceDepth >= braceDepth }
         if isAtGroupLevel { groupAwaitsSpecification = true }
+        // A function type has no body to end it.
+        if pendingFunctionIsType {
+            pendingFunction = false
+            pendingFunctionIsType = false
+        }
     }
 
     // MARK: Declaration groups
@@ -1188,6 +1221,24 @@ private struct FormatPrinter {
             beginTopLevelDeclaration(token.text)
         }
 
+        // A function type ends where what it stands in goes on: at the
+        // parenthesis that closes around it, or at a separator beside it.
+        if pendingFunction, pendingFunctionIsType, parenthesisDepth <= functionTypeDepth,
+            [")", ",", ";", "=", ":=", "}", ":"].contains(token.text)
+        {
+            pendingFunction = false
+            pendingFunctionIsType = false
+        }
+        // Whether the `)` before this token closed the parameters of a
+        // `func`: a `(` that follows opens its results.
+        let closedParameterList = closesParameterList
+        closesParameterList = false
+        let followsFunctionType = pendingFunction && pendingFunctionIsType
+        if followsFunctionType, token.text == "{" {
+            // The type was the last part of a literal's type.
+            pendingFunction = false
+            pendingFunctionIsType = false
+        }
         let followsTypeBracket = afterTypeBracket
         afterTypeBracket = false
         let followsLiteralType = spellsLiteralType && !pendingFunction
@@ -1216,10 +1267,13 @@ private struct FormatPrinter {
             trimTrailingWhitespace()
             append(token.text)
         case "func":
-            if !pendingFunction {
+            let isLiteral = functionLiterals.contains(token.offset)
+            if !pendingFunction || (isLiteral && pendingFunctionIsType) {
                 if shouldSeparateWord(kind: token.kind) { ensureSpace() }
                 functionStart = Self.width(current)
                 lineIsFunctionDeclaration = lineIsEmpty && braceDepth == 0
+                pendingFunctionIsType = !isLiteral && !lineIsFunctionDeclaration
+                functionTypeDepth = parenthesisDepth
             }
             appendWord(token.text, kind: token.kind)
             pendingFunction = true
@@ -1258,13 +1312,17 @@ private struct FormatPrinter {
                 // and a function type have none: `func() {`.
                 ensureSpace()
             }
-            // The result list of a function signature: `func f() (int, error)`.
-            if previous?.text == ")", pendingFunction || typeBodyDepths.contains(braceDepth),
-                parenthesisDepth == 0
+            // The result list of a function signature: `func f() (int, error)`,
+            // also of a function type or literal written inside parentheses.
+            if previous?.text == ")",
+                closedParameterList
+                    || ((pendingFunction || typeBodyDepths.contains(braceDepth))
+                        && parenthesisDepth == 0)
             {
                 ensureSpace()
             }
             append("(")
+            parameterLists.append(previous?.text == "func")
             parenthesisDepth += 1
             if !spacing.groupingParentheses.contains(token.offset) {
                 // The arguments of a call, or the parameters of a function.
@@ -1278,6 +1336,7 @@ private struct FormatPrinter {
                 continuations.removeLast()
             }
             parenthesisDepth -= 1
+            closesParameterList = parameterLists.popLast() ?? false
         case "[":
             // `[]` is always a slice type, and so is a bracket where an
             // operand begins or that follows `map` or another type bracket.
@@ -1321,9 +1380,10 @@ private struct FormatPrinter {
                 break
             }
             let isLiteral =
-                followsLiteralType || followsEmptyType
-                // Inside a literal every brace is an element's.
-                || (compositeDepths.contains(braceDepth)
+                followsLiteralType || followsEmptyType || followsFunctionType
+                // Inside a literal every brace is an element's, but the
+                // body of a function literal that is one.
+                || (compositeDepths.contains(braceDepth) && !pendingFunction
                     && (previous?.kind == .word || ["{", ",", ":", "]"].contains(previous?.text)))
                 // Inside parentheses a type name before `{` cannot be the
                 // operand before a block, in a statement header either.

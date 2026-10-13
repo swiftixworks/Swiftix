@@ -53,6 +53,10 @@ private struct Scanner {
                 try scanString()
                 continue
             }
+            if byte == 0x27 {
+                try scanRune()
+                continue
+            }
             try scanPunctuation()
         }
 
@@ -189,54 +193,16 @@ private struct Scanner {
                 return
             }
             if byte == 0x0A {
-                throw GoDiagnostic(position: start, message: "newline in string")
+                throw GoDiagnostic(position: position(), message: "newline in string")
             }
             if byte == 0x5C {
                 advance()
-                guard index < bytes.count else {
-                    throw GoDiagnostic(position: start, message: "string not terminated")
-                }
-                let escaped = bytes[index]
-                switch escaped {
-                case 0x61: value.append(0x07)
-                case 0x62: value.append(0x08)
-                case 0x66: value.append(0x0C)
-                case 0x6E: value.append(0x0A)
-                case 0x72: value.append(0x0D)
-                case 0x74: value.append(0x09)
-                case 0x76: value.append(0x0B)
-                case 0x22: value.append(0x22)
-                case 0x5C: value.append(0x5C)
-                case 0x78:
-                    value.append(UInt8(try scanEscapeDigits(count: 2, radix: 16)))
-                    continue
-                case 0x30...0x37:
-                    let octal = try scanEscapeDigits(count: 3, radix: 8, skipIntroducer: false)
-                    guard octal <= 0xFF else {
-                        throw GoDiagnostic(
-                            position: position(),
-                            message: "octal escape value > 255")
-                    }
-                    value.append(UInt8(octal))
-                    continue
-                case 0x75, 0x55:
-                    let escapePosition = position()
-                    let scalarValue = try scanEscapeDigits(
-                        count: escaped == 0x75 ? 4 : 8,
-                        radix: 16)
-                    guard let scalar = Unicode.Scalar(scalarValue) else {
-                        throw GoDiagnostic(
-                            position: escapePosition,
-                            message: "escape is invalid Unicode code point")
-                    }
+                let escape = try scanEscape(quote: 0x22, start: start, unterminated: "string not terminated")
+                if escape.isByte {
+                    value.append(UInt8(escape.value))
+                } else if let scalar = Unicode.Scalar(escape.value) {
                     value.append(contentsOf: Array(String(Character(scalar)).utf8))
-                    continue
-                default:
-                    throw GoDiagnostic(
-                        position: position(),
-                        message: "unknown escape sequence")
                 }
-                advance()
                 continue
             }
             value.append(byte)
@@ -245,29 +211,128 @@ private struct Scanner {
         throw GoDiagnostic(position: start, message: "string not terminated")
     }
 
-    /// Consume the fixed-width digits of a `\x`, `\u`, `\U`, or octal escape.
-    /// The index starts at the escape letter (or the first octal digit when
-    /// `skipIntroducer` is false) and ends after the last digit.
-    mutating func scanEscapeDigits(
-        count: Int,
-        radix: UInt32,
-        skipIntroducer: Bool = true
-    ) throws -> UInt32 {
-        if skipIntroducer { advance() }
-        var result: UInt32 = 0
+    /// A rune literal, `'a'` or `'\n'`: the code point it names, as the
+    /// integer constant it is. The token is an integer, so everything after
+    /// the lexer sees a number where the source has a character.
+    ///
+    /// The errors are those of Go's scanner, each where it reports it: one
+    /// about what is between the quotes at the character it is about, one
+    /// about the whole literal where the literal starts.
+    mutating func scanRune() throws {
+        let start = position()
+        advance()
+        var values: [UInt32] = []
+        while true {
+            guard index < bytes.count else {
+                throw GoDiagnostic(position: start, message: "rune literal not terminated")
+            }
+            let byte = bytes[index]
+            if byte == 0x27 { break }
+            if byte == 0x0A {
+                throw GoDiagnostic(position: position(), message: "newline in rune literal")
+            }
+            if byte == 0x5C {
+                advance()
+                values.append(
+                    try scanEscape(quote: 0x27, start: start, unterminated: "rune literal not terminated")
+                        .value)
+                continue
+            }
+            // One code point of the source, which is UTF-8.
+            guard let scalar = scalar(at: index) else {
+                throw GoDiagnostic(position: position(), message: "invalid UTF-8 encoding")
+            }
+            values.append(scalar.value)
+            for _ in 0..<UTF8.width(scalar) { advance() }
+        }
+        guard let value = values.first else {
+            throw GoDiagnostic(position: position(), message: "empty rune literal or unescaped '")
+        }
+        guard values.count == 1 else {
+            throw GoDiagnostic(position: start, message: "more than one character in rune literal")
+        }
+        advance()
+        tokens.append(GoToken(kind: .integer(Int64(value)), position: start))
+    }
+
+    /// The code point the UTF-8 at `offset` encodes, or nil when it is none.
+    func scalar(at offset: Int) -> Unicode.Scalar? {
+        var length = 1
+        while offset + length < bytes.count, bytes[offset + length] & 0xC0 == 0x80 { length += 1 }
+        let encoded = bytes[offset..<(offset + length)]
+        let text = String(decoding: encoded, as: UTF8.self)
+        guard text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first,
+            text.utf8.elementsEqual(encoded)
+        else { return nil }
+        return scalar
+    }
+
+    /// What follows a backslash in a literal that `quote` ends: the escape
+    /// of one character, of a byte (`\x41`, `\101`), or of a code point
+    /// (`é`, `\U0001F600`). The index starts after the backslash and
+    /// ends after the escape; the messages are those of Go's scanner.
+    mutating func scanEscape(
+        quote: UInt8, start: GoSourcePosition, unterminated: String
+    ) throws -> (value: UInt32, isByte: Bool) {
+        guard index < bytes.count else { throw GoDiagnostic(position: start, message: unterminated) }
+        let count: Int
+        let radix: UInt32
+        switch bytes[index] {
+        case 0x61: advance(); return (0x07, false)
+        case 0x62: advance(); return (0x08, false)
+        case 0x66: advance(); return (0x0C, false)
+        case 0x6E: advance(); return (0x0A, false)
+        case 0x72: advance(); return (0x0D, false)
+        case 0x74: advance(); return (0x09, false)
+        case 0x76: advance(); return (0x0B, false)
+        case 0x5C: advance(); return (0x5C, false)
+        case quote: advance(); return (UInt32(quote), false)
+        case 0x30...0x37: (count, radix) = (3, 8)
+        case 0x78: advance(); (count, radix) = (2, 16)
+        case 0x75: advance(); (count, radix) = (4, 16)
+        case 0x55: advance(); (count, radix) = (8, 16)
+        default: throw GoDiagnostic(position: position(), message: "unknown escape")
+        }
+        var value: UInt32 = 0
         for _ in 0..<count {
-            guard index < bytes.count,
-                let digit = escapeDigitValue(bytes[index]),
-                digit < radix
-            else {
+            guard index < bytes.count else { throw GoDiagnostic(position: start, message: unterminated) }
+            guard let digit = escapeDigitValue(bytes[index]), digit < radix else {
                 throw GoDiagnostic(
                     position: position(),
-                    message: "invalid character in escape sequence")
+                    message: "invalid character \(quotedCharacter(at: index)) in "
+                        + "\(radix == 8 ? "octal" : "hexadecimal") escape")
             }
-            result = result * radix + digit
+            value = value * radix + digit
             advance()
         }
-        return result
+        if count <= 3 {
+            guard value <= 0xFF else {
+                throw GoDiagnostic(position: position(), message: "octal escape value \(value) > 255")
+            }
+            return (value, true)
+        }
+        guard Unicode.Scalar(value) != nil else {
+            let digits = String(value, radix: 16, uppercase: true)
+            throw GoDiagnostic(
+                position: position(),
+                message: "escape is invalid Unicode code point U+"
+                    + String(repeating: "0", count: max(0, 4 - digits.count)) + digits)
+        }
+        return (value, false)
+    }
+
+    /// The character at `offset` the way Go's `%q` writes a rune.
+    func quotedCharacter(at offset: Int) -> String {
+        switch bytes[offset] {
+        case 0x27: return #"'\''"#
+        case 0x5C: return #"'\\'"#
+        case 0x0A: return #"'\n'"#
+        case 0x0D: return #"'\r'"#
+        case 0x09: return #"'\t'"#
+        default:
+            guard let scalar = scalar(at: offset) else { return "'\u{FFFD}'" }
+            return "'\(Character(scalar))'"
+        }
     }
 
     func escapeDigitValue(_ byte: UInt8) -> UInt32? {
@@ -384,10 +449,6 @@ private struct Scanner {
             kind = .identifier("^=")
             advance()
         case 0x5E: kind = .identifier(GoBitwiseOperator.xor.spelling)
-        case 0x27:
-            throw GoDiagnostic(
-                position: start,
-                message: "rune literals are not supported; use the integer code point")
         case 0x3D: kind = .assign
         case 0x21: kind = .bang
         case 0x3C: kind = .less

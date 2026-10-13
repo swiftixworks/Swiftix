@@ -115,9 +115,13 @@ struct GoTypeEncoder {
             return definitions[name] == nil ? name : goName(name)
         case .pointer(let pointee): return "*" + goTypeName(pointee)
         case .slice(let element): return "[]" + goTypeName(element)
-        case .array(let length, let element): return "[\(length)]" + goTypeName(element)
+        case .array(let length, let element):
+            // The marker type of a variadic parameter.
+            return (length < 0 ? "..." : "[\(length)]") + goTypeName(element)
         case .map(let key, let value):
             return "map[" + goTypeName(key) + "]" + goTypeName(value)
+        case .function(let parameters, let results):
+            return "func" + signature(parameters: parameters, results: results)
         case .interface(let methods):
             if methods.isEmpty { return "interface {}" }
             if methods == [GoInterfaceMethod(name: "Error", results: [.string])] { return "error" }

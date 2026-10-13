@@ -33,6 +33,12 @@ struct GoAddressedVariables: Equatable, Sendable {
         visit(body)
     }
 
+    /// A function literal of the body captures the variables `names`: it
+    /// holds a pointer to each, as `&x` would give.
+    mutating func capture(_ names: Set<String>) {
+        addressed.formUnion(names)
+    }
+
     /// The variable a field or element path starts at: `x` of `x.f[i].g`.
     static func root(of expression: GoExpression) -> String? {
         switch expression {

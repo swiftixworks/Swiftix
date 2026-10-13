@@ -179,9 +179,6 @@ struct GoByteTypeTests: GoTestHarness {
         #expect(
             goMainDiagnostic("fmt.Println(1)", declarations: "type byte int")
                 == "cannot redeclare predeclared type byte")
-        #expect(
-            goMainDiagnostic("fmt.Println('a')")
-                == "rune literals are not supported; use the integer code point")
         // A user declaration still takes the name.
         #expect(goMainDiagnostic("var x int64 = 3\nfmt.Println(x)", declarations: "type int64 int") == nil)
     }

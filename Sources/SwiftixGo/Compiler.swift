@@ -95,7 +95,8 @@ public enum GoCompiler {
             throw GoDiagnostic(position: position, message: "go run requires package main")
         }
         var functions = files.flatMap(\.functions)
-        functions.append(contentsOf: runtimeLiteralFunctions(in: functions))
+        functions.append(
+            contentsOf: runtimeLiteralFunctions(in: functions, captures: package.literalCaptures))
         guard functions.contains(where: { $0.name == "main" }) else {
             let position = GoSourcePosition(path: fallbackPath, offset: 0, line: 1, column: 1)
             throw GoDiagnostic(position: position, message: "function main is undeclared in the main package")
@@ -174,7 +175,8 @@ public enum GoCompiler {
                 methodInfos: methodInfos,
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
-                functionSymbolNames: [:])
+                functionSymbolNames: [:],
+                literalCaptures: package.literalCaptures)
             let lowered = try lowerer.lower(function, compiledName: name)
             nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
             return lowered
@@ -198,7 +200,8 @@ public enum GoCompiler {
                     methodInfos: methodInfos,
                     typeDefinitions: package.typeDefinitions,
                     globalInfos: globalInfos,
-                    functionSymbolNames: [:])
+                    functionSymbolNames: [:],
+                literalCaptures: package.literalCaptures)
                 globalInitializers.append(
                     try lowerer.lowerGlobals(
                         try orderedGlobals(
@@ -207,6 +210,12 @@ public enum GoCompiler {
                             globalTypes: package.globalTypes,
                             typeDefinitions: package.typeDefinitions),
                         name: unit.initializerName))
+                // A function literal among the initializers is a function too.
+                for wrapper in lowerer.nativeWrappers.values.sorted(by: { $0.name < $1.name })
+                where nativeWrappers[wrapper.name] == nil {
+                    nativeWrappers[wrapper.name] = wrapper
+                    loweredFunctions.append(wrapper)
+                }
                 initializers.append(unit.initializerName)
             }
             let unitFunctionCount = unit.files.reduce(0) { $0 + $1.functions.count }
@@ -276,7 +285,8 @@ public enum GoCompiler {
             throw GoDiagnostic(position: position, message: "go run requires package main")
         }
         var functions = files.flatMap(\.functions)
-        functions.append(contentsOf: runtimeLiteralFunctions(in: functions))
+        functions.append(
+            contentsOf: runtimeLiteralFunctions(in: functions, captures: package.literalCaptures))
         guard functions.contains(where: { $0.name == "main" }) else {
             let position = GoSourcePosition(
                 path: sources.first?.path ?? "<input>", offset: 0, line: 1, column: 1)
@@ -375,7 +385,8 @@ public enum GoCompiler {
                 methodInfos: methodInfos,
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
-                functionSymbolNames: [:])
+                functionSymbolNames: [:],
+                literalCaptures: package.literalCaptures)
             let lowered = try lowerer.lower(function, compiledName: name)
             nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
             return lowered
@@ -391,7 +402,8 @@ public enum GoCompiler {
                 methodInfos: methodInfos,
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
-                functionSymbolNames: [:])
+                functionSymbolNames: [:],
+                literalCaptures: package.literalCaptures)
             loweredFunctions.insert(
                 try lowerer.lowerGlobals(
                     try orderedGlobals(
@@ -401,6 +413,12 @@ public enum GoCompiler {
                         typeDefinitions: package.typeDefinitions),
                     name: "$package.init"),
                 at: 0)
+            // A function literal among the initializers is a function too.
+            for wrapper in lowerer.nativeWrappers.values.sorted(by: { $0.name < $1.name })
+            where nativeWrappers[wrapper.name] == nil {
+                nativeWrappers[wrapper.name] = wrapper
+                loweredFunctions.append(wrapper)
+            }
             initializers.append("$package.init")
         }
         initializers.append(
@@ -484,7 +502,8 @@ public enum GoCompiler {
             files, availablePackages: availablePackageExports)
         let pkgName = package.name
         var functions = files.flatMap(\.functions)
-        functions.append(contentsOf: runtimeLiteralFunctions(in: functions))
+        functions.append(
+            contentsOf: runtimeLiteralFunctions(in: functions, captures: package.literalCaptures))
         let globals = files.flatMap(\.globalDeclarations)
 
         let globalInfos = Dictionary(
@@ -553,7 +572,8 @@ public enum GoCompiler {
                 methodInfos: methodInfos,
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
-                functionSymbolNames: functionSymbolNames)
+                functionSymbolNames: functionSymbolNames,
+                literalCaptures: package.literalCaptures)
             lowerer.wrapperNamespace = pkgName
             let lowered = try lowerer.lower(function, compiledName: name)
             nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
@@ -571,13 +591,20 @@ public enum GoCompiler {
                 methodInfos: methodInfos,
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
-                functionSymbolNames: functionSymbolNames)
+                functionSymbolNames: functionSymbolNames,
+                literalCaptures: package.literalCaptures)
             let initName = "$\(pkgName).init"
             loweredFunctions.insert(
                 try lowerer.lowerGlobals(
                     try orderedGlobals(globals, functions: functions, globalTypes: package.globalTypes, typeDefinitions: package.typeDefinitions),
                     name: initName),
                 at: 0)
+            // A function literal among the initializers is a function too.
+            for wrapper in lowerer.nativeWrappers.values.sorted(by: { $0.name < $1.name })
+            where nativeWrappers[wrapper.name] == nil {
+                nativeWrappers[wrapper.name] = wrapper
+                loweredFunctions.append(wrapper)
+            }
             pkgInitializers.append(initName)
         }
         pkgInitializers.append(
@@ -627,6 +654,14 @@ private struct MethodInfo {
     var returnCount: Int { resultTypes.count }
 }
 
+/// A function literal whose body is yet to be lowered: the function it
+/// becomes, and the variables it captures with their types.
+private struct PendingLiteral {
+    let declaration: GoFunctionDeclaration
+    let symbol: String
+    let captures: [(name: String, type: GoType)]
+}
+
 private struct LoweredBinding {
     let register: Int
     let type: GoType
@@ -665,6 +700,11 @@ private func compilerResolve(_ expression: GoTypeExpression) -> GoType {
     case .channel(let direction, let element, _):
         return .channel(direction: direction, element: compilerResolve(element))
     case .interface(let methods, _):
+        if let signature = expression.functionSignature {
+            return .function(
+                parameters: signature.parameters.map(compilerResolve),
+                results: signature.results.map(compilerResolve))
+        }
         return .interface(methods.map { method in
             GoInterfaceMethod(
                 name: method.name,
@@ -679,11 +719,15 @@ private func compilerErrorType() -> GoType {
 }
 
 private func runtimeLiteralName(_ position: GoSourcePosition) -> String {
-    "$literal.\(position.path).\(position.offset)"
+    GoFunctionType.literalName(at: position)
 }
 
+/// The function literals that `go` and `defer` statements call and that
+/// capture nothing, as functions of the program. A literal that captures is
+/// lowered where it stands, which is where its variables are.
 private func runtimeLiteralFunctions(
-    in functions: [GoFunctionDeclaration]
+    in functions: [GoFunctionDeclaration],
+    captures: [String: [String]]
 ) -> [GoFunctionDeclaration] {
     var discovered: [GoFunctionDeclaration] = []
     var names: Set<String> = []
@@ -698,6 +742,7 @@ private func runtimeLiteralFunctions(
                         let body, let position) = callee
                 else { continue }
                 let name = runtimeLiteralName(position)
+                if captures[name]?.isEmpty == false { continue }
                 if names.insert(name).inserted {
                     discovered.append(GoFunctionDeclaration(
                         name: name,
@@ -1318,12 +1363,34 @@ private struct IRLowerer {
     var nativeWrappers: [String: GoIRFunction] = [:]
     /// Variables of the function being lowered that a pointer can reach.
     var addressedVariables = GoAddressedVariables()
+    /// The variables each function literal captures, by the literal's name:
+    /// what the checker found it to read or assign of the functions around.
+    var literalCaptures: [String: [String]] = [:]
+    /// Whether a `return` of the function being lowered stores its values
+    /// in the result variables, for a deferred call to change.
+    var returnsThroughResults = false
+    /// Function literals whose bodies are yet to be lowered, and the names
+    /// of all that were ever put here. A body is lowered after the function
+    /// it is written in, not inside it: literals nested in literals then
+    /// nest no calls of the lowerer, whose frames are large.
+    var pendingLiterals: [PendingLiteral] = []
+    var scheduledLiterals: Set<String> = []
+    /// Whether this lowerer is lowering the body of a literal, and leaves
+    /// the literals it meets to the lowerer that started it.
+    var isLiteralBody = false
 
     mutating func lower(
         _ function: GoFunctionDeclaration,
-        compiledName: String
+        compiledName: String,
+        captures: [(name: String, type: GoType)] = []
     ) throws -> GoIRFunction {
         addressedVariables = GoAddressedVariables(function.body)
+        // A variable a literal inside captures is reached through a pointer
+        // like one whose address is taken, and is renewed in a loop alike.
+        addressedVariables.capture(capturedNames(in: function.body))
+        // A literal takes a pointer to each variable it captures before its
+        // own parameters, and gives each a local that is that variable.
+        let capturePointers = captures.map { _ in allocateRegister() }
         if let receiver = function.receiver {
             scopes[0][receiver.name] = LoweredBinding(
                 register: allocateRegister(),
@@ -1345,16 +1412,266 @@ private struct IRLowerer {
             resultRegisters.append(register)
             resultTypes.append(type)
         }
+        // A deferred call reaches a named result through a pointer or a
+        // literal that captures it, and one that recovers leaves the
+        // results as they are. Go returns what they hold after the deferred
+        // calls; the VM is told which locals to read then. One result that
+        // nothing reaches is the local after the parameters, where the VM
+        // looks without being told.
+        returnsThroughResults =
+            !resultRegisters.isEmpty && GoFunctionLiterals.hasDefer(in: function.body)
+            && (resultRegisters.count > 1
+                || function.resultNames.contains { name in
+                    name.map(addressedVariables.addressed.contains) ?? false
+                })
+        if returnsThroughResults {
+            operations.append(
+                .call(
+                    function: GoPredeclared.liveResults
+                        + resultRegisters.map(String.init).joined(separator: "."),
+                    arguments: [], destinations: []))
+        }
+        for (capture, pointer) in zip(captures, capturePointers) {
+            let local = allocateRegister()
+            operations.append(
+                .call(
+                    function: GoPredeclared.bindVariable + String(local), arguments: [pointer],
+                    destinations: []))
+            scopes[0][capture.name] = LoweredBinding(register: local, type: capture.type)
+        }
         try lower(function.body, createsScope: false)
         if function.resultTypes.isEmpty, operations.last != .return {
             operations.append(.return)
         }
-        return GoIRFunction(
+        let lowered = GoIRFunction(
             name: compiledName,
-            parameterCount: function.parameters.count + (function.receiver == nil ? 0 : 1),
+            parameterCount: captures.count + function.parameters.count
+                + (function.receiver == nil ? 0 : 1),
             returnCount: function.resultTypes.count,
             registerCount: nextRegister,
             operations: operations)
+        if !isLiteralBody { try lowerPendingLiterals() }
+        return lowered
+    }
+
+    /// Lowers the bodies of the literals met so far and of those met in
+    /// them, each into `nativeWrappers` under its name.
+    mutating func lowerPendingLiterals() throws {
+        while let literal = pendingLiterals.popLast() {
+            var lowerer = self
+            lowerer.operations = []
+            lowerer.scopes = [[:]]
+            lowerer.nextRegister = 0
+            lowerer.nextLabel = 0
+            lowerer.breakLabels = []
+            lowerer.continueLabels = []
+            lowerer.testAbortLabels = []
+            lowerer.resultRegisters = []
+            lowerer.resultTypes = []
+            lowerer.pendingLiterals = []
+            lowerer.isLiteralBody = true
+            let function = try lowerer.lower(
+                literal.declaration, compiledName: literal.symbol, captures: literal.captures)
+            // What it synthesized in turn, and the literals inside it.
+            nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
+            nativeWrappers[literal.symbol] = function
+            scheduledLiterals.formUnion(lowerer.scheduledLiterals)
+            pendingLiterals.append(contentsOf: lowerer.pendingLiterals)
+        }
+    }
+
+    /// Returns the values in `sources`. Where a deferred call can change
+    /// the results, they go into the result variables first.
+    mutating func returnValues(_ sources: [Int]) {
+        guard returnsThroughResults, sources.count == resultRegisters.count else {
+            operations.append(.returnValues(sources: sources))
+            return
+        }
+        for (result, source) in zip(resultRegisters, sources) where result != source {
+            operations.append(.copy(destination: result, source: source))
+        }
+        operations.append(.returnValues(sources: resultRegisters))
+    }
+
+    // MARK: Function values
+
+    /// The names the literals in `block` capture, those of literals inside
+    /// them included.
+    func capturedNames(in block: GoBlock) -> Set<String> {
+        guard !literalCaptures.isEmpty else { return [] }
+        var names: Set<String> = []
+        GoFunctionLiterals.forEach(in: block) { literal in
+            names.formUnion(literalCaptures[runtimeLiteralName(literal.position)] ?? [])
+        }
+        return names
+    }
+
+    /// A function as a value: the name of the function to call, and what is
+    /// passed to it before the arguments of a call. `GoValue` has no case
+    /// for a function, so it is a struct of a type no program can name.
+    mutating func functionValue(symbol: String, bound: [Int] = []) -> Int {
+        let destination = allocateRegister()
+        operations.append(
+            .makeStruct(
+                destination: destination,
+                typeName: GoPredeclared.functionValueTypeName,
+                fieldNames: [GoPredeclared.functionValueSymbolField] + bound.indices.map(String.init),
+                values: [constant(.string(symbol))] + bound))
+        return destination
+    }
+
+    /// A function literal as a value. Its body becomes a function of the
+    /// program, scheduled here, where the variables it captures are known:
+    /// the value holds a pointer to each.
+    mutating func lowerFunctionLiteral(
+        parameters: [GoParameter], resultNames: [String?], resultTypes: [GoTypeExpression],
+        body: GoBlock, position: GoSourcePosition
+    ) throws -> Int {
+        let name = runtimeLiteralName(position)
+        let symbol = functionSymbolNames[name] ?? name
+        let captures = (literalCaptures[name] ?? []).compactMap { captured in
+            lookup(captured).map { (name: captured, binding: $0) }
+        }
+        if nativeWrappers[symbol] == nil, scheduledLiterals.insert(symbol).inserted {
+            pendingLiterals.append(
+                PendingLiteral(
+                    declaration: GoFunctionDeclaration(
+                        name: name, parameters: parameters, resultNames: resultNames,
+                        resultTypes: resultTypes, body: body, position: position),
+                    symbol: symbol,
+                    captures: captures.map { ($0.name, $0.binding.type) }))
+        }
+        let pointers = captures.map { capture -> Int in
+            let pointer = allocateRegister()
+            operations.append(
+                .address(destination: pointer, local: capture.binding.register, fieldPath: []))
+            return pointer
+        }
+        return functionValue(symbol: symbol, bound: pointers)
+    }
+
+    /// The method `T.m` or `(*T).m` names and the receiver it is written
+    /// to take, or nil when `base` names no type of the program.
+    func methodExpression(
+        base: GoExpression, name: String
+    ) -> (info: MethodInfo, receiverType: GoType)? {
+        guard let receiver = GoMethodExpression.receiver(of: base),
+            lookup(receiver.typeName) == nil, globalInfos[receiver.typeName] == nil,
+            typeDefinitions[receiver.typeName] != nil
+        else { return nil }
+        let value = methodInfos[methodKey(baseName: receiver.typeName, pointer: false, method: name)]
+        let pointer = methodInfos[methodKey(baseName: receiver.typeName, pointer: true, method: name)]
+        guard let info = value ?? (receiver.pointer ? pointer : nil) else { return nil }
+        return (
+            info,
+            receiver.pointer ? .pointer(.named(receiver.typeName)) : .named(receiver.typeName)
+        )
+    }
+
+    /// The function a method expression is: the method itself, or, for
+    /// `(*T).m` with `m` declared on `T`, one that takes the pointer and
+    /// calls the method with what it points to.
+    mutating func methodExpressionSymbol(_ method: (info: MethodInfo, receiverType: GoType)) -> String {
+        guard method.receiverType != method.info.receiverType else { return method.info.functionName }
+        let name = "$native.\(wrapperNamespace).$deref.\(method.info.functionName)"
+        if nativeWrappers[name] == nil {
+            let parameterCount = method.info.parameterCount + 1
+            let receiver = parameterCount
+            let destinations = (0..<method.info.returnCount).map { receiver + 1 + $0 }
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: parameterCount,
+                returnCount: destinations.count,
+                registerCount: receiver + 1 + destinations.count,
+                operations: [
+                    .dereference(destination: receiver, pointer: 0),
+                    .call(
+                        function: method.info.functionName,
+                        arguments: [receiver] + Array(1..<parameterCount),
+                        destinations: destinations),
+                    destinations.isEmpty ? .return : .returnValues(sources: destinations),
+                ])
+        }
+        return name
+    }
+
+    /// The function a method value of an interface is: it takes the
+    /// interface value and the arguments, and calls the method `method` of
+    /// whatever the value holds.
+    mutating func interfaceMethodFunction(
+        _ method: String, parameterCount: Int, resultCount: Int
+    ) -> String {
+        let name = "$native.\(wrapperNamespace).$method.\(method).\(parameterCount).\(resultCount)"
+        if nativeWrappers[name] == nil {
+            let count = parameterCount + 1
+            let destinations = (0..<resultCount).map { count + $0 }
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: count,
+                returnCount: resultCount,
+                registerCount: count + resultCount,
+                operations: [
+                    .callInterface(
+                        method: method, receiver: 0, arguments: Array(1..<count),
+                        destinations: destinations),
+                    destinations.isEmpty ? .return : .returnValues(sources: destinations),
+                ])
+        }
+        return name
+    }
+
+    /// Whether `callee` is a literal that is a function of the program
+    /// already: one a `go` or `defer` statement calls that captures
+    /// nothing. Such a literal is called by its name, as it always was.
+    func isLiftedLiteral(_ callee: GoExpression) -> Bool {
+        guard case .functionLiteral(_, _, _, _, let position) = callee else { return false }
+        return functionParameterTypes[runtimeLiteralName(position)] != nil
+    }
+
+    /// What `callee` takes and gives when it is a value of function type:
+    /// a variable, a field, or what another expression yields. Nil for the
+    /// name of a function or a method, which is called directly.
+    func valueCallSignature(_ callee: GoExpression) -> (parameters: [GoType], results: [GoType])? {
+        let calleeType: GoType?
+        switch callee {
+        case .identifier(let name, _):
+            calleeType = lookup(name)?.type ?? globalInfos[name]?.type
+        case .selector(let base, let name, _):
+            if methodExpression(base: base, name: name) != nil {
+                calleeType = try? type(of: callee)
+                break
+            }
+            guard let baseType = try? type(of: base) else { return nil }
+            calleeType = structFields(of: baseType)?.first { $0.name == name }?.type
+        default:
+            calleeType = try? type(of: callee)
+        }
+        guard let calleeType, case .function(let parameters, let results) = underlying(calleeType)
+        else { return nil }
+        return (parameters, results)
+    }
+
+    /// The function value and the arguments of a call through it.
+    mutating func lowerValueCallOperands(
+        callee: GoExpression, arguments: [GoExpression], parameters: [GoType]
+    ) throws -> [Int] {
+        let function = try lower(callee)
+        return [function] + (try lowerArguments(arguments, parameters: parameters))
+    }
+
+    /// A call through a function value, or nil when `callee` is none.
+    mutating func lowerValueCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> [Int]? {
+        guard let signature = valueCallSignature(callee) else { return nil }
+        let operands = try lowerValueCallOperands(
+            callee: callee, arguments: arguments, parameters: signature.parameters)
+        let destinations = signature.results.map { _ in allocateRegister() }
+        operations.append(
+            .call(
+                function: GoPredeclared.callFunctionValue, arguments: operands,
+                destinations: destinations))
+        return destinations
     }
 
     mutating func lowerGlobals(
@@ -1376,10 +1693,13 @@ private struct IRLowerer {
             operations.append(.storeGlobal(index: global.index, source: value))
         }
         operations.append(.return)
-        return GoIRFunction(
+        let lowered = GoIRFunction(
             name: name,
             registerCount: nextRegister,
             operations: operations)
+        // A function literal among the initializers is a function too.
+        try lowerPendingLiterals()
+        return lowered
     }
 
     mutating func lower(_ block: GoBlock, createsScope: Bool = true) throws {
@@ -1424,9 +1744,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerDeclaration(_ statement: GoStatement) throws {
-        guard case .declaration(let name, let explicitType, let expression, _, let position) = statement else {
-            return
-        }
+        guard case .declaration(let name, let explicitType, let expression, _, let position) = statement else { return }
         let variable = allocateRegister()
         let value: Int
         if let expression {
@@ -1450,9 +1768,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerAssignment(_ statement: GoStatement) throws {
-        guard case .assignment(let target, let expression, _) = statement else {
-            return
-        }
+        guard case .assignment(let target, let expression, _) = statement else { return }
         if target.isBlank {
             _ = try lower(expression)
             return
@@ -1462,9 +1778,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerMultiDeclaration(_ statement: GoStatement) throws {
-        guard case .multiDeclaration(let names, let expression, let position) = statement else {
-            return
-        }
+        guard case .multiDeclaration(let names, let expression, let position) = statement else { return }
         if let variables = expression.variables {
             if variables.isConstant {
                 for (name, value) in zip(names, variables.values) {
@@ -1605,9 +1919,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerMultiAssignment(_ statement: GoStatement) throws {
-        guard case .multiAssignment(let targets, let expression, let position) = statement else {
-            return
-        }
+        guard case .multiAssignment(let targets, let expression, let position) = statement else { return }
         if let values = expression.valueList {
             // Go reads the index and pointer operands on the left and
             // every value on the right first, then assigns in order.
@@ -1699,9 +2011,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerIncrement(_ statement: GoStatement) throws {
-        guard case .increment(let target, let incrementOperator, _) = statement else {
-            return
-        }
+        guard case .increment(let target, let incrementOperator, _) = statement else { return }
         let current = try lower(target)
         let one = constant(.int(1))
         let result = allocateRegister()
@@ -1715,9 +2025,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerReturnValues(_ statement: GoStatement) throws {
-        guard case .returnValues(let values, _) = statement else {
-            return
-        }
+        guard case .returnValues(let values, _) = statement else { return }
         if values.isEmpty {
             if resultRegisters.isEmpty {
                 operations.append(.return)
@@ -1729,26 +2037,32 @@ private struct IRLowerer {
             let results = try lowerMultiReturnCall(callee: callee, arguments: arguments)
         {
             // `return f()` forwards every result of a multi-result call.
-            operations.append(.returnValues(sources: results))
+            returnValues(results)
         } else {
             let sources = try values.enumerated().map { index, value in
                 try lowerConverted(
                     value, to: index < resultTypes.count ? resultTypes[index] : nil)
             }
-            operations.append(.returnValues(sources: sources))
+            returnValues(sources)
         }
     }
 
     mutating func lowerDeferStatement(_ statement: GoStatement) throws {
-        guard case .deferStatement(let expression, let position) = statement else {
-            return
-        }
+        guard case .deferStatement(let expression, let position) = statement else { return }
         guard case .call(let callee, let arguments, _) = expression else {
             throw GoDiagnostic(position: position, message: "defer requires function call")
         }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.deferCall(
                 function: wrapper.name, arguments: wrapper.registers))
+        } else if !isLiftedLiteral(callee), let signature = valueCallSignature(callee) {
+            // The value is read now, with the arguments; the call waits.
+            operations.append(
+                .deferCall(
+                    function: GoPredeclared.callFunctionValue,
+                    arguments: try lowerValueCallOperands(
+                        callee: callee, arguments: arguments,
+                        parameters: signature.parameters)))
         } else if case .identifier(let functionName, _) = callee {
             let registers = try lowerArguments(
                 arguments, parameters: functionParameterTypes[functionName])
@@ -1820,15 +2134,20 @@ private struct IRLowerer {
     }
 
     mutating func lowerGoStatement(_ statement: GoStatement) throws {
-        guard case .goStatement(let expression, let position) = statement else {
-            return
-        }
+        guard case .goStatement(let expression, let position) = statement else { return }
         guard case .call(let callee, let arguments, _) = expression else {
             throw GoDiagnostic(position: position, message: "go requires function call")
         }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.spawn(
                 function: wrapper.name, arguments: wrapper.registers))
+        } else if !isLiftedLiteral(callee), let signature = valueCallSignature(callee) {
+            operations.append(
+                .spawn(
+                    function: GoPredeclared.callFunctionValue,
+                    arguments: try lowerValueCallOperands(
+                        callee: callee, arguments: arguments,
+                        parameters: signature.parameters)))
         } else if case .identifier(let functionName, _) = callee {
             operations.append(.spawn(
                 function: functionSymbolNames[functionName] ?? functionName,
@@ -1897,9 +2216,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerSendStatement(_ statement: GoStatement) throws {
-        guard case .sendStatement(let channel, let value, _) = statement else {
-            return
-        }
+        guard case .sendStatement(let channel, let value, _) = statement else { return }
         var elementType: GoType?
         if case .channel(_, let element)? = (try? type(of: channel)).map({ underlying($0) }) {
             elementType = element
@@ -1910,9 +2227,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerIfStatement(_ statement: GoStatement) throws {
-        guard case .ifStatement(let condition, let thenBlock, let elseBlock, _) = statement else {
-            return
-        }
+        guard case .ifStatement(let condition, let thenBlock, let elseBlock, _) = statement else { return }
         let falseLabel = allocateLabel()
         let conditionRegister = try lower(condition)
         operations.append(.jumpIfFalse(condition: conditionRegister, target: falseLabel))
@@ -1929,9 +2244,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerForStatement(_ statement: GoStatement) throws {
-        guard case .forStatement(let initializer, let condition, let post, let body, _) = statement else {
-            return
-        }
+        guard case .forStatement(let initializer, let condition, let post, let body, _) = statement else { return }
         scopes.append([:])
         defer { scopes.removeLast() }
         if let scoped = statement.initialized {
@@ -1978,9 +2291,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerForRangeStatement(_ statement: GoStatement) throws {
-        guard case .forRangeStatement(let indexName, let valueName, let collection, let body, _) = statement else {
-            return
-        }
+        guard case .forRangeStatement(let indexName, let valueName, let collection, let body, _) = statement else { return }
         scopes.append([:])
         defer { scopes.removeLast() }
 
@@ -2099,9 +2410,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerSwitchStatement(_ statement: GoStatement) throws {
-        guard case .switchStatement(let expression, let cases, _) = statement else {
-            return
-        }
+        guard case .switchStatement(let expression, let cases, _) = statement else { return }
         let switchRegister = try expression.map { try lower($0) } ?? constant(.bool(true))
         let endLabel = allocateLabel()
         let caseLabels = cases.map { _ in allocateLabel() }
@@ -2133,9 +2442,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerSelectStatement(_ statement: GoStatement) throws {
-        guard case .selectStatement(let cases, _) = statement else {
-            return
-        }
+        guard case .selectStatement(let cases, _) = statement else { return }
         let endLabel = allocateLabel()
         let caseLabels = cases.map { _ in allocateLabel() }
         var loweredCases: [GoIRSelectCase] = []
@@ -2297,6 +2604,9 @@ private struct IRLowerer {
             return try lowerConversion(to: target, argument: argument)
         }
         if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
+            return results.first
+        }
+        if let results = try lowerValueCall(callee: callee, arguments: arguments) {
             return results.first
         }
         if case .identifier(let functionName, _) = callee {
@@ -2657,11 +2967,16 @@ private struct IRLowerer {
                 return dest
             case .httpHandleFunc:
                 let pattern = registers[0]
-                // The handler is a function reference - extract its name
+                // The instruction names the handler: a function of the
+                // program, or a literal, which is one once it is lowered.
                 let handlerName: String
-                if case .identifier(let name, _) = arguments[1] {
-                    handlerName = name
-                } else {
+                switch arguments[1] {
+                case .identifier(let name, _) where lookup(name) == nil && functionParameterTypes[name] != nil:
+                    handlerName = functionSymbolNames[name] ?? name
+                case .functionLiteral(_, _, _, _, let position):
+                    let name = runtimeLiteralName(position)
+                    handlerName = functionSymbolNames[name] ?? name
+                default:
                     handlerName = "unknown"
                 }
                 operations.append(.httpHandleFunc(
@@ -2779,22 +3094,7 @@ private struct IRLowerer {
         if case .selector(let base, let member, _) = callee,
             let info = try methodInfo(base: base, name: member)
         {
-            let baseType = try type(of: base)
-            let receiver: Int
-            if case .pointer = info.receiverType {
-                if case .pointer = baseType {
-                    receiver = try lower(base)
-                } else {
-                    receiver = try lowerAddress(of: base)
-                }
-            } else if case .pointer = baseType {
-                let pointer = try lower(base)
-                let value = allocateRegister()
-                operations.append(.dereference(destination: value, pointer: pointer))
-                receiver = value
-            } else {
-                receiver = try lower(base)
-            }
+            let receiver = try lowerReceiver(of: info, base: base, baseType: try type(of: base))
             let registers =
                 [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
             let destinations = (0..<info.returnCount).map { _ in allocateRegister() }
@@ -2806,6 +3106,24 @@ private struct IRLowerer {
             return destinations.first
         }
         throw GoDiagnostic(position: callee.position, message: "unsupported function call")
+    }
+
+    /// What a method takes for its receiver from `base`: its address for a
+    /// pointer receiver, its value for a value receiver.
+    mutating func lowerReceiver(
+        of info: MethodInfo, base: GoExpression, baseType: GoType
+    ) throws -> Int {
+        if case .pointer = info.receiverType {
+            if case .pointer = baseType { return try lower(base) }
+            return try lowerAddress(of: base)
+        }
+        if case .pointer = baseType {
+            let pointer = try lower(base)
+            let value = allocateRegister()
+            operations.append(.dereference(destination: value, pointer: pointer))
+            return value
+        }
+        return try lower(base)
     }
 
     /// Whether `callee` is `fmt.Println` (true) or `fmt.Print` (false), or
@@ -2823,6 +3141,7 @@ private struct IRLowerer {
             return native.function.results
         }
         if printCall(callee) != nil { return [.int, GoPredeclared.errorType] }
+        if let signature = valueCallSignature(callee) { return signature.results }
         if case .identifier(let name, _) = callee {
             return functionResultTypes[name] ?? []
         }
@@ -2898,6 +3217,9 @@ private struct IRLowerer {
                     arguments: try lowerFormatOperands(arguments),
                     destinations: destinations))
             return destinations
+        }
+        if let results = try lowerValueCall(callee: callee, arguments: arguments) {
+            return results
         }
         // Handle context.WithCancel / context.WithTimeout as multi-return builtins
         if case .selector(let base, let member, _) = callee,
@@ -3108,10 +3430,11 @@ private struct IRLowerer {
         case .binary: return try lowerBinaryExpression(expression)
         case .selector: return try lowerSelectorExpression(expression)
         case .typeAssertion: return try lowerTypeAssertionExpression(expression)
-        case .functionLiteral(_, _, _, _, let position):
-            throw GoDiagnostic(
-                position: position,
-                message: "function literal is only supported as a testing.T.Run callback")
+        case .functionLiteral(
+            let parameters, let resultNames, let resultTypes, let body, let position):
+            return try lowerFunctionLiteral(
+                parameters: parameters, resultNames: resultNames, resultTypes: resultTypes,
+                body: body, position: position)
         case .compositeLiteral: return try lowerCompositeLiteralExpression(expression)
         case .index: return try lowerIndexExpression(expression)
         case .slicing: return try lowerSlicingExpression(expression)
@@ -3139,6 +3462,10 @@ private struct IRLowerer {
             let destination = allocateRegister()
             operations.append(.loadGlobal(destination: destination, index: global.index))
             return destination
+        }
+        if functionParameterTypes[name] != nil || functionReturnCounts[name] != nil {
+            // A function of the program, as a value.
+            return functionValue(symbol: functionSymbolNames[name] ?? name)
         }
         throw GoDiagnostic(position: position, message: "undefined: \(name)")
     }
@@ -3247,6 +3574,35 @@ private struct IRLowerer {
             let destination = allocateRegister()
             operations.append(.osArgs(destination: destination))
             return destination
+        }
+        if let method = methodExpression(base: base, name: name) {
+            return functionValue(symbol: methodExpressionSymbol(method))
+        }
+        if let baseType = try? type(of: base),
+            case .interface(let methods) = underlying(baseType),
+            let method = methods.first(where: { $0.name == name })
+        {
+            // A method of an interface value that is not called: which
+            // method it is depends on the value, so it is found when
+            // the function is called.
+            let receiver = try lower(base)
+            operations.append(
+                .call(function: GoPredeclared.requireValue, arguments: [receiver], destinations: []))
+            return functionValue(
+                symbol: interfaceMethodFunction(
+                    name, parameterCount: method.parameters.count,
+                    resultCount: method.results.count),
+                bound: [receiver])
+        }
+        if let baseType = try? type(of: base),
+            structFields(of: baseType)?.contains(where: { $0.name == name }) != true,
+            let info = try methodInfo(base: base, name: name)
+        {
+            // A method that is not called: a function that already has
+            // its receiver, read now as a call would read it.
+            return functionValue(
+                symbol: info.functionName,
+                bound: [try lowerReceiver(of: info, base: base, baseType: baseType)])
         }
         var baseRegister = try lower(base)
         if case .pointer = try type(of: base) {
@@ -3626,6 +3982,11 @@ private struct IRLowerer {
         case .channel(let direction, let element, _):
             return .channel(direction: direction, element: resolve(element))
         case .interface(let methods, _):
+            if let signature = expression.functionSignature {
+                return .function(
+                    parameters: signature.parameters.map(resolve),
+                    results: signature.results.map(resolve))
+            }
             return .interface(methods.map { method in
                 GoInterfaceMethod(
                     name: method.name,
@@ -3770,7 +4131,7 @@ private struct IRLowerer {
         case .int: return constant(.int(0))
         case .string: return constant(.string(""))
         case .bool: return constant(.bool(false))
-        case .pointer, .slice, .map, .channel, .interface: return constant(.nilValue)
+        case .pointer, .slice, .map, .channel, .interface, .function: return constant(.nilValue)
         case .array(let length, let element):
             let values = try (0..<length).map { _ in
                 try zeroValue(for: element, position: position)
@@ -3849,6 +4210,10 @@ private struct IRLowerer {
             if name == "nil" { return .nilType }
             guard let binding = lookup(name) else {
                 if let global = globalInfos[name] { return global.type }
+                if let parameters = functionParameterTypes[name] {
+                    return .function(
+                        parameters: parameters, results: functionResultTypes[name] ?? [])
+                }
                 throw GoDiagnostic(position: position, message: "undefined: \(name)")
             }
             return binding.type
@@ -3867,8 +4232,21 @@ private struct IRLowerer {
             if standardFileDescriptor(base: base, member: name) != nil {
                 return GoPredeclared.filePointer
             }
+            if let method = methodExpression(base: base, name: name) {
+                return .function(
+                    parameters: [method.receiverType] + method.info.parameterTypes,
+                    results: method.info.resultTypes)
+            }
             let baseType = try type(of: base)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
+                if let info = try methodInfo(base: base, name: name) {
+                    return .function(parameters: info.parameterTypes, results: info.resultTypes)
+                }
+                if case .interface(let methods) = underlying(baseType),
+                    let method = methods.first(where: { $0.name == name })
+                {
+                    return .function(parameters: method.parameters, results: method.results)
+                }
                 throw GoDiagnostic(position: position, message: "undefined selector")
             }
             return field.type
@@ -3929,6 +4307,9 @@ private struct IRLowerer {
             }
             if let native = nativeFunction(for: callee) {
                 return native.function.results.first ?? .void
+            }
+            if let signature = valueCallSignature(callee) {
+                return signature.results.first ?? .void
             }
             if case .identifier(let name, _) = callee,
                 name == "len" || name == "cap" || name == "copy"
@@ -4077,6 +4458,9 @@ private struct IRLowerer {
             default:
                 return typeDefinitions[name] == nil ? nil : .named(name)
             }
+        case .unary(.dereference, let operand, _):
+            // `(*T)(x)`.
+            return conversionTarget(operand).map { .pointer($0) }
         default:
             return nil
         }

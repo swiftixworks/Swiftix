@@ -61,8 +61,6 @@ private struct Parser {
     /// as text. For a function: its name, the end of its body, and the names
     /// of its results.
     var namePositions: [Int: [GoSourcePosition]] = [:]
-    /// The names of the results of the function being parsed.
-    var resultNamePositions: [GoSourcePosition] = []
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -316,6 +314,24 @@ private struct Parser {
 
     mutating func parseTypeExpression() throws -> GoTypeExpression {
         let position = current.position
+        if check(.function) {
+            // `func(int, string) error`: what is taken and what is given,
+            // by type; a name written beside one is not part of the type.
+            // Go has the type start at its parameters, and reports there.
+            advance()
+            let position = current.position
+            try expect(.leftParen, message: "expected '(' after func")
+            let parameters = try parseSignatureTypes()
+            for parameter in parameters.dropLast() {
+                if case .array(GoSpread.variadicLength, _, let position) = parameter {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "can only use ... with final parameter in list")
+                }
+            }
+            return .function(
+                parameters: parameters, results: try parseResults().types, position: position)
+        }
         if check(.arrow) {
             advance()
             try expect(.chanKeyword, message: "expected 'chan' after '<-'")
@@ -471,6 +487,26 @@ private struct Parser {
         let namePosition = current.position
         let name = try expectIdentifier(message: "expected function name")
         try expect(.leftParen, message: "expected '('")
+        let parameters = try parseParameters()
+        let results = try parseResults()
+        let body = try parseBlock()
+        // Go reports a function by its name, and a return it lacks where
+        // its body ends.
+        namePositions[position.offset] =
+            [namePosition, tokens[index - 1].position] + results.positions
+        return GoFunctionDeclaration(
+            name: name,
+            receiver: receiver,
+            parameters: parameters,
+            resultNames: results.names,
+            resultTypes: results.types,
+            body: body,
+            position: position)
+    }
+
+    /// The parameters of a function, after their `(` and with their `)`:
+    /// each a name and a type, or several names that share one.
+    mutating func parseParameters() throws -> [GoParameter] {
         var parameters: [GoParameter] = []
         while !check(.rightParen) {
             var names: [(String, GoSourcePosition)] = []
@@ -503,27 +539,27 @@ private struct Parser {
         }
         advance()
         try requireFinalVariadic(parameters)
-        resultNamePositions = []
+        return parameters
+    }
+
+    /// The results of a function, when it has any: one type, or a list in
+    /// parentheses that may name them. With each name comes where it is.
+    mutating func parseResults() throws -> (
+        names: [String?], types: [GoTypeExpression], positions: [GoSourcePosition]
+    ) {
         var resultNames: [String?] = []
         var resultTypes: [GoTypeExpression] = []
-        if case .identifier = current.kind {
-            resultTypes.append(try parseTypeExpression())
-            resultNames.append(nil)
-        } else if check(.structKeyword) || check(.star) || check(.leftBracket)
-            || check(.mapKeyword) || check(.interfaceKeyword) || check(.chanKeyword)
-            || check(.arrow)
-        {
-            resultTypes.append(try parseTypeExpression())
-            resultNames.append(nil)
-        } else if check(.leftParen) {
+        var positions: [GoSourcePosition] = []
+        if check(.leftParen) {
             advance()
             while !check(.rightParen) {
                 guard !check(.eof) else { throw diagnostic("expected ')'") }
-                if let names = namedResultGroup() {
+                if let group = namedResultGroup() {
                     // `x, y int`: one type, written once, for each name.
                     let type = try parseTypeExpression()
-                    resultTypes.append(contentsOf: Array(repeating: type, count: names.count))
-                    resultNames.append(contentsOf: names.map(Optional.some))
+                    resultTypes.append(contentsOf: Array(repeating: type, count: group.names.count))
+                    resultNames.append(contentsOf: group.names.map(Optional.some))
+                    positions.append(contentsOf: group.positions)
                 } else {
                     resultTypes.append(try parseTypeExpression())
                     resultNames.append(nil)
@@ -535,26 +571,26 @@ private struct Parser {
                 }
             }
             advance()
+        } else if startsResultType(current.kind) {
+            resultTypes.append(try parseTypeExpression())
+            resultNames.append(nil)
         }
-        let body = try parseBlock()
-        // Go reports a function by its name, and a return it lacks where
-        // its body ends.
-        namePositions[position.offset] =
-            [namePosition, tokens[index - 1].position] + resultNamePositions
-        return GoFunctionDeclaration(
-            name: name,
-            receiver: receiver,
-            parameters: parameters,
-            resultNames: resultNames,
-            resultTypes: resultTypes,
-            body: body,
-            position: position)
+        return (resultNames, resultTypes, positions)
+    }
+
+    /// Whether a result type written without parentheses can begin with a
+    /// token of this kind.
+    func startsResultType(_ kind: GoTokenKind) -> Bool {
+        if case .identifier(let word) = kind {
+            return word != GoSpread.spelling && !GoBitwiseOperator.isOperatorSpelling(word)
+        }
+        return isTypeStart(kind)
     }
 
     /// Returns and consumes a named result group when the upcoming tokens have
     /// the `name[, name] type` shape. A plain `(int, string)` result list is
     /// deliberately left to `parseTypeExpression`.
-    mutating func namedResultGroup() -> [String]? {
+    mutating func namedResultGroup() -> (names: [String], positions: [GoSourcePosition])? {
         guard case .identifier(let first) = current.kind else { return nil }
         var names = [first]
         var cursor = 1
@@ -565,18 +601,19 @@ private struct Parser {
             cursor += 2
         }
         guard isTypeStart(lookahead(cursor).kind) else { return nil }
+        var positions: [GoSourcePosition] = []
         for _ in names.indices {
-            resultNamePositions.append(current.position)
+            positions.append(current.position)
             advance()
             if names.count > 1, check(.comma) { advance() }
         }
-        return names
+        return (names, positions)
     }
 
     func isTypeStart(_ kind: GoTokenKind) -> Bool {
         switch kind {
         case .identifier, .star, .leftBracket, .mapKeyword, .interfaceKeyword, .structKeyword,
-            .chanKeyword, .arrow:
+            .chanKeyword, .arrow, .function:
             return true
         default:
             return false
@@ -1398,24 +1435,16 @@ private struct Parser {
         let position = current.position
         advance()
         try expect(.leftParen, message: "expected '(' after func")
-        var parameters: [GoParameter] = []
-        while !check(.rightParen) {
-            let parameterPosition = current.position
-            let name = try expectIdentifier(message: "expected parameter name")
-            let type = try parseTypeExpression()
-            parameters.append(GoParameter(
-                name: name, type: type, position: parameterPosition))
-            if check(.comma) { advance() }
-            else if !check(.rightParen) {
-                throw diagnostic("expected ',' or ')' in parameter list")
-            }
-        }
-        advance()
+        let parameters = try parseParameters()
+        let results = try parseResults()
+        let body = try parseBlock()
+        // As for a declared function: where it is, and where its body ends.
+        namePositions[position.offset] = [position, tokens[index - 1].position]
         return .functionLiteral(
             parameters: parameters,
-            resultNames: [],
-            resultTypes: [],
-            body: try parseBlock(),
+            resultNames: results.names,
+            resultTypes: results.types,
+            body: body,
             position: position)
     }
 

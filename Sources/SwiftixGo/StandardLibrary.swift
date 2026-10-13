@@ -333,6 +333,10 @@ extension GoStandardLibrary {
     /// Whether the linker may leave `name` for the VM to resolve natively.
     static func isNativeCallName(_ name: String) -> Bool {
         nativeCallNames.contains(name) || name.hasPrefix(GoPredeclared.freshVariable)
+            || name.hasPrefix(GoPredeclared.bindVariable)
+            || name == GoPredeclared.callFunctionValue
+            || name == GoPredeclared.requireValue
+            || name.hasPrefix(GoPredeclared.liveResults)
     }
 
     private static let nativeCallNames: Set<String> = Set(
@@ -411,6 +415,33 @@ enum GoPredeclared {
     /// returns a pointer to it: `&T{...}`, where every evaluation makes a
     /// new variable.
     static let newVariable = "$new"
+
+    /// Prefix of the call that makes a local of the executing frame the
+    /// variable a pointer points to: `$bind.<local>`, with the pointer as
+    /// its argument. A function literal begins with one for each variable
+    /// it captures, which is thereby the same variable in both functions.
+    static let bindVariable = "$bind."
+
+    /// The call through a function value: the value, then the arguments.
+    static let callFunctionValue = "$call"
+
+    /// The call that panics as a nil pointer dereference does when its
+    /// argument is nil: selecting a method of an interface value that holds
+    /// nothing panics where the method is selected, called or not.
+    static let requireValue = "$nonnil"
+
+    /// Prefix of the call a function begins with when what it returns is
+    /// what its result variables hold once every deferred call has run, as
+    /// in Go: `$results.<local>.<local>`, the locals of the results in
+    /// order. A deferred call may have changed them, or recovered a panic
+    /// that left them as they were.
+    static let liveResults = "$results."
+
+    /// The type a function value has in the VM, which has no value of its
+    /// own for one: a struct whose first field names the function and whose
+    /// others are passed to it before the arguments of a call.
+    static let functionValueTypeName = "$func"
+    static let functionValueSymbolField = "f"
 
     /// Native call `append(slice, source...)` lowers to, with the element
     /// zero value as its third operand.
