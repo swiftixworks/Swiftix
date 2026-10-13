@@ -61,6 +61,8 @@ format, behavior and platform changes are recorded here.
   own, `{ ... }`, with its own scope; and alias declarations,
   `type Name = T`, at package level, in functions, and across packages. An
   alias and its type are one type. `gofmt` lays all three out as Go's does.
+- Interface methods may name their parameters and results:
+  `Get(key string) (value string, ok bool)`, `Put(key, value string)`.
 - `go test` finds `func TestX(t *tt.T)` in a file that says
   `import tt "testing"`, by the shape of the parameter as Go's does.
 - `gofmt` prints an import's name before its path and sorts the imports of a
@@ -142,6 +144,26 @@ format, behavior and platform changes are recorded here.
   error, as an unused local package already was:
   `"os" imported and not used`. Remove the import, or write
   `import _ "os"`.
+- A type prints by the name of its package, as in Go, where that is not the
+  last element of the import path: `api.Request` for `package api` in
+  `example/m/v2`, in `%T`, `%#v`, and a failed assertion. The linker keeps
+  the name in the package's symbols (`example/m/v2@api.Request`); a package
+  named after its directory has the symbols it had.
+- An unrecovered panic prints its value as Go does: a value of a named type
+  as `main.code(4)`, an error by its `Error` method and a value with a
+  `String` method by that, and anything else by its type and address,
+  `(main.failure) 0xc000012000` (was the value alone, `{3}`).
+- A diagnostic names a member of a package the way the file does:
+  `undefined: t.Nope` after `import t "time"`. A member a package does not
+  have is `undefined: os.Nope` (was `undefined: os`).
+- `gofmt -r` reads a rule as Go's does. An identifier of a pattern stands
+  for any expression only when it is one lower-case letter; a longer name
+  now matches itself, so `total(first, second) -> ...` matches that call and
+  no other. The operands of an expression are rewritten before it is
+  matched, so a rule applies at every depth (`f(f(1))` under `f(1) -> 1` is
+  `1`), also inside function literals. A rule from one identifier to another
+  renames it wherever the file has it, declarations included
+  (`total -> sum`).
 - A type declaration is reported at its name (`main.go:3:6`), where Go
   reports it, not at the `type` keyword.
 - A diagnostic about an import is reported where Go reports it, at the
@@ -202,6 +224,15 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- Results that share a type, `func divide(a, b int) (q, r int)`, were
+  refused with `expected type`.
+- `recover` returned a panic's value without its type when the type was a
+  named one: `%T` of a recovered `code(4)` said `int`, and it did not assert
+  as `code`. The argument of `panic` now keeps its type like any value
+  converted to an interface.
+- `gofmt -r` broke the file when an operand of a matched expression was in
+  parentheses (`a * c -> c * a` on `(x + y) * c`), and when a rule named one
+  identifier (`total -> sum` replaced whole expressions by `sum`).
 - Importing a package of the run-time library twice in one file is reported
   by that package's name (`os redeclared in this block`); the message used to
   say `fmt` whatever the package was.

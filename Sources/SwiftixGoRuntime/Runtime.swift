@@ -2046,6 +2046,52 @@ public struct GoVirtualMachine: Sendable {
             return decoded
         }
 
+        /// What Go prints after `panic: ` for a value no method describes:
+        /// a number, a string, or a truth value as it is, one of a named
+        /// type as `main.code(4)`, and anything else by its type and where
+        /// it is, `(main.point) 0xc000012000`.
+        func panicText(_ value: GoValue) throws -> String {
+            func plain(_ value: GoValue) -> String? {
+                switch value {
+                case .int(let number): return String(number)
+                case .string(let text): return text
+                case .bool(let truth): return String(truth)
+                default: return nil
+                }
+            }
+            var typeName: String
+            var held = value
+            if case .interface(let boxed) = value {
+                held = boxed.value
+                guard let descriptor = typeDescriptor(named: boxed.typeName) else {
+                    return plain(held) ?? value.description
+                }
+                typeName = GoTypeDescriptor.name(of: descriptor.type)
+                if case .named(let symbol) = descriptor.type {
+                    switch descriptor.definitions[symbol] {
+                    case .integer?, .byte?, .boolean?:
+                        if let text = plain(held) { return "\(typeName)(\(text))" }
+                    case .string?:
+                        if case .string(let text) = held {
+                            return "\(typeName)(\(GoFormat.quote(text, asciiOnly: false)))"
+                        }
+                    default:
+                        break
+                    }
+                } else if let text = plain(held) {
+                    return text
+                }
+            } else if let text = plain(value) {
+                return text
+            } else {
+                typeName = inferredTypeName(of: value)
+            }
+            // Go prints where the value it boxed lies. A value that is no
+            // pointer has no cell of its own here; the address stands for it.
+            let address = formatAddress(of: held) ?? 0xC0_0001_2000
+            return "(\(typeName)) 0x" + String(address, radix: 16)
+        }
+
         /// The address Go would print for a pointer, slice, map, or channel:
         /// stable for one value and distinct between heap cells. Nil is 0.
         func formatAddress(of value: GoValue) -> UInt64? {
@@ -3746,6 +3792,9 @@ public struct GoVirtualMachine: Sendable {
                     }
                     switch pendingExit {
                     case .returning(let values):
+                        if exiting.printsPanic != nil, case .string(let text)? = values.first {
+                            throw GoRuntimeError.panicError(text)
+                        }
                         if exiting.function.returnCount > 0,
                             values.count != exiting.function.returnCount
                         {
@@ -3761,9 +3810,28 @@ public struct GoVirtualMachine: Sendable {
                         }
                     case .panicking(let value):
                         guard !frames.isEmpty else {
-                            // Go prints an error it panicked with by its text.
-                            throw GoRuntimeError.panicError(
-                                try libraryError(value)?.message ?? value.description)
+                            // Go prints an error it panicked with by its
+                            // text, and a value that has a `String` method
+                            // by that. The method is the program's, so it
+                            // runs as the last frame, and its result ends
+                            // the program.
+                            if let message = try libraryError(value)?.message {
+                                throw GoRuntimeError.panicError(message)
+                            }
+                            guard exiting.printsPanic == nil, let target = methodTarget(value),
+                                let function = GoFormat.textMethods.lazy
+                                    .compactMap({ method($0, of: target.owner) }).first
+                            else {
+                                throw GoRuntimeError.panicError(
+                                    try panicText(exiting.printsPanic ?? value))
+                            }
+                            var frame = try makeFrame(
+                                function: function, stackBase: stack.count,
+                                arguments: [try methodReceiver(target.receiver, for: function)],
+                                heap: &heap)
+                            frame.printsPanic = value
+                            frames.append(frame)
+                            continue
                         }
                         if frames[frames.count - 1].awaitsGuestCall,
                             frames[frames.count - 1].guestCallRecovery != .none
@@ -6994,6 +7062,9 @@ private struct Frame {
     var awaitsGuestCall = false
     /// What becomes of a panic of the function being waited for.
     var guestCallRecovery = GoGuestCallRecovery.none
+    /// The value an unrecovered panic ended the goroutine with, when this
+    /// frame runs its `Error` or `String` method to say so.
+    var printsPanic: GoValue?
 
     init(
         function: GoBytecodeFunction,

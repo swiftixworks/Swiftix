@@ -5,7 +5,31 @@ public enum GoSourceRewriter {
         let parts = splitRule(rule)
         let pattern = try parseRuleExpression(parts.pattern, label: "pattern")
         let replacement = try parseRuleExpression(parts.replacement, label: "replacement")
+        if case .identifier(let name, _) = pattern, !isWildcard(name),
+            case .identifier(let newName, _) = replacement
+        {
+            return try renaming(name, to: newName, in: source)
+        }
         return try applying(pattern: pattern, replacement: replacement, to: source)
+    }
+
+    /// A rule that turns one identifier into another renames it wherever
+    /// the file has it: Go's rule meets every identifier of the syntax tree,
+    /// the name of a declaration, a field, or a type as much as a use.
+    private static func renaming(
+        _ name: String, to newName: String, in source: GoSourceFile
+    ) throws -> GoSourceFile {
+        _ = try GoParser.parse(source)
+        var bytes = Array(source.text.utf8)
+        let offsets = try GoLexer.tokenize(source).compactMap { token -> Int? in
+            guard case .identifier(name) = token.kind else { return nil }
+            return token.position.offset
+        }
+        guard !offsets.isEmpty else { return source }
+        for offset in offsets.reversed() {
+            bytes.replaceSubrange(offset..<(offset + name.utf8.count), with: newName.utf8)
+        }
+        return GoSourceFile(path: source.path, text: String(decoding: bytes, as: UTF8.self))
     }
 
     public static func simplify(_ source: GoSourceFile) throws -> GoSourceFile {
@@ -29,10 +53,7 @@ public enum GoSourceRewriter {
         guard !text.isEmpty else {
             throw GoDiagnostic(position: rulePosition(), message: "rewrite \(label) is empty")
         }
-        let file = try GoParser.parse(
-            GoSourceFile(
-                path: "<rewrite>",
-                text: "package rewrite\nfunc rewrite() { result = \(text)\n}\n"))
+        let file = try GoParser.parse(GoSourceFile(path: "<rewrite>", text: ruleSource(text)))
         guard let function = file.functions.first,
             let statement = function.body.statements.first,
             case .assignment(_, let expression, _) = statement
@@ -40,6 +61,17 @@ public enum GoSourceRewriter {
             throw GoDiagnostic(position: rulePosition(), message: "invalid rewrite \(label)")
         }
         return expression
+    }
+
+    /// A file that holds the expression `text` and nothing else to match.
+    private static func ruleSource(_ text: String) -> String {
+        "package rewrite\nfunc rewrite() { result = \(text)\n}\n"
+    }
+
+    /// The bodies of the function literals in `expression`.
+    private static func literalBodies(in expression: GoExpression) -> [GoBlock] {
+        if case .functionLiteral(_, _, _, let body, _) = expression { return [body] }
+        return children(of: expression).flatMap { literalBodies(in: $0) }
     }
 
     private static func applying(
@@ -51,22 +83,59 @@ public enum GoSourceRewriter {
         let bytes = Array(source.text.utf8)
         var edits: [Edit] = []
 
-        func consider(_ expression: GoExpression) {
+        /// The text of `expression` once the rule has been applied inside
+        /// it and then to it, or nil when nothing in it matches. Go rewrites
+        /// the operands of a node first and then matches the node that
+        /// results, so `f(f(1))` under `f(1) -> 1` becomes `1`.
+        func rewritten(_ expression: GoExpression) -> String? {
+            guard let range = expressionRange(expression, bytes: bytes) else { return nil }
+            var operands: [(range: Range<Int>, text: String)] = []
+            for child in children(of: expression) {
+                guard let childRange = expressionRange(child, bytes: bytes),
+                    childRange.lowerBound >= range.lowerBound,
+                    childRange.upperBound <= range.upperBound,
+                    !operands.contains(where: { $0.range.overlaps(childRange) }),
+                    let text = rewritten(child)
+                else { continue }
+                operands.append((childRange, text))
+            }
             var captures: [String: String] = [:]
-            if matches(pattern, expression, source: bytes, captures: &captures),
-                let range = expressionRange(expression, bytes: bytes)
+            guard !operands.isEmpty else {
+                return matches(pattern, expression, source: bytes, captures: &captures)
+                    ? render(replacement, captures: captures) : nil
+            }
+            var text = Array(bytes[range])
+            for operand in operands.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
+                let lower = operand.range.lowerBound - range.lowerBound
+                let upper = operand.range.upperBound - range.lowerBound
+                text.replaceSubrange(lower..<upper, with: operand.text.utf8)
+            }
+            let current = String(decoding: text, as: UTF8.self)
+            // What the node has become is read again to be matched.
+            if let node = try? parseRuleExpression(current, label: "operand"),
+                matches(
+                    pattern, node, source: Array(ruleSource(current).utf8), captures: &captures)
             {
+                return render(replacement, captures: captures)
+            }
+            return current
+        }
+
+        func consider(_ expression: GoExpression) {
+            let before = edits.count
+            if let range = expressionRange(expression, bytes: bytes),
                 // A constant that repeats the specification before it has
                 // that one's expression, which the source holds once.
-                if !edits.contains(where: { $0.range == range }) {
-                    edits.append(
-                        Edit(
-                            range: range,
-                            replacement: render(replacement, captures: captures)))
-                }
-                return
+                !edits.contains(where: { $0.range == range }),
+                let text = rewritten(expression)
+            {
+                edits.append(Edit(range: range, replacement: text))
             }
-            for child in children(of: expression) { consider(child) }
+            // The statements of a function literal are not operands; they
+            // are reached where the expression around them stays as it is.
+            if edits.count == before {
+                for body in literalBodies(in: expression) { visit(body, consider: consider) }
+            }
         }
 
         for declaration in file.globalDeclarations {
@@ -219,12 +288,14 @@ public enum GoSourceRewriter {
         }
     }
 
-    /// Identifiers a pattern matches literally. Every other identifier is a
-    /// wildcard, so the predeclared type names used in conversions are listed.
-    private static let literalIdentifiers: Set<String> = [
-        "true", "false", "nil", "len", "cap", "append", "copy", "make",
-        "int", "byte", "uint8", "string", "bool",
-    ]
+    /// Whether an identifier of a rule stands for any expression: as in
+    /// Go's `gofmt`, one that is a single lower-case letter. Every other
+    /// identifier matches itself.
+    private static func isWildcard(_ name: String) -> Bool {
+        let scalars = name.unicodeScalars
+        guard scalars.count == 1, let scalar = scalars.first else { return false }
+        return scalar.properties.isLowercase
+    }
 
     private static func matches(
         _ pattern: GoExpression,
@@ -249,8 +320,10 @@ public enum GoSourceRewriter {
             guard let targetOperand = target.spreadOperand else { return false }
             return matches(patternOperand, targetOperand, source: source, captures: &captures)
         }
-        if case .identifier(let name, _) = pattern, !literalIdentifiers.contains(name) {
-            guard let range = expressionRange(target, bytes: source) else { return false }
+        if case .identifier(let name, _) = pattern, isWildcard(name) {
+            // An operand in parentheses is matched with them, as Go's
+            // syntax tree has it.
+            guard let range = operandRange(target, bytes: source) else { return false }
             let text = String(decoding: source[range], as: UTF8.self)
             if let existing = captures[name] { return existing == text }
             captures[name] = text
@@ -340,6 +413,44 @@ public enum GoSourceRewriter {
         return true
     }
 
+    /// The source of `expression` with the parentheses that group it.
+    private static func operandRange(
+        _ expression: GoExpression,
+        bytes: [UInt8]
+    ) -> Range<Int>? {
+        expressionRange(expression, bytes: bytes).map { grouped($0, bytes: bytes) }
+    }
+
+    /// `range` widened over the parentheses around it that group an
+    /// expression. Those of a call or a conversion follow a name or a
+    /// closing bracket and are left alone.
+    private static func grouped(_ range: Range<Int>, bytes: [UInt8]) -> Range<Int> {
+        func isBlank(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
+        var range = range
+        while true {
+            var open = range.lowerBound - 1
+            while open >= 0, isBlank(bytes[open]) { open -= 1 }
+            var close = range.upperBound
+            while close < bytes.count, isBlank(bytes[close]) { close += 1 }
+            guard open >= 0, close < bytes.count, bytes[open] == 0x28, bytes[close] == 0x29 else {
+                return range
+            }
+            var before = open - 1
+            while before >= 0, isBlank(bytes[before]) { before -= 1 }
+            if before >= 0 {
+                let byte = bytes[before]
+                let endsOperand =
+                    byte == 0x29 || byte == 0x5D || byte == 0x7D || byte == 0x5F || byte >= 0x80
+                    || (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A)
+                    || (byte >= 0x61 && byte <= 0x7A)
+                if endsOperand { return range }
+            }
+            range = open..<(close + 1)
+        }
+    }
+
+    /// The source of `expression`, without parentheses around the whole of
+    /// it and with those around its first and last operand.
     private static func expressionRange(
         _ expression: GoExpression,
         bytes: [UInt8]
@@ -350,19 +461,18 @@ public enum GoSourceRewriter {
             // The node's position is the operator; its text spans the operands.
             guard let first = operation.operands.first,
                 let last = operation.operands.last,
-                let lastRange = expressionRange(last, bytes: bytes)
+                let lastRange = operandRange(last, bytes: bytes)
             else { return nil }
             if operation.operator.isUnary {
                 return expression.position.offset..<lastRange.upperBound
             }
-            guard let firstRange = expressionRange(first, bytes: bytes) else { return nil }
+            guard let firstRange = operandRange(first, bytes: bytes) else { return nil }
             return firstRange.lowerBound..<lastRange.upperBound
         }
         if let operand = expression.spreadOperand {
             // The node's position is the `...` after its operand.
-            guard let operandRange = expressionRange(operand, bytes: bytes) else { return nil }
-            return operandRange.lowerBound..<(
-                expression.position.offset + GoSpread.spelling.utf8.count)
+            guard let range = operandRange(operand, bytes: bytes) else { return nil }
+            return range.lowerBound..<(expression.position.offset + GoSpread.spelling.utf8.count)
         }
         switch expression {
         case .integer(let value, let position):
@@ -376,10 +486,10 @@ public enum GoSourceRewriter {
             start = position.offset
             end = start + name.utf8.count
         case .selector(let base, let name, let position):
-            start = expressionRange(base, bytes: bytes)?.lowerBound ?? position.offset
+            start = operandRange(base, bytes: bytes)?.lowerBound ?? position.offset
             end = position.offset + 1 + name.utf8.count
         case .typeAssertion(let base, _, let position):
-            start = expressionRange(base, bytes: bytes)?.lowerBound ?? position.offset
+            start = operandRange(base, bytes: bytes)?.lowerBound ?? position.offset
             guard let open = nextByte(0x28, from: position.offset, bytes: bytes),
                 let close = matchingDelimiter(open, open: 0x28, close: 0x29, bytes: bytes)
             else { return nil }
@@ -397,7 +507,7 @@ public enum GoSourceRewriter {
             else { return nil }
             end = close + 1
         case .index(let base, _, let position), .slicing(let base, _, _, let position):
-            start = expressionRange(base, bytes: bytes)?.lowerBound ?? position.offset
+            start = operandRange(base, bytes: bytes)?.lowerBound ?? position.offset
             guard
                 let close = matchingDelimiter(
                     position.offset,
@@ -407,7 +517,7 @@ public enum GoSourceRewriter {
             else { return nil }
             end = close + 1
         case .call(let callee, _, let position):
-            start = expressionRange(callee, bytes: bytes)?.lowerBound ?? position.offset
+            start = operandRange(callee, bytes: bytes)?.lowerBound ?? position.offset
             guard
                 let close = matchingDelimiter(
                     position.offset,
@@ -418,11 +528,11 @@ public enum GoSourceRewriter {
             end = close + 1
         case .unary(_, let operand, let position):
             start = position.offset
-            guard let operandRange = expressionRange(operand, bytes: bytes) else { return nil }
-            end = operandRange.upperBound
+            guard let range = operandRange(operand, bytes: bytes) else { return nil }
+            end = range.upperBound
         case .binary(let left, _, let right, _):
-            guard let leftRange = expressionRange(left, bytes: bytes),
-                let rightRange = expressionRange(right, bytes: bytes)
+            guard let leftRange = operandRange(left, bytes: bytes),
+                let rightRange = operandRange(right, bytes: bytes)
             else { return nil }
             start = leftRange.lowerBound
             end = rightRange.upperBound

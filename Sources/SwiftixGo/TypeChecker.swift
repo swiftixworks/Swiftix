@@ -142,10 +142,11 @@ public enum GoTypeChecker {
         _ files: [GoFile],
         availablePackages: [String: GoPackageExport]
     ) throws -> GoTypedPackage {
-        try GoNames.reporting {
-            try check(
-                resolved: GoNames.resolve(program: GoNames.resolve(files)),
-                availablePackages: availablePackages)
+        let resolved = try GoNames.reporting {
+            try GoNames.resolve(program: GoNames.resolve(files))
+        }
+        return try GoNames.reporting(on: resolved) {
+            try check(resolved: resolved, availablePackages: availablePackages)
         }
     }
 
@@ -1495,6 +1496,12 @@ private struct FunctionChecker {
                 GoStandardLibrary.standardFileDescriptor(member: name) != nil
             {
                 return GoPredeclared.filePointer
+            }
+            if case .identifier(let packageName, _) = base, lookup(packageName) == nil,
+                importedPaths.contains(where: { GoImportName.defaultName(ofPath: $0) == packageName })
+            {
+                // Nothing above knows the member of the package.
+                throw GoDiagnostic(position: position, message: "undefined: \(packageName).\(name)")
             }
             let baseType = try type(of: base)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {

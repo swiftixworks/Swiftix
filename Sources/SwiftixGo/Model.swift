@@ -143,6 +143,9 @@ public struct GoFile: Sendable, Equatable {
     /// Whether the imports of the file have been found a use and given the
     /// names of their packages, which is done once.
     var hasResolvedImports = false
+    /// Where the file selects from a package under a name of its own, so
+    /// that a diagnostic can say `f.Printl` as the source does.
+    var importRenames: [GoImportRename] = []
 
     /// A file with the same source, after a pass rebuilt its declarations.
     func rebuilt(
@@ -162,6 +165,7 @@ public struct GoFile: Sendable, Equatable {
         file.namePositions = namePositions
         file.aliasTargets = aliasTargets
         file.hasResolvedImports = hasResolvedImports
+        file.importRenames = importRenames
         return file
     }
 
@@ -180,6 +184,15 @@ public struct GoFile: Sendable, Equatable {
         self.globalDeclarations = globalDeclarations
         self.functions = functions
     }
+}
+
+/// A selection `name.member` from a package the file imports as `name`,
+/// which name resolution rewrote to the package's own name.
+struct GoImportRename: Sendable, Equatable {
+    let line: Int
+    let ownName: String
+    let name: String
+    let member: String
 }
 
 public struct GoGlobalDeclaration: Sendable, Equatable {

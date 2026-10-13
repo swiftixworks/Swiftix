@@ -129,6 +129,10 @@ struct GoConformanceTests {
     @Test func fieldListsBlocksAndAliases() throws {
         try expectSameOutput(fieldListsBlocksAndAliasesSource, fieldListsBlocksAndAliasesExpected)
     }
+
+    @Test func namesInInterfaceMethods() throws {
+        try expectSameOutput(namesInInterfaceMethodsSource, namesInInterfaceMethodsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -3321,5 +3325,71 @@ hi! 2 2 9
 true failed nil *errors.errorString
 7 main.pair main.point
 2111 - 0 +
+
+"""#
+
+private let namesInInterfaceMethodsSource = #"""
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type store interface {
+	Get(key string) (value string, ok bool)
+	Put(key, value string)
+	Sum(first int, rest ...int) int
+	Each(prefix string, out *os.File, limit, skip int) (n int, err error)
+	Plain(string, int) bool
+	Len() int
+	Pair(a, b []string, m map[string]int) (x, y int)
+}
+
+type table struct {
+	items map[string]string
+}
+
+func (t *table) Get(key string) (value string, ok bool) {
+	value, ok = t.items[key]
+	return value, ok
+}
+
+func (t *table) Put(key, value string) { t.items[key] = value }
+
+func (t *table) Sum(first int, rest ...int) int {
+	for _, r := range rest {
+		first += r
+	}
+	return first
+}
+
+func (t *table) Each(prefix string, out *os.File, limit, skip int) (n int, err error) {
+	return len(prefix) + limit + skip, nil
+}
+
+func (t *table) Plain(s string, n int) bool { return len(s) == n }
+
+func (t *table) Len() int { return len(t.items) }
+
+func (t *table) Pair(a, b []string, m map[string]int) (x, y int) {
+	return len(a) + len(b), len(m)
+}
+
+func main() {
+	var s store = &table{items: map[string]string{}}
+	s.Put("k", "v")
+	v, ok := s.Get("k")
+	_, missing := s.Get("none")
+	n, err := s.Each("ab", os.Stdout, 3, 4)
+	x, y := s.Pair([]string{"a"}, nil, map[string]int{"m": 1})
+	fmt.Println(v, ok, missing, s.Sum(1), s.Sum(1, 2, 3), n, err, s.Plain("ab", 2), s.Len(), x, y)
+	fmt.Printf("%T\n", s)
+}
+"""#
+
+private let namesInInterfaceMethodsExpected = #"""
+v true false 1 6 9 <nil> true 1 1 1
+*main.table
 
 """#

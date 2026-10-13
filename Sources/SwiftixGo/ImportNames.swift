@@ -69,6 +69,7 @@ enum GoImportNames {
             // walk only found each import its use.
             if !renames { resolved = file }
             resolved.hasResolvedImports = true
+            resolved.importRenames += resolver.renames
             return resolved
         }
     }
@@ -84,6 +85,8 @@ private struct Resolver: GoScopedRewriter {
     private var scopes: [Set<String>] = []
     /// The names of the file's imports that something is selected from.
     private var used: Set<String> = []
+    /// The selections from a package the file calls by another name.
+    private(set) var renames: [GoImportRename] = []
 
     init(file: GoFile, freed: Set<String>, packageLevel: Set<String>) throws {
         self.freed = freed
@@ -254,6 +257,12 @@ private struct Resolver: GoScopedRewriter {
         qualifierPosition: GoSourcePosition, position: GoSourcePosition
     ) -> GoExpression? {
         guard let package = selectedPackage(qualifier) else { return nil }
+        if package != qualifier {
+            renames.append(
+                GoImportRename(
+                    line: qualifierPosition.line, ownName: package, name: qualifier,
+                    member: member))
+        }
         return .selector(
             base: .identifier(package, position: qualifierPosition),
             name: member,

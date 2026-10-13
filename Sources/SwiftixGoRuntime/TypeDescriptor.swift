@@ -210,20 +210,29 @@ struct GoTypeDescriptor: Equatable, Sendable {
 
     /// Go's spelling of a type name the VM carries: a type of the main
     /// package gains `main.`, and a linker symbol `path/to/pkg.Name` keeps its
-    /// last path component. What the compiler adds after a middle dot keeps
-    /// apart two types a source names alike, and is no part of the name.
+    /// last path component, or the package name the linker wrote after an
+    /// `@`. What the compiler adds after a middle dot keeps apart two types a
+    /// source names alike, and is no part of the name.
     static func goName(_ typeName: String) -> String {
         var name = typeName[...]
-        if let marker = name.firstIndex(of: "\u{B7}") { name = name[..<marker] }
         var prefix = ""
         while name.hasPrefix("*") {
             prefix += "*"
             name = name.dropFirst()
         }
-        guard let dot = name.lastIndex(of: ".") else { return prefix + "main." + name }
+        func member(_ text: Substring) -> Substring {
+            text.firstIndex(of: "\u{B7}").map { text[..<$0] } ?? text
+        }
+        guard let dot = name.lastIndex(of: ".") else { return prefix + "main." + member(name) }
         let package = name[..<dot]
-        guard let slash = package.lastIndex(of: "/") else { return prefix + name }
-        return prefix + package[package.index(after: slash)...] + name[dot...]
+        let type = "." + member(name[name.index(after: dot)...])
+        // The linker writes a package's name after its path where the path
+        // does not end in it.
+        if let mark = package.lastIndex(of: "@") {
+            return prefix + package[package.index(after: mark)...] + type
+        }
+        guard let slash = package.lastIndex(of: "/") else { return prefix + package + type }
+        return prefix + package[package.index(after: slash)...] + type
     }
 
     /// The path of the package that declares the defined type `typeName`

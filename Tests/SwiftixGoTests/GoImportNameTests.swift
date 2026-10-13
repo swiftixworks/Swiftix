@@ -391,6 +391,36 @@ struct GoImportNameTests: GoTestHarness {
         #expect(diagnostic("package main\nimport _ \"fmt\"\nfunc main() {}\n") == nil)
     }
 
+    @Test func aMemberIsNamedAsTheSourceNamesIt() {
+        // By the file's name for the package, where Go says `undefined: t.Nope`.
+        #expect(
+            diagnostic("package main\nimport t \"time\"\nfunc main() {\n t.Nope()\n}\n")
+                == "main.go:4:3: undefined: t.Nope")
+        #expect(
+            diagnostic(
+                "package main\nimport (\n f \"fmt\"\n web \"net/http\"\n)\nfunc main() {\n f.Println(web.Nope)\n}\n")
+                == "main.go:7:15: undefined: web.Nope")
+        #expect(
+            diagnostic(
+                "package main\nimport (\n f \"fmt\"\n s \"strings\"\n)\nfunc main() {\n f.Println(s.ToUpper(\"a\", \"b\"))\n}\n")
+                == "main.go:7:21: wrong number of arguments in call to s.ToUpper")
+        // Each name on a line is the one written there.
+        #expect(
+            diagnostic(
+                "package main\nimport (\n f \"fmt\"\n \"fmt\"\n)\nfunc main() {\n fmt.Println(f.Nope())\n}\n")
+                == "main.go:7:15: undefined: f.Nope")
+        // A type goes by its package's own name, as Go prints it.
+        #expect(
+            diagnostic(
+                "package main\nimport (\n f \"fmt\"\n stdtime \"time\"\n)\nfunc main() {\n var t stdtime.Time = 1\n f.Println(t)\n}\n")
+                == "main.go:7:23: cannot use int as time.Time value")
+        // And a package the file does not rename by the name it has.
+        #expect(
+            diagnostic(
+                "package main\nimport (\n \"fmt\"\n \"os\"\n)\nfunc main() {\n fmt.Println(os.Nope)\n}\n")
+                == "main.go:7:16: undefined: os.Nope")
+    }
+
     @Test func aPackageIsNoValue() {
         #expect(
             diagnostic("package main\nimport (\n f \"fmt\"\n \"os\"\n)\nfunc main() {\n f.Println(f, os.Args)\n}\n")

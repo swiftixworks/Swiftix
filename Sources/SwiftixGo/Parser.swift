@@ -387,31 +387,20 @@ private struct Parser {
                 let methodPosition = current.position
                 let methodName = try expectIdentifier(message: "expected method name")
                 try expect(.leftParen, message: "expected '('")
-                var parameters: [GoTypeExpression] = []
-                while !check(.rightParen) {
-                    // Interface methods only declare types, not names
-                    let parameter = try parseParameterType()
-                    parameters.append(parameter)
-                    if check(.comma) { advance() }
-                    if case .array(GoSpread.variadicLength, _, let position) = parameter,
-                        !check(.rightParen)
-                    {
+                let parameters = try parseSignatureTypes()
+                for parameter in parameters.dropLast() {
+                    if case .array(GoSpread.variadicLength, _, let position) = parameter {
                         throw GoDiagnostic(
                             position: position,
                             message: "can only use ... with final parameter in list")
                     }
                 }
-                advance()  // consume ')'
                 var results: [GoTypeExpression] = []
                 if case .identifier = current.kind {
                     results.append(try parseTypeExpression())
                 } else if check(.leftParen) {
                     advance()
-                    while !check(.rightParen) {
-                        results.append(try parseTypeExpression())
-                        if check(.comma) { advance() }
-                    }
-                    advance()
+                    results = try parseSignatureTypes()
                 } else if check(.structKeyword) || check(.star) || check(.leftBracket)
                     || check(.mapKeyword) || check(.interfaceKeyword) || check(.chanKeyword)
                     || check(.arrow)
@@ -526,9 +515,9 @@ private struct Parser {
             while !check(.rightParen) {
                 guard !check(.eof) else { throw diagnostic("expected ')'") }
                 if let names = namedResultGroup() {
-                    for _ in names {
-                        resultTypes.append(try parseTypeExpression())
-                    }
+                    // `x, y int`: one type, written once, for each name.
+                    let type = try parseTypeExpression()
+                    resultTypes.append(contentsOf: Array(repeating: type, count: names.count))
                     resultNames.append(contentsOf: names.map(Optional.some))
                 } else {
                     resultTypes.append(try parseTypeExpression())
@@ -1313,6 +1302,43 @@ private struct Parser {
 
     /// The type of a parameter, where `...T` is a variadic one: an array type
     /// of the marker length that stands for it.
+    /// The types of the parameters or results of an interface method, up to
+    /// and with the `)`. The list may name what it lists, `(key string)` or
+    /// `(a, b int)`; a method of an interface keeps the types.
+    mutating func parseSignatureTypes() throws -> [GoTypeExpression] {
+        var types: [GoTypeExpression] = []
+        // The entries that are one identifier: types, unless a later entry
+        // has a name and a type, which makes them names of that type.
+        var bare: [Int] = []
+        while !check(.rightParen) {
+            guard !check(.eof) else { throw diagnostic("expected ')'") }
+            if case .identifier(let word) = current.kind, word != GoSpread.spelling,
+                !GoBitwiseOperator.isOperatorSpelling(word), isTypeStart(lookahead(1).kind)
+            {
+                advance()
+                let type = try parseParameterType()
+                for index in bare { types[index] = type }
+                bare = []
+                types.append(type)
+            } else {
+                let type = try parseParameterType()
+                if case .named(let name, _) = type, !name.contains(".") {
+                    bare.append(types.count)
+                } else {
+                    bare = []
+                }
+                types.append(type)
+            }
+            if check(.comma) {
+                advance()
+            } else if !check(.rightParen) {
+                throw diagnostic("expected ',' or ')'")
+            }
+        }
+        advance()
+        return types
+    }
+
     mutating func parseParameterType() throws -> GoTypeExpression {
         guard case .identifier(GoSpread.spelling) = current.kind else {
             return try parseTypeExpression()

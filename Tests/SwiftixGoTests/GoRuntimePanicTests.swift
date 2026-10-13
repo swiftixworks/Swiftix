@@ -63,6 +63,97 @@ struct GoRuntimePanicTests: GoTestHarness {
                 == .panicError("runtime error: makeslice: len out of range"))
     }
 
+    @Test func anUnrecoveredPanicPrintsItsValueAsGoPrintsIt() {
+        // What follows `panic: ` in Go 1.24.5, with the address masked.
+        let declarations = """
+            type failure struct {
+                Code int
+            }
+
+            type problem struct {
+                Code int
+            }
+
+            func (p problem) Error() string { return fmt.Sprint("problem ", p.Code) }
+
+            type label struct {
+                Text string
+            }
+
+            func (l label) String() string { return "label " + l.Text }
+
+            type code int
+
+            type name string
+
+            type flag bool
+            """
+        func text(_ body: String) -> String? {
+            do {
+                _ = try runGoMain(body, imports: ["errors", "fmt"], declarations: declarations)
+                return nil
+            } catch GoRuntimeError.panicError(let message) {
+                return message.replacing(/0x[0-9a-f]{6,}/, with: "0xADDR")
+            } catch {
+                return "unexpected error: \(error)"
+            }
+        }
+
+        // A number, a string, and a truth value as they are.
+        #expect(text("panic(7)") == "7")
+        #expect(text("panic(\"text\")") == "text")
+        #expect(text("panic(true)") == "true")
+        #expect(text("var b byte = 7\npanic(b)") == "7")
+        // One of a named type with the type around it.
+        #expect(text("panic(code(4))") == "main.code(4)")
+        #expect(text("panic(name(\"x\"))") == "main.name(\"x\")")
+        #expect(text("panic(flag(true))") == "main.flag(true)")
+        // Anything else by its type and where it lies.
+        #expect(text("panic(failure{Code: 3})") == "(main.failure) 0xADDR")
+        #expect(text("panic(&failure{Code: 3})") == "(*main.failure) 0xADDR")
+        #expect(text("var p *failure\npanic(p)") == "(*main.failure) 0x0")
+        #expect(text("panic([]int{1, 2})") == "([]int) 0xADDR")
+        #expect(text("panic([2]int{1, 2})") == "([2]int) 0xADDR")
+        #expect(text("panic(map[string]int{\"a\": 1})") == "(map[string]int) 0xADDR")
+        #expect(text("var v interface{} = failure{Code: 1}\npanic(v)") == "(main.failure) 0xADDR")
+        // An error by its text and a value with a `String` method by that,
+        // which are the program's to compute.
+        #expect(text("panic(errors.New(\"made\"))") == "made")
+        #expect(text("panic(fmt.Errorf(\"wrapped %d\", 1))") == "wrapped 1")
+        #expect(text("panic(problem{Code: 5})") == "problem 5")
+        #expect(text("panic(&problem{Code: 6})") == "problem 6")
+        #expect(text("panic(label{Text: \"t\"})") == "label t")
+    }
+
+    @Test func aPanicKeepsTheTypeOfItsValue() throws {
+        #expect(
+            try runGoMain(
+                """
+                report(4)
+                report(code(4))
+                report(failure{Code: 1})
+                report(&failure{Code: 2})
+                report([]string{"a"})
+                """,
+                declarations: """
+                    type failure struct {
+                        Code int
+                    }
+
+                    type code int
+
+                    func report(value interface{}) {
+                        defer func() {
+                            r := recover()
+                            _, isCode := r.(code)
+                            fmt.Printf("%v %T %v\\n", r, r, isCode)
+                        }()
+                        panic(value)
+                    }
+                    """)
+                == "4 int false\n4 main.code true\n{1} main.failure false\n&{2} *main.failure false\n[a] []string false\n")
+    }
+
     @Test func recoverReturnsAnErrorAndTheProgramGoesOn() throws {
         let output = try runGoMain(
             """

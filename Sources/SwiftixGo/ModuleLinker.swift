@@ -55,7 +55,20 @@ struct GoLinkedModule {
 }
 
 enum GoModuleLinker {
-    /// Symbol of the package-level `name` declared in the package `importPath`.
+    /// Follows the import path in the symbols of a package whose name is not
+    /// the last element of that path, before the name: `path/to/dir@name.X`.
+    /// Go prints a type by its package's name, and a symbol is all the VM
+    /// has of it. Neither an import path nor an identifier holds the mark.
+    static let packageNameMark: Character = "@"
+
+    /// What the symbols of a package begin with.
+    static func symbolPath(importPath: String, packageName: String) -> String {
+        packageName == GoImportName.defaultName(ofPath: importPath)
+            ? importPath : importPath + String(packageNameMark) + packageName
+    }
+
+    /// Symbol of the package-level `name` declared in the package whose
+    /// symbols begin with `importPath`.
     static func symbol(_ importPath: String, _ name: String) -> String {
         importPath + "." + name
     }
@@ -201,7 +214,7 @@ enum GoModuleLinker {
             let isRoot = path == root
             var files: [GoFile] = []
             for file in package.files {
-                packageOfFile[file.path] = path
+                packageOfFile[file.path] = package.symbolPath
                 var rewriter = FileRewriter(
                     package: package,
                     isRoot: isRoot,
@@ -217,7 +230,9 @@ enum GoModuleLinker {
                     files: try GoImportNames.resolve(files)))
         }
         var names: [String: String] = [:]
-        for path in order where path != root { names[path] = parsed[path]?.name }
+        for path in order where path != root {
+            if let package = parsed[path] { names[package.symbolPath] = package.name }
+        }
         return GoLinkedModule(units: units, packageNames: names, packageOfFile: packageOfFile)
     }
 
@@ -260,6 +275,10 @@ private struct ParsedPackage {
     let declared: Set<String>
     /// Imports of local packages, one per imported path, sorted by path.
     let imports: [GoImportDeclaration]
+
+    var symbolPath: String {
+        GoModuleLinker.symbolPath(importPath: importPath, packageName: name)
+    }
 }
 
 /// Rewrites one file of a package into the flat symbol space.
@@ -368,7 +387,7 @@ private struct FileRewriter {
 
     private func renamed(_ name: String) -> String {
         guard !isRoot, package.declared.contains(name) else { return name }
-        return GoModuleLinker.symbol(package.importPath, name)
+        return GoModuleLinker.symbol(package.symbolPath, name)
     }
 
     private func isShadowed(_ name: String) -> Bool {
@@ -388,7 +407,7 @@ private struct FileRewriter {
             let imported = dotImports.first(where: { $0.declared.contains(name) })
         else { return nil }
         usedDotImports.insert(imported.importPath)
-        return GoModuleLinker.symbol(imported.importPath, name)
+        return GoModuleLinker.symbol(imported.symbolPath, name)
     }
 
     /// The symbol for `qualifier.member`, or nil when `qualifier` is not a
@@ -408,7 +427,7 @@ private struct FileRewriter {
         guard imported.declared.contains(member) else {
             throw GoDiagnostic(position: position, message: "undefined: \(qualifier).\(member)")
         }
-        return GoModuleLinker.symbol(imported.importPath, member)
+        return GoModuleLinker.symbol(imported.symbolPath, member)
     }
 
     // MARK: Declarations

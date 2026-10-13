@@ -37,11 +37,20 @@ struct GoTypeEncoder {
     }
 
     /// Go's spelling of a type name: `main.point` for a type of the package
-    /// being compiled, `lib.Point` for a linker symbol `path/to/lib.Point`.
+    /// being compiled, `lib.Point` for a linker symbol `path/to/lib.Point`,
+    /// and the package's own name where the symbol carries one. What keeps a
+    /// function's type apart from another of its name is no part of it. The
+    /// VM spells names the same way in `GoTypeDescriptor.goName`.
     func goName(_ name: String) -> String {
-        guard let dot = name.lastIndex(of: ".") else { return packageName + "." + name }
+        guard let dot = name.lastIndex(of: ".") else {
+            return packageName + "." + GoLocalTypes.sourceName(name)
+        }
         let path = name[..<dot]
-        return (path.split(separator: "/").last.map(String.init) ?? String(path)) + name[dot...]
+        let member = GoLocalTypes.sourceName(name[name.index(after: dot)...])
+        if let mark = path.lastIndex(of: GoModuleLinker.packageNameMark) {
+            return path[path.index(after: mark)...] + "." + member
+        }
+        return (path.split(separator: "/").last.map(String.init) ?? String(path)) + "." + member
     }
 
     private func counted(_ text: String) -> String {

@@ -2245,7 +2245,9 @@ private struct IRLowerer {
                     operations.append(.panic(source: nilValue))
                     return nil
                 }
-                let source = try lower(argument)
+                // The parameter of `panic` is an `interface{}`: the value
+                // keeps its type, which `recover` and a crash report read.
+                let source = try lowerConverted(argument, to: .interface([]))
                 operations.append(.panic(source: source))
                 return nil
             }
