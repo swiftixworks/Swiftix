@@ -70,6 +70,16 @@ extension FunctionChecker {
         if let operation = expression.bitwiseOperation {
             return try foldedBitwise(operation.operator, operation.operands, of: expression)
         }
+        // `len` of a constant string is a constant of type `int`, which is
+        // computed at run time as it always was.
+        if case .identifier("len", _) = callee, arguments.count == 1, lookup("len") == nil,
+            functionSignatures["len"] == nil,
+            let text = stringConstant(of: arguments[0])?.text
+        {
+            return GoConstant(
+                value: GoRational(GoBigInt(Int64(text.utf8.count))), kind: .integer, type: .int,
+                isPlain: true)
+        }
         guard arguments.count == 1, let target = try? conversionTarget(callee),
             isNumeric(target), let operand = try constant(of: arguments[0])
         else { return nil }
@@ -421,6 +431,7 @@ extension FunctionChecker {
     func numericAssignable(
         _ expression: GoExpression, ofType actual: GoType, to expected: GoType
     ) throws -> Bool? {
+        if let word = wordAssignable(expression, ofType: actual, to: expected) { return word }
         guard isNumeric(actual) else { return nil }
         guard isNumeric(expected) else {
             // An untyped constant given to an interface has its default type.
@@ -491,7 +502,7 @@ extension FunctionChecker {
         guard binaryOperator != .logicalAnd, binaryOperator != .logicalOr,
             isNumeric(leftType), isNumeric(rightType)
         else {
-            operandTypesInHand = (leftType, rightType)
+            operandTypesInHand = wordOperandTypes(expression, left, right, leftType, rightType)
             return nil
         }
         return try numericBinaryType(
@@ -686,6 +697,13 @@ extension FunctionChecker {
         _ name: String, declared: GoType?, expression: GoExpression?, isConstant: Bool,
         position: GoSourcePosition
     ) throws {
+        if isConstant, name != GoValueList.blank, let expression,
+            let type = scopes[scopes.count - 1][name]?.type,
+            let word = wordConstant(declaredAs: type, isTyped: declared != nil, expression)
+        {
+            scopes[scopes.count - 1][name]?.word = word
+            return
+        }
         guard let expression, let value = try constant(of: expression) else { return }
         guard isConstant else {
             if declared == nil, value.isUntyped {
@@ -734,6 +752,16 @@ extension GoTypeChecker {
                     let binding = bindings[declaration.name]
                 else { continue }
                 let scope = checker(declaration, bindings)
+                if let word = scope.wordConstant(
+                    declaredAs: binding.type, isTyped: declaration.explicitType != nil,
+                    expression)
+                {
+                    // A string made of constants that have no value yet is
+                    // none yet either, and is tried again; a truth value
+                    // needs none.
+                    bindings[declaration.name]?.word = word
+                    continue
+                }
                 do {
                     guard var constant = try scope.constant(of: expression) else {
                         next.append(declaration)

@@ -4,7 +4,8 @@
 enum GoNames {
     /// The files of one package, with the names only it can settle.
     static func resolve(_ files: [GoFile]) throws -> [GoFile] {
-        try GoImportNames.resolve(GoLocalTypes.hoist(GoBlankNames.name(files)))
+        try GoImportNames.resolve(
+            GoLocalTypes.hoist(GoBlankNames.name(GoArrayLengths.resolve(files))))
     }
 
     /// The files of a whole program, each package of it resolved, with

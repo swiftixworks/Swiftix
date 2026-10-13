@@ -63,6 +63,9 @@ struct GoOperatorSpacing: Equatable, Sendable {
             if let expression = declaration.expression { visit(expression, depth: 1) }
         }
         for function in file.functions { visit(function.body) }
+        // The length of an array is an expression the tree has no place
+        // for; Go prints it as it prints one that stands alone.
+        for expression in file.arrayLengths.lengths.values { visit(expression, depth: 1) }
     }
 
     // MARK: Binary expressions

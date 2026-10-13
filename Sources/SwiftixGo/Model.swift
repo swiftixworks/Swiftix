@@ -150,6 +150,9 @@ public struct GoFile: Sendable, Equatable {
     /// settle (an element without a type, a key, or the length of `[...]T`)
     /// or a name where `new` or `make` takes a type. See `GoCompositeLiterals`.
     var hasOpenLiterals = false
+    /// The lengths of the arrays whose length is an expression, until a
+    /// pass over the package settles them. See `GoArrayLengths`.
+    var arrayLengths = GoArrayLengthNotes()
 
     /// Where `namePositions` keeps what the symbols of the file's package
     /// begin with: at an offset no token has.
@@ -221,6 +224,7 @@ public struct GoFile: Sendable, Equatable {
         file.hasResolvedImports = hasResolvedImports
         file.importRenames = importRenames
         file.hasOpenLiterals = hasOpenLiterals
+        file.arrayLengths = arrayLengths
         file.branchErrors = branchErrors
         file.usesEmbedding = usesEmbedding
         return file

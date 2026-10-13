@@ -72,6 +72,9 @@ private struct Parser {
     var iotaDepth: UInt16 = 0
     /// Whether a composite literal leaves something for its type to settle.
     var hasOpenLiterals = false
+    /// The array lengths that are expressions, and what constants the
+    /// functions declare, which the tree has no place for.
+    var arrayLengths = GoArrayLengthNotes()
     /// Whether a struct type embeds a field or an interface type another.
     var usesEmbedding = false
     /// The names of each declaration of several names, which the tree keeps
@@ -185,6 +188,7 @@ private struct Parser {
             functions: functions)
         file.declaresLocalTypes = declaresLocalTypes
         file.hasOpenLiterals = hasOpenLiterals
+        file.arrayLengths = arrayLengths
         file.usesEmbedding = usesEmbedding
         file.namePositions = namePositions
         return file
@@ -487,9 +491,15 @@ private struct Parser {
             }
             guard case .integer(let length) = current.kind,
                 length >= 0,
-                let exactLength = Int(exactly: length)
+                let exactLength = Int(exactly: length),
+                lookahead(1).kind == .rightBracket
             else {
-                throw diagnostic("expected array length")
+                // A length that is an expression: a constant one, which is
+                // found out once the constants of the package are known.
+                arrayLengths.lengths[position.offset] = try parseExpression()
+                try expect(.rightBracket, message: "expected ']' after array length")
+                return GoArrayLengths.marker(
+                    element: try parseTypeExpression(), position: position)
             }
             advance()
             try expect(.rightBracket, message: "expected ']' after array length")
@@ -970,6 +980,13 @@ private struct Parser {
     /// for each specification.
     mutating func parseDeclarations() throws -> [GoStatement] {
         let specifications = try parseValueSpecifications()
+        if specifications.isConstant {
+            for specification in specifications.list {
+                for (name, value) in zip(specification.names, specification.values) {
+                    arrayLengths.constants[specification.position.offset, default: [:]][name] = value
+                }
+            }
+        }
         return specifications.list.compactMap { specification in
             if specification.names.count > 1 {
                 // `var a, b T`, `var a, b = x, y`, `var n, err = f()`.

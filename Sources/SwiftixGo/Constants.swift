@@ -63,14 +63,31 @@ struct GoConstant: Equatable, Sendable {
 /// A constant behind a reference, for a value that is copied often and
 /// seldom holds one.
 final class GoConstantBox: Sendable {
-    let constant: GoConstant
-    init(_ constant: GoConstant) { self.constant = constant }
+    /// A number.
+    let constant: GoConstant?
+    /// A string or a truth value.
+    let word: GoWordConstant?
+
+    init(_ constant: GoConstant) {
+        self.constant = constant
+        word = nil
+    }
+
+    init(word: GoWordConstant) {
+        constant = nil
+        self.word = word
+    }
 }
 
 extension Binding {
     var constant: GoConstant? {
         get { constantBox?.constant }
         set { constantBox = newValue.map(GoConstantBox.init) }
+    }
+
+    var word: GoWordConstant? {
+        get { constantBox?.word }
+        set { constantBox = newValue.map(GoConstantBox.init(word:)) }
     }
 }
 

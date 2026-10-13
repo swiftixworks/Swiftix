@@ -2105,7 +2105,7 @@ struct FunctionChecker {
         let matches = try nilAlone
             ? caseType == .nilType
             : caseType == switchType
-                || (isInteger(switchType)
+                || (adoptsConstants(switchType)
                     && isAssignable(caseExpression, ofType: caseType, to: switchType))
                 || (caseType == .nilType && isAssignable(.nilType, to: switchType))
         guard matches else {

@@ -1680,6 +1680,16 @@ private struct FormatPrinter {
             ensureSpace()
             append("<-")
             append(" ")
+        case "*" where spacing.binaryOperators[token.offset] != nil && isPointerTypeContext:
+            // A product in the length of an array, `[2 * n]T`, which stands
+            // where a type does.
+            if spacing.tight.contains(token.offset) {
+                append("*")
+            } else {
+                ensureSpace()
+                append("*")
+                append(" ")
+            }
         case "*" where followsTypeBracket:
             // The element of `[]*T`, `[3]*T`, and `map[K]*V`.
             append("*")
