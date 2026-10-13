@@ -200,18 +200,21 @@ struct GoAppendSpreadTests: GoTestHarness {
                 == "cannot use int as []int value in append")
         #expect(
             goMainDiagnostic("x := append([]int{1}, 2, []int{3}...)\nfmt.Println(x)")
-                == "can only use ... with the final argument of append")
+                == "can only use ... with final argument in list")
         #expect(
             goMainDiagnostic("x := append([]int{1}, []int{2}..., 3)\nfmt.Println(x)")
-                == "can only use ... with the final argument of append")
+                == "can only use ... with final argument in list")
+        // The library's `...any` takes a `[]any`, and a function that is not
+        // variadic takes no spread at all.
         #expect(
             goMainDiagnostic("fmt.Println([]int{1}...)")
-                == "can only use ... with the final argument of append")
+                == "cannot use []int as []interface{} value in argument")
+        #expect(goMainDiagnostic("fmt.Println(1, []any{2}...)") != nil)
         #expect(
             goMainDiagnostic(
                 "fmt.Println(total([]int{1}...))",
                 declarations: "func total(values []int) int {\n\treturn len(values)\n}")
-                == "can only use ... with the final argument of append")
+                == "can only use ... with final argument in list")
         #expect(goMainDiagnostic("x := []int{1}...\nfmt.Println(x)") != nil)
         #expect(goMainDiagnostic("var x int = 1 ... 2\nfmt.Println(x)") != nil)
     }

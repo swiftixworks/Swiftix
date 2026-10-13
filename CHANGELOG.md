@@ -15,11 +15,30 @@ format, behavior and platform changes are recorded here.
 - Swiftix Go wall-clock time: `time.Now`, `time.Since`, `time.Unix`, and the
   `time.Time` methods `Unix`, `UnixMilli`, `UnixNano`, `Sub`, `Add`, `Before`,
   `After`, and `Equal`.
-- Swiftix Go `errors.New`, and the builtin `copy`, which runs natively.
-- Swiftix Go `fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, and `fmt.Fprintf` with
-  Go's verbs, flags, width, precision, and markers for a mistake. `%#v`, `%T`,
-  `%p`, and argument indexes are not implemented and render as Go's bad-verb
-  markers; see "Formatting" in `docs/go-toolchain.md`.
+- Swiftix Go `errors.New`, `errors.Unwrap`, `errors.Is`, and `errors.As`, and
+  the builtin `copy`, which runs natively. `fmt.Errorf` wraps the operands of
+  one or several `%w`, and a program type's `Unwrap` and `Is` methods are
+  honored.
+- Swiftix Go `fmt.Sprintf`, `fmt.Sprint`, `fmt.Sprintln`, `fmt.Errorf`,
+  `fmt.Printf`, and `fmt.Fprintf` with Go's verbs (including `%T`, `%#v`, and
+  `%p`), flags, width, precision, argument indexes (`%[2]d`, `%[1]*d`), and
+  markers for a mistake. The output functions (`fmt.Print`, `Println`,
+  `Printf`, `Fprint`, `Fprintln`, `Fprintf`) can be used as expressions that
+  return `(n, err)`. See "Formatting" in `docs/go-toolchain.md`.
+- `fmt` prints a value by its `Error()` or `String()` method, as an operand
+  and inside slices, maps, and exported struct fields. A method is called on
+  a nil pointer as well, and one that panics prints Go's
+  `%!v(PANIC=String method: ...)`.
+- Variadic functions and methods (`func f(prefix string, values ...int)`),
+  called with any number of arguments or one `slice...`, within a package,
+  across packages, and through an interface. `gofmt` prints `...` in both
+  positions as Go does.
+- Type assertions to an interface type (`value.(sizer)`, with or without
+  `, ok`). The compiler lists the program's types that implement the
+  interface from exact method signatures.
+- Interface methods with several results can be called in a multi-value
+  context (`value, ok := store.Get(key)`, `return store.Get(key)`).
+- A function with results may end in a call to `panic` instead of a `return`.
 - Swiftix Go `strings.ToUpper`, `strings.ToLower`, `strings.Fields`,
   `strings.TrimPrefix`, and `strings.TrimSuffix`. Case mapping and the
   printable test of `%q` use Go 1.24's Unicode 15.0.0 tables
@@ -34,6 +53,25 @@ format, behavior and platform changes are recorded here.
 
 ### Changed
 
+- Swiftix Go interface values carry their dynamic type wherever a value is
+  converted to an interface (assignment, argument, return, composite literal,
+  `append`, channel send), not only in call arguments. A `byte` stored in an
+  interface is no longer an `int`, a named type no longer asserts as its
+  underlying type, and calling a pointer-receiver method through an `error`
+  no longer fails with a bytecode type mismatch.
+- Errors made by `errors.New` and `fmt.Errorf` compare by identity, as in Go:
+  two errors with the same message are different values. The errors of failed
+  library calls still compare by message; see "Known Gaps" in
+  `docs/go-toolchain.md`.
+- `fmt` output now matches Go where it did not: a map prints sorted by key
+  (was insertion order), a nil slice prints `[]` and a nil map `map[]` (was
+  `<nil>`), a pointer to a struct prints `&{...}` and other pointers their
+  address (was `&<pointer>`), a bad-verb marker names a byte `uint8`, a
+  `[]byte` stored in an interface is still text for `%s`, and `fmt.Print`
+  puts a space between two operands only when neither is a string (was
+  never).
+- A type assertion to an interface type used to compile and always fail; it
+  now tests the method set.
 - Swiftix Go maps are hash-indexed and updated in place: lookup, insertion,
   and `delete` are O(1) amortized instead of O(entries). Iteration order is
   unchanged (insertion order). `GoMapStorage.entries` is now computed, and

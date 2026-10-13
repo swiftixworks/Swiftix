@@ -233,14 +233,14 @@ struct GoFormatVerbTests: GoTestHarness {
         ])
     }
 
-    @Test func unimplementedFormsAreMarkedNotApproximated() throws {
-        // Go prints a Go-syntax value, a type name, and a reordered operand
-        // here. This runtime has none of them and says so with Go's markers.
+    @Test func goSyntaxTypeNamesAndArgumentIndexes() throws {
         try expectLines([
-            (#"fmt.Sprintf("%#v %#v %#v", 5, "a", nil)"#, "%!v(int=5) %!v(string=a) %!v(<nil>)"),
-            (#"fmt.Sprintf("%T %T", 5, "a")"#, "%!T(int=5) %!T(string=a)"),
-            (#"fmt.Sprintf("%[1]d", 5)"#, "%!d(BADINDEX)%!(EXTRA int=5)"),
-            (#"fmt.Sprintf("%[2]*[1]d", 5, 3)"#, "%!d(BADINDEX)%!(EXTRA int=3)"),
+            (#"fmt.Sprintf("%#v %#v %#v", 5, "a", nil)"#, #"5 "a" <nil>"#),
+            (#"fmt.Sprintf("%T %T %T", 5, "a", nil)"#, "int string <nil>"),
+            (#"fmt.Sprintf("%[1]d", 5)"#, "5"),
+            (#"fmt.Sprintf("%[2]*[1]d", 5, 3)"#, "  5"),
+            (#"fmt.Sprintf("%[2]d %[1]d %d", 1, 2)"#, "2 1 2"),
+            (#"fmt.Sprintf("%[3]d", 1)"#, "%!d(BADINDEX)"),
         ])
     }
 
@@ -357,21 +357,26 @@ struct GoFormatVerbTests: GoTestHarness {
                 == "wrong number of arguments in call to fmt.Fprintf")
         #expect(
             diagnostic("n := fmt.Printf(\"a\")\nfmt.Println(n)")
-                == "fmt.Printf results are not supported; call it as a statement")
+                == "multiple-value fmt.Printf() in single-value context")
         #expect(
-            diagnostic("n, err := fmt.Fprintf(os.Stdout, \"a\")\nfmt.Println(n, err)")
-                == "fmt.Fprintf results are not supported; call it as a statement")
+            diagnostic("n, err, more := fmt.Fprintf(os.Stdout, \"a\")\nfmt.Println(n, err, more)")
+                != nil)
+        #expect(diagnostic("var n string\nn, _ := fmt.Println()\nfmt.Println(n)") != nil)
         #expect(diagnostic("var n int = fmt.Sprintf(\"a\")\nfmt.Println(n)") != nil)
         #expect(diagnostic("var text string = fmt.Errorf(\"a\")\nfmt.Println(text)") != nil)
         #expect(diagnostic("fmt.Println(fmt.Sprintf(\"%d\", fmt.Println()))") != nil)
-        #expect(diagnostic("fmt.Println(fmt.Sprint(1))") == "undefined: fmt.Sprint")
+        #expect(diagnostic("fmt.Println(fmt.Sscan(1))") == "undefined: fmt.Sscan")
+        #expect(diagnostic("var n int = fmt.Sprint(1)\nfmt.Println(n)") != nil)
         #expect(
             diagnostic(
                 """
-                var text string = fmt.Sprintf("%d", 1)
+                var text string = fmt.Sprintf("%d", 1) + fmt.Sprint(1, 2) + fmt.Sprintln()
                 var failure error = fmt.Errorf("%s", text)
                 fmt.Printf("%v\\n", failure)
                 fmt.Fprintf(os.Stderr, "%s\\n", text)
+                n, err := fmt.Fprintf(os.Stdout, "a")
+                n, err = fmt.Println(n, err)
+                n, err = fmt.Printf("%d", n)
                 """) == nil)
     }
 

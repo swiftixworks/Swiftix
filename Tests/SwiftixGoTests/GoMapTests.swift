@@ -28,14 +28,14 @@ struct GoMapTests: GoTestHarness {
             """)
 
         // An update keeps the key's position; a deleted key that is set again
-        // moves to the end.
+        // moves to the end. Printing sorts by key, as Go's `fmt` does.
         #expect(
             output == """
                 carol 3
                 alice 10
                 dave 4
                 bob 20
-                4 map[carol:3 alice:10 dave:4 bob:20]
+                4 map[alice:10 bob:20 carol:3 dave:4]
 
                 """)
     }

@@ -138,7 +138,7 @@ private struct FormatScanner {
         let pairs = [
             ":=", "++", "--", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<", ">>", "&^",
         ]
-        for spelling in GoCompoundAssignment.spellings {
+        for spelling in GoCompoundAssignment.spellings + [GoSpread.spelling] {
             let end = index + spelling.utf8.count
             if end <= bytes.count, bytes[index..<end].elementsEqual(spelling.utf8) {
                 index = end
@@ -347,6 +347,15 @@ private struct FormatPrinter {
         case ".":
             trimTrailingWhitespace()
             append(".")
+        case GoSpread.spelling:
+            // Before a type it marks a variadic parameter, `values ...T`;
+            // after an argument it spreads a slice, `values...`.
+            if next?.kind == .word || next?.text == "[" || next?.text == "*" {
+                ensureSpace()
+            } else {
+                trimTrailingWhitespace()
+            }
+            append(GoSpread.spelling)
         case ":":
             trimTrailingWhitespace()
             append(":")
@@ -389,7 +398,7 @@ private struct FormatPrinter {
             append("<-")
             append(" ")
         case "*" where isPointerTypeContext:
-            ensureSpace()
+            if previous?.text != GoSpread.spelling { ensureSpace() }
             append("*")
         case "*" where isUnaryOperator:
             if needsSpaceBeforeUnary() { ensureSpace() }
@@ -465,7 +474,11 @@ private struct FormatPrinter {
 
     func shouldSeparateWord(kind: FormatTokenKind) -> Bool {
         guard !current.isEmpty, let previous else { return false }
-        if current.last == " " || previous.text == "(" || previous.text == "." { return false }
+        if current.last == " " || previous.text == "(" || previous.text == "."
+            || previous.text == GoSpread.spelling
+        {
+            return false
+        }
         if previousWasUnaryOperator {
             return false
         }

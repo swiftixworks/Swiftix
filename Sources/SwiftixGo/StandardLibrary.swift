@@ -115,11 +115,12 @@ struct GoNativeFunction: Sendable, Equatable {
     /// Accepts any number of further arguments of any type (`...any`).
     var isVariadic = false
     var results: [GoType] = []
-    /// Go returns `(n, err)`; this dialect supports the call as a statement
-    /// only.
-    var isStatementOnly = false
-    /// The variadic arguments are operands of `fmt` verbs, so a `[]byte`
-    /// among them is boxed with its type for `%s` and `%x`.
+    /// Call name used when the call is a statement, a `go`, or a `defer`,
+    /// whose results nobody reads. The VM then pushes none, which keeps a
+    /// statement's bytecode what it was before the results existed.
+    var statementSymbol: String?
+    /// The variadic arguments are `fmt` operands, which are boxed with their
+    /// type when the VM could not tell it from the value.
     var formatsOperands = false
 }
 
@@ -144,6 +145,18 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$errors.New", goName: "errors.New", parameters: [.string],
                 results: [failure])
+        case ("errors", "Unwrap"):
+            return GoNativeFunction(
+                symbol: "$errors.Unwrap", goName: "errors.Unwrap", parameters: [failure],
+                results: [failure])
+        case ("errors", "Is"):
+            return GoNativeFunction(
+                symbol: "$errors.Is", goName: "errors.Is", parameters: [failure, failure],
+                results: [.bool])
+        case ("errors", "As"):
+            return GoNativeFunction(
+                symbol: GoPredeclared.errorsAs, goName: "errors.As",
+                parameters: [failure, .interface([])], results: [.bool])
         case ("strings", "ToUpper"), ("strings", "ToLower"):
             return GoNativeFunction(
                 symbol: "$strings.\(member)", goName: "strings.\(member)",
@@ -156,17 +169,18 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$strings.\(member)", goName: "strings.\(member)",
                 parameters: [.string, .string], results: [.string])
-        case ("fmt", "Fprint"):
+        case ("fmt", "Fprint"), ("fmt", "Fprintln"):
             return GoNativeFunction(
-                symbol: "$fmt.Fprint", goName: "fmt.Fprint", parameters: [file],
-                isVariadic: true, isStatementOnly: true)
-        case ("fmt", "Fprintln"):
-            return GoNativeFunction(
-                symbol: "$fmt.Fprintln", goName: "fmt.Fprintln", parameters: [file],
-                isVariadic: true, isStatementOnly: true)
+                symbol: "$fmt.\(member).n", goName: "fmt.\(member)", parameters: [file],
+                isVariadic: true, results: [.int, failure],
+                statementSymbol: "$fmt.\(member)", formatsOperands: true)
         case ("fmt", "Sprintf"):
             return GoNativeFunction(
                 symbol: "$fmt.Sprintf", goName: "fmt.Sprintf", parameters: [.string],
+                isVariadic: true, results: [.string], formatsOperands: true)
+        case ("fmt", "Sprint"), ("fmt", "Sprintln"):
+            return GoNativeFunction(
+                symbol: "$fmt.\(member)", goName: "fmt.\(member)", parameters: [],
                 isVariadic: true, results: [.string], formatsOperands: true)
         case ("fmt", "Errorf"):
             return GoNativeFunction(
@@ -174,12 +188,14 @@ extension GoStandardLibrary {
                 isVariadic: true, results: [failure], formatsOperands: true)
         case ("fmt", "Printf"):
             return GoNativeFunction(
-                symbol: "$fmt.Printf", goName: "fmt.Printf", parameters: [.string],
-                isVariadic: true, isStatementOnly: true, formatsOperands: true)
+                symbol: "$fmt.Printf.n", goName: "fmt.Printf", parameters: [.string],
+                isVariadic: true, results: [.int, failure],
+                statementSymbol: "$fmt.Printf", formatsOperands: true)
         case ("fmt", "Fprintf"):
             return GoNativeFunction(
-                symbol: "$fmt.Fprintf", goName: "fmt.Fprintf", parameters: [file, .string],
-                isVariadic: true, isStatementOnly: true, formatsOperands: true)
+                symbol: "$fmt.Fprintf.n", goName: "fmt.Fprintf", parameters: [file, .string],
+                isVariadic: true, results: [.int, failure],
+                statementSymbol: "$fmt.Fprintf", formatsOperands: true)
         case ("os", "ReadFile"):
             return GoNativeFunction(
                 symbol: "$os.ReadFile", goName: "os.ReadFile", parameters: [.string],
@@ -308,6 +324,12 @@ extension GoStandardLibrary {
         }
     }
 
+    /// Call name of `fmt.Print` or `fmt.Println` where its `(n, err)` is
+    /// read. As a statement each is the `print` instruction.
+    static func printCountSymbol(newline: Bool) -> String {
+        newline ? "$fmt.Println.n" : "$fmt.Print.n"
+    }
+
     /// Whether the linker may leave `name` for the VM to resolve natively.
     static func isNativeCallName(_ name: String) -> Bool {
         nativeCallNames.contains(name)
@@ -319,8 +341,11 @@ extension GoStandardLibrary {
             + [
                 GoPredeclared.copyElements, GoPredeclared.appendElements,
                 "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
-                "$fmt.Fprint", "$fmt.Fprintln",
-                "$fmt.Sprintf", "$fmt.Errorf", "$fmt.Printf", "$fmt.Fprintf",
+                "$errors.Unwrap", "$errors.Is", GoPredeclared.errorsAs,
+                "$fmt.Fprint", "$fmt.Fprintln", "$fmt.Fprint.n", "$fmt.Fprintln.n",
+                "$fmt.Sprintf", "$fmt.Errorf", "$fmt.Sprint", "$fmt.Sprintln",
+                "$fmt.Printf", "$fmt.Fprintf", "$fmt.Printf.n", "$fmt.Fprintf.n",
+                printCountSymbol(newline: false), printCountSymbol(newline: true),
                 "$strings.ToUpper", "$strings.ToLower", "$strings.Fields",
                 "$strings.TrimPrefix", "$strings.TrimSuffix",
                 "$os.File.Write", "$os.File.WriteString", "$os.File.Read",
@@ -353,8 +378,24 @@ enum GoPredeclared {
     static let runeToString = "$conv.runeToString"
     static let conversionCallNames = [bytesToString, stringToBytes, runeToString]
 
-    /// Dynamic type name a `[]byte` operand of a `fmt` verb is boxed with.
-    static let byteSliceTypeName = "[]uint8"
+    /// Prefix of the type name a value converted to an interface is boxed
+    /// with: a descriptor of its type follows. The VM decodes it as
+    /// `GoTypeDescriptor`.
+    static let typeDescriptorMarker = "$T"
+
+    /// Type name that marks a `[]any` given as `values...` to a `...any`
+    /// parameter of the library.
+    static let spreadOperandsTypeName = "$spread"
+
+    /// Native call of `errors.As`. Its target is a pointer, which stays bare,
+    /// and the compiler adds what the target's type is as a third operand.
+    static let errorsAs = "$errors.As"
+
+    /// Prefix of that operand, and of the target of a type assertion, when
+    /// the target is an interface: `<name>:<parameters>:<results>` of each
+    /// method follow in name order, separated by commas, then `;` and the
+    /// interface's type name, then a line for each type that implements it.
+    static let interfaceTarget = "$I"
 
     /// Native call the builtin `copy` lowers to.
     static let copyElements = "$copy"

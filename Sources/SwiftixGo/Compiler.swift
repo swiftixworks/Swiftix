@@ -144,7 +144,8 @@ public enum GoCompiler {
                     MethodInfo(
                         functionName: key,
                         receiverType: compilerResolve(receiver.type),
-                        resultTypes: function.resultTypes.map(compilerResolve))
+                        resultTypes: function.resultTypes.map(compilerResolve),
+                        parameterTypes: function.parameters.map { compilerResolve($0.type) })
                 )
             })
         var initIndex = 0
@@ -343,7 +344,8 @@ public enum GoCompiler {
                     MethodInfo(
                         functionName: key,
                         receiverType: compilerResolve(receiver.type),
-                        resultTypes: function.resultTypes.map(compilerResolve))
+                        resultTypes: function.resultTypes.map(compilerResolve),
+                        parameterTypes: function.parameters.map { compilerResolve($0.type) })
                 )
             })
         var initIndex = 0
@@ -516,7 +518,7 @@ public enum GoCompiler {
                     let identity = receiverIdentity(compilerResolve(receiver.type))
                 else { return nil }
                 let key = methodKey(baseName: identity.baseName, pointer: identity.isPointer, method: function.name)
-                return (key, MethodInfo(functionName: key, receiverType: compilerResolve(receiver.type), resultTypes: function.resultTypes.map(compilerResolve)))
+                return (key, MethodInfo(functionName: key, receiverType: compilerResolve(receiver.type), resultTypes: function.resultTypes.map(compilerResolve), parameterTypes: function.parameters.map { compilerResolve($0.type) }))
             })
 
         // Compile functions with mangled names: packageName.FunctionName
@@ -614,6 +616,10 @@ private struct MethodInfo {
     let functionName: String
     let receiverType: GoType
     let resultTypes: [GoType]
+    /// Types of the parameters besides the receiver.
+    let parameterTypes: [GoType]
+
+    var parameterCount: Int { parameterTypes.count }
 
     var returnCount: Int { resultTypes.count }
 }
@@ -1300,6 +1306,8 @@ private struct IRLowerer {
     var continueLabels: [Int] = []
     var testAbortLabels: [Int] = []
     var resultRegisters: [Int] = []
+    /// Declared result types of the function being lowered.
+    var resultTypes: [GoType] = []
     /// Distinguishes the wrappers of separately compiled packages.
     var wrapperNamespace = "main"
     /// Functions synthesized for `go`/`defer` of a native library call.
@@ -1317,7 +1325,7 @@ private struct IRLowerer {
         for parameter in function.parameters {
             scopes[0][parameter.name] = LoweredBinding(
                 register: allocateRegister(),
-                type: resolve(parameter.type))
+                type: resolve(parameter.type).parameterType)
         }
         for (name, resultType) in zip(function.resultNames, function.resultTypes) {
             let register = allocateRegister()
@@ -1328,6 +1336,7 @@ private struct IRLowerer {
                 scopes[0][name] = LoweredBinding(register: register, type: type)
             }
             resultRegisters.append(register)
+            resultTypes.append(type)
         }
         try lower(function.body, createsScope: false)
         if function.resultTypes.isEmpty, operations.last != .return {
@@ -1353,7 +1362,7 @@ private struct IRLowerer {
             }
             let value: Int
             if let expression = declaration.expression {
-                value = try lower(expression)
+                value = try lowerConverted(expression, to: global.type)
             } else {
                 value = try zeroValue(for: global.type, position: declaration.position)
             }
@@ -1377,7 +1386,7 @@ private struct IRLowerer {
         case .declaration(let name, let explicitType, let expression, _, let position):
             let variable = allocateRegister()
             if let expression {
-                let value = try lower(expression)
+                let value = try lowerConverted(expression, to: explicitType.map(resolve))
                 operations.append(.copy(destination: variable, source: value))
             } else if let explicitType {
                 let value = try zeroValue(
@@ -1396,7 +1405,7 @@ private struct IRLowerer {
                 type: variableType)
 
         case .assignment(let target, let expression, _):
-            let value = try lower(expression)
+            let value = try lowerConverted(expression, to: try? type(of: target))
             try store(value, to: target)
 
         case .multiDeclaration(let names, let expression, let position):
@@ -1462,7 +1471,7 @@ private struct IRLowerer {
                 let value = allocateRegister()
                 let ok = allocateRegister()
                 let zero = try zeroValue(for: type, position: assertedType.position)
-                guard let targetName = concreteTypeName(type) else {
+                guard let targetName = assertedTypeName(type) else {
                     throw GoDiagnostic(position: position, message: "unsupported asserted type")
                 }
                 operations.append(.typeAssert(
@@ -1540,7 +1549,7 @@ private struct IRLowerer {
                 let value = allocateRegister()
                 let ok = allocateRegister()
                 let zero = try zeroValue(for: type, position: assertedType.position)
-                guard let targetName = concreteTypeName(type) else {
+                guard let targetName = assertedTypeName(type) else {
                     throw GoDiagnostic(position: position, message: "unsupported asserted type")
                 }
                 operations.append(.typeAssert(
@@ -1557,8 +1566,13 @@ private struct IRLowerer {
             guard let results = try lowerMultiReturnCall(callee: callee, arguments: arguments) else {
                 throw GoDiagnostic(position: position, message: "function does not return multiple values")
             }
-            for (target, register) in zip(targets, results) {
-                try store(register, to: target)
+            let types = multiReturnTypes(callee: callee)
+            for (index, (target, register)) in zip(targets, results).enumerated() {
+                try store(
+                    converted(
+                        register, from: index < types.count ? types[index] : nil,
+                        to: try? type(of: target)),
+                    to: target)
             }
 
         case .increment(let target, let incrementOperator, _):
@@ -1590,7 +1604,10 @@ private struct IRLowerer {
                 // `return f()` forwards every result of a multi-result call.
                 operations.append(.returnValues(sources: results))
             } else {
-                let sources = try values.map { try lower($0) }
+                let sources = try values.enumerated().map { index, value in
+                    try lowerConverted(
+                        value, to: index < resultTypes.count ? resultTypes[index] : nil)
+                }
                 operations.append(.returnValues(sources: sources))
             }
 
@@ -1614,7 +1631,8 @@ private struct IRLowerer {
                 operations.append(.deferCall(
                     function: wrapper.name, arguments: wrapper.registers))
             } else if case .identifier(let functionName, _) = callee {
-                let registers = try arguments.map { try lower($0) }
+                let registers = try lowerArguments(
+                    arguments, parameters: functionParameterTypes[functionName])
                 operations.append(.deferCall(
                     function: functionSymbolNames[functionName] ?? functionName,
                     arguments: registers))
@@ -1629,9 +1647,17 @@ private struct IRLowerer {
                 lookup(packageName) == nil,
                 globalInfos[packageName] == nil
             {
-                let registers = try arguments.map { try lower($0) }
-                let resolvedName = "\(packageName).\(member)"
-                operations.append(.deferCall(function: resolvedName, arguments: registers))
+                if let newline = printCall(callee) {
+                    let registers = try lowerFormatOperands(arguments)
+                    operations.append(
+                        .deferCall(
+                            function: printWrapper(newline: newline, operandCount: registers.count),
+                            arguments: registers))
+                } else {
+                    let registers = try arguments.map { try lower($0) }
+                    operations.append(
+                        .deferCall(function: "\(packageName).\(member)", arguments: registers))
+                }
             } else if case .selector(let base, let member, _) = callee,
                 let receiverType = try? type(of: base),
                 let receiverName = syncReceiverName(receiverType)
@@ -1664,7 +1690,8 @@ private struct IRLowerer {
                 } else {
                     receiver = try lower(base)
                 }
-                let registers = [receiver] + (try arguments.map { try lower($0) })
+                let registers =
+                    [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
                 operations.append(.deferCall(
                     function: info.functionName,
                     arguments: registers))
@@ -1682,7 +1709,8 @@ private struct IRLowerer {
             } else if case .identifier(let functionName, _) = callee {
                 operations.append(.spawn(
                     function: functionSymbolNames[functionName] ?? functionName,
-                    arguments: try arguments.map { try lower($0) }))
+                    arguments: try lowerArguments(
+                        arguments, parameters: functionParameterTypes[functionName])))
             } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
                 let name = runtimeLiteralName(literalPosition)
                 operations.append(.spawn(
@@ -1693,9 +1721,17 @@ private struct IRLowerer {
                 lookup(packageName) == nil,
                 globalInfos[packageName] == nil
             {
-                operations.append(.spawn(
-                    function: "\(packageName).\(member)",
-                    arguments: try arguments.map { try lower($0) }))
+                if let newline = printCall(callee) {
+                    let registers = try lowerFormatOperands(arguments)
+                    operations.append(
+                        .spawn(
+                            function: printWrapper(newline: newline, operandCount: registers.count),
+                            arguments: registers))
+                } else {
+                    operations.append(.spawn(
+                        function: "\(packageName).\(member)",
+                        arguments: try arguments.map { try lower($0) }))
+                }
             } else if case .selector(let base, let member, _) = callee,
                 let receiverType = try? type(of: base),
                 let receiverName = syncReceiverName(receiverType)
@@ -1730,15 +1766,20 @@ private struct IRLowerer {
                 }
                 operations.append(.spawn(
                     function: info.functionName,
-                    arguments: [receiver] + (try arguments.map { try lower($0) })))
+                    arguments: [receiver]
+                        + (try lowerArguments(arguments, parameters: info.parameterTypes))))
             } else {
                 throw GoDiagnostic(position: position, message: "unsupported go expression")
             }
 
         case .sendStatement(let channel, let value, _):
+            var elementType: GoType?
+            if case .channel(_, let element)? = (try? type(of: channel)).map({ underlying($0) }) {
+                elementType = element
+            }
             operations.append(.sendChannel(
                 channel: try lower(channel),
-                value: try lower(value)))
+                value: try lowerConverted(value, to: elementType)))
 
         case .ifStatement(let condition, let thenBlock, let elseBlock, _):
             let falseLabel = allocateLabel()
@@ -2046,6 +2087,18 @@ private struct IRLowerer {
 
     mutating func lowerExpressionStatement(_ expression: GoExpression) throws {
         if case .call(let callee, let arguments, _) = expression {
+            if let native = nativeFunction(for: callee),
+                let symbol = native.function.statementSymbol
+            {
+                // Nobody reads the results, so the VM is asked for none.
+                operations.append(
+                    .call(
+                        function: symbol,
+                        arguments: try lowerNativeOperands(
+                            native.function, receiver: native.receiver, arguments: arguments),
+                        destinations: []))
+                return
+            }
             _ = try lowerCall(callee: callee, arguments: arguments)
             return
         }
@@ -2147,7 +2200,7 @@ private struct IRLowerer {
                         .append(
                             destination: destination,
                             slice: slice,
-                            value: try lower(argument),
+                            value: try lowerConverted(argument, to: elementType),
                             zero: zero))
                     slice = destination
                 }
@@ -2199,22 +2252,9 @@ private struct IRLowerer {
                 operations.append(.cancelContext(ctx: cancelFunc))
                 return nil
             }
-            var registers = try arguments.map { try lower($0) }
-            // Wrap arguments into interface values if parameter types are interfaces
-            if let paramTypes = functionParameterTypes[functionName] {
-                for (i, paramType) in paramTypes.enumerated() where i < registers.count {
-                    if case .interface = underlying(paramType) {
-                        let argType = try type(of: arguments[i])
-                        if case .interface = underlying(argType) { continue }
-                        if argType == .nilType { continue }
-                        let typeName = concreteTypeName(argType) ?? "unknown"
-                        let wrapped = allocateRegister()
-                        operations.append(.makeInterface(
-                            destination: wrapped, source: registers[i], typeName: typeName))
-                        registers[i] = wrapped
-                    }
-                }
-            }
+            // An argument passed to an interface parameter is converted.
+            let registers = try lowerArguments(
+                arguments, parameters: functionParameterTypes[functionName])
             let returnCount = functionReturnCounts[functionName] ?? 0
             let destinations = (0..<returnCount).map { _ in allocateRegister() }
             operations.append(
@@ -2348,12 +2388,18 @@ private struct IRLowerer {
             case .identifier(let packageName, _) = base,
             let builtin = GoStandardLibrary.resolve(package: packageName, member: member)
         {
+            if builtin == .fmtPrint || builtin == .fmtPrintln {
+                operations.append(
+                    .print(
+                        arguments: try lowerFormatOperands(arguments),
+                        newline: builtin == .fmtPrintln))
+                return nil
+            }
             let registers = try arguments.map { try lower($0) }
             switch builtin {
-            case .fmtPrint:
-                operations.append(.print(arguments: registers, newline: false))
-            case .fmtPrintln:
-                operations.append(.print(arguments: registers, newline: true))
+            case .fmtPrint, .fmtPrintln:
+                // Lowered above, with their operands boxed.
+                break
             case .timeAfter:
                 guard let duration = registers.first else {
                     throw GoDiagnostic(
@@ -2522,7 +2568,8 @@ private struct IRLowerer {
             // Check if this is a known imported package function (not fmt, not a method)
             let mangledName = packageName + "." + member
             if functionReturnCounts[mangledName] != nil || functionParameterTypes[mangledName] != nil {
-                let registers = try arguments.map { try lower($0) }
+                let registers = try lowerArguments(
+                    arguments, parameters: functionParameterTypes[mangledName])
                 let returnCount = functionReturnCounts[mangledName] ?? 0
                 let destinations = (0..<returnCount).map { _ in allocateRegister() }
                 operations.append(
@@ -2540,7 +2587,7 @@ private struct IRLowerer {
                 let method = methods.first(where: { $0.name == member })
             {
                 let receiver = try lower(base)
-                let argRegisters = try arguments.map { try lower($0) }
+                let argRegisters = try lowerArguments(arguments, parameters: method.parameters)
                 let returnCount = method.results.count
                 let destinations = (0..<returnCount).map { _ in allocateRegister() }
                 operations.append(
@@ -2571,7 +2618,8 @@ private struct IRLowerer {
             } else {
                 receiver = try lower(base)
             }
-            let registers = [receiver] + (try arguments.map { try lower($0) })
+            let registers =
+                [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
             let destinations = (0..<info.returnCount).map { _ in allocateRegister() }
             operations.append(
                 .call(
@@ -2583,10 +2631,21 @@ private struct IRLowerer {
         throw GoDiagnostic(position: callee.position, message: "unsupported function call")
     }
 
+    /// Whether `callee` is `fmt.Println` (true) or `fmt.Print` (false), or
+    /// nil for anything else.
+    func printCall(_ callee: GoExpression) -> Bool? {
+        guard case .selector(.identifier("fmt", _), let member, _) = callee,
+            lookup("fmt") == nil, globalInfos["fmt"] == nil,
+            member == "Print" || member == "Println"
+        else { return nil }
+        return member == "Println"
+    }
+
     func multiReturnTypes(callee: GoExpression) -> [GoType] {
         if let native = nativeFunction(for: callee) {
             return native.function.results
         }
+        if printCall(callee) != nil { return [.int, GoPredeclared.errorType] }
         if case .identifier(let name, _) = callee {
             return functionResultTypes[name] ?? []
         }
@@ -2637,6 +2696,13 @@ private struct IRLowerer {
         {
             return info.resultTypes
         }
+        if case .selector(let base, let name, _) = callee,
+            let baseType = try? type(of: base),
+            case .interface(let methods) = underlying(baseType),
+            let method = methods.first(where: { $0.name == name })
+        {
+            return method.results
+        }
         return []
     }
 
@@ -2646,6 +2712,15 @@ private struct IRLowerer {
     ) throws -> [Int]? {
         if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
             return results
+        }
+        if let newline = printCall(callee) {
+            let destinations = [allocateRegister(), allocateRegister()]
+            operations.append(
+                .call(
+                    function: GoStandardLibrary.printCountSymbol(newline: newline),
+                    arguments: try lowerFormatOperands(arguments),
+                    destinations: destinations))
+            return destinations
         }
         // Handle context.WithCancel / context.WithTimeout as multi-return builtins
         if case .selector(let base, let member, _) = callee,
@@ -2781,11 +2856,30 @@ private struct IRLowerer {
         if case .identifier(let functionName, _) = callee {
             let returnCount = functionReturnCounts[functionName] ?? 0
             guard returnCount > 1 else { return nil }
-            let registers = try arguments.map { try lower($0) }
+            let registers = try lowerArguments(
+                arguments, parameters: functionParameterTypes[functionName])
             let destinations = (0..<returnCount).map { _ in allocateRegister() }
             operations.append(
                 .call(
                     function: functionSymbolNames[functionName] ?? functionName,
+                    arguments: registers,
+                    destinations: destinations))
+            return destinations
+        }
+        // A method of an interface value, found when the call runs.
+        if case .selector(let base, let member, _) = callee,
+            let baseType = try? type(of: base),
+            case .interface(let methods) = underlying(baseType),
+            let method = methods.first(where: { $0.name == member })
+        {
+            guard method.results.count > 1 else { return nil }
+            let receiver = try lower(base)
+            let registers = try lowerArguments(arguments, parameters: method.parameters)
+            let destinations = method.results.map { _ in allocateRegister() }
+            operations.append(
+                .callInterface(
+                    method: member,
+                    receiver: receiver,
                     arguments: registers,
                     destinations: destinations))
             return destinations
@@ -2810,7 +2904,8 @@ private struct IRLowerer {
             } else {
                 receiver = try lower(base)
             }
-            let registers = [receiver] + (try arguments.map { try lower($0) })
+            let registers =
+                [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
             let destinations = (0..<info.returnCount).map { _ in allocateRegister() }
             operations.append(
                 .call(
@@ -2936,7 +3031,7 @@ private struct IRLowerer {
             return destination
         case .typeAssertion(let base, let assertedType, let position):
             let type = resolve(assertedType)
-            guard let targetName = concreteTypeName(type) else {
+            guard let targetName = assertedTypeName(type) else {
                 throw GoDiagnostic(position: position, message: "unsupported asserted type")
             }
             let destination = allocateRegister()
@@ -2965,13 +3060,16 @@ private struct IRLowerer {
                         })
                     for field in fields {
                         if let expression = keyed[field.name] {
-                            values.append(try lower(expression))
+                            values.append(try lowerConverted(expression, to: field.type))
                         } else {
                             values.append(try zeroValue(for: field.type, position: position))
                         }
                     }
                 } else {
-                    values = try elements.map { try lower($0.value) }
+                    values = try elements.enumerated().map { index, element in
+                        try lowerConverted(
+                            element.value, to: index < fields.count ? fields[index].type : nil)
+                    }
                 }
                 operations.append(
                     .makeStruct(
@@ -2980,7 +3078,7 @@ private struct IRLowerer {
                         fieldNames: fields.map(\.name),
                         values: values))
             case .array(let length, let elementType):
-                var values = try elements.map { try lower($0.value) }
+                var values = try elements.map { try lowerConverted($0.value, to: elementType) }
                 while values.count < length {
                     values.append(try zeroValue(for: elementType, position: position))
                 }
@@ -2991,19 +3089,19 @@ private struct IRLowerer {
                     .makeSlice(
                         destination: destination,
                         zero: zero,
-                        values: try elements.map { try lower($0.value) }))
-            case .map:
+                        values: try elements.map { try lowerConverted($0.value, to: elementType) }))
+            case .map(let keyType, let valueType):
                 var keys: [Int] = []
                 var values: [Int] = []
                 for element in elements {
                     if let keyExpression = element.keyExpression {
-                        keys.append(try lower(keyExpression))
+                        keys.append(try lowerConverted(keyExpression, to: keyType))
                     } else if let key = element.key {
                         keys.append(constant(.string(key)))
                     } else {
                         throw GoDiagnostic(position: element.position, message: "missing key in map literal")
                     }
-                    values.append(try lower(element.value))
+                    values.append(try lowerConverted(element.value, to: valueType))
                 }
                 operations.append(.makeMap(destination: destination, keys: keys, values: values))
             default:
@@ -3230,6 +3328,55 @@ private struct IRLowerer {
     func typeName(of type: GoType) -> String? {
         guard case .named(let name) = type else { return nil }
         return name
+    }
+
+    /// The name a type assertion compares the dynamic type with. Types that
+    /// earlier compilers could name keep that name, which the VM reads as the
+    /// same identity; any other concrete type is named by its descriptor.
+    /// What a type assertion, and `errors.As`, test a value's dynamic type
+    /// against: a concrete type by its name or descriptor, an interface by
+    /// the methods it asks for.
+    func assertedTypeName(_ type: GoType) -> String? {
+        if case .interface(let methods) = underlying(type) {
+            var name = ""
+            if case .named(let symbol) = type { name = symbol }
+            let wanted = methods.sorted { $0.name < $1.name }
+            return GoPredeclared.interfaceTarget
+                + wanted.map { "\($0.name):\($0.parameters.count):\($0.results.count)" }
+                .joined(separator: ",") + ";" + name
+                + implementers(of: wanted).map { "\n" + $0 }.joined()
+        }
+        return concreteTypeName(type) ?? typeDescriptor(for: type)
+    }
+
+    /// The types of the program that implement an interface, `T` or `*T` as
+    /// methods are registered: those whose method set has every method with
+    /// the same parameter and result types. A value's method set holds the
+    /// methods with a value receiver; a pointer's holds them all.
+    func implementers(of methods: [GoInterfaceMethod]) -> [String] {
+        guard !methods.isEmpty else { return [] }
+        var bases: Set<String> = []
+        for key in methodInfos.keys {
+            guard let dot = key.lastIndex(of: ".") else { continue }
+            let owner = key[..<dot]
+            bases.insert(String(owner.hasPrefix("*") ? owner.dropFirst() : owner))
+        }
+        var owners: [String] = []
+        for base in bases.sorted() {
+            func has(_ method: GoInterfaceMethod, throughPointer: Bool) -> Bool {
+                let found =
+                    methodInfos[methodKey(baseName: base, pointer: false, method: method.name)]
+                    ?? (throughPointer
+                        ? methodInfos[
+                            methodKey(baseName: base, pointer: true, method: method.name)] : nil)
+                guard let found else { return false }
+                return found.parameterTypes == method.parameters
+                    && found.resultTypes == method.results
+            }
+            if methods.allSatisfy({ has($0, throughPointer: false) }) { owners.append(base) }
+            if methods.allSatisfy({ has($0, throughPointer: true) }) { owners.append("*" + base) }
+        }
+        return owners
     }
 
     func concreteTypeName(_ type: GoType) -> String? {
@@ -3650,25 +3797,186 @@ private struct IRLowerer {
         var registers: [Int] = []
         if let receiver { registers.append(try lower(receiver)) }
         let fixedCount = function.parameters.count - registers.count
+        let receiverCount = registers.count
         for (index, argument) in arguments.enumerated() {
-            var register = try lower(argument)
-            // The VM cannot tell a `[]byte` from a slice of integers, which
-            // `%s` and `%x` print differently.
-            if function.formatsOperands, index >= fixedCount,
-                case .slice(let element) = underlying(try type(of: argument)),
-                GoPredeclared.isByte(element, definitions: typeDefinitions)
+            if function.isVariadic, index == fixedCount, arguments.count == fixedCount + 1,
+                let operand = argument.spreadOperand
             {
-                let boxed = allocateRegister()
-                operations.append(
-                    .makeInterface(
-                        destination: boxed,
-                        source: register,
-                        typeName: GoPredeclared.byteSliceTypeName))
-                register = boxed
+                registers.append(spreadOperands(try lower(operand)))
+                continue
             }
-            registers.append(register)
+            let register = try lower(argument)
+            if function.formatsOperands, index >= fixedCount {
+                registers.append(formatOperand(register, for: argument))
+            } else if function.symbol == GoPredeclared.errorsAs, index == 1 {
+                // The target is the pointer itself, not an interface value.
+                registers.append(register)
+            } else {
+                let parameter = index + receiverCount
+                registers.append(
+                    converted(
+                        register, from: staticType(of: argument),
+                        to: parameter < function.parameters.count
+                            ? function.parameters[parameter] : nil))
+            }
+        }
+        if function.symbol == GoPredeclared.errorsAs {
+            registers.append(constant(.string(try errorsAsTarget(arguments))))
         }
         return registers
+    }
+
+    /// What `errors.As` looks for in an error chain, from the static type of
+    /// its target: the name of a concrete type, or the methods of an
+    /// interface.
+    func errorsAsTarget(_ arguments: [GoExpression]) throws -> String {
+        guard arguments.count == 2, case .pointer(let pointee)? = staticType(of: arguments[1])
+        else {
+            throw GoDiagnostic(
+                position: arguments.last?.position ?? GoSourcePosition(path: "", offset: 0, line: 1, column: 1),
+                message: "second argument to errors.As must be a non-nil pointer to either a type that implements error, or to any interface type")
+        }
+        guard let name = assertedTypeName(pointee) else {
+            throw GoDiagnostic(
+                position: arguments[1].position, message: "unsupported errors.As target type")
+        }
+        return name
+    }
+
+    /// The descriptor a value of `type` is boxed with when it becomes an
+    /// interface value, or nil when it needs none: an `int`, a `string`, and
+    /// a `bool` show their type themselves, and an interface already carries
+    /// its value's.
+    func typeDescriptor(for type: GoType) -> String? {
+        switch type {
+        case .int, .string, .bool, .void, .nilType: return nil
+        default: break
+        }
+        if case .interface = underlying(type) { return nil }
+        var encoder = GoTypeEncoder(definitions: typeDefinitions, packageName: "main")
+        return GoPredeclared.typeDescriptorMarker + encoder.descriptor(of: type)
+    }
+
+    /// Go converts a value assigned to an interface, which then holds the
+    /// value and its type. Returns `register`, a value of type `source`,
+    /// boxed with its descriptor when `target` is an interface type.
+    mutating func converted(_ register: Int, from source: GoType?, to target: GoType?) -> Int {
+        guard let target, isInterfaceType(target), let source,
+            let descriptor = typeDescriptor(for: source)
+        else { return register }
+        let boxed = allocateRegister()
+        operations.append(
+            .makeInterface(destination: boxed, source: register, typeName: descriptor))
+        return boxed
+    }
+
+    /// The static type of `expression`, when the lowerer can tell it.
+    func staticType(of expression: GoExpression) -> GoType? {
+        (try? type(of: expression)) ?? interfaceCallResult(expression)
+    }
+
+    /// Lowers `expression` as a value of type `target`, converting it when
+    /// the target is an interface.
+    mutating func lowerConverted(_ expression: GoExpression, to target: GoType?) throws -> Int {
+        converted(try lower(expression), from: staticType(of: expression), to: target)
+    }
+
+    /// Lowers call arguments against the parameter types they are passed to.
+    ///
+    /// A variadic function receives its further arguments as one slice: the
+    /// slice a `values...` argument names, a new one of the arguments given,
+    /// or nil when there are none.
+    mutating func lowerArguments(
+        _ arguments: [GoExpression],
+        parameters: [GoType]?
+    ) throws -> [Int] {
+        guard let parameters, let element = parameters.last?.variadicElement,
+            arguments.count >= parameters.count - 1
+        else {
+            return try arguments.enumerated().map { index, argument in
+                try lowerConverted(
+                    argument, to: parameters.flatMap { index < $0.count ? $0[index] : nil })
+            }
+        }
+        let fixedCount = parameters.count - 1
+        var registers = try arguments.prefix(fixedCount).enumerated().map { index, argument in
+            try lowerConverted(argument, to: parameters[index])
+        }
+        let rest = arguments.dropFirst(fixedCount)
+        if rest.count == 1, let operand = rest.first?.spreadOperand {
+            registers.append(try lower(operand))
+        } else if rest.isEmpty {
+            registers.append(constant(.nilValue))
+        } else {
+            let position = rest.first?.position ?? GoSourcePosition(path: "", offset: 0, line: 1, column: 1)
+            let zero = try zeroValue(for: element, position: position)
+            let values = try rest.map { try lowerConverted($0, to: element) }
+            let slice = allocateRegister()
+            operations.append(.makeSlice(destination: slice, zero: zero, values: values))
+            registers.append(slice)
+        }
+        return registers
+    }
+
+    /// Converts `register`, the lowered `fmt` operand `argument`, to the
+    /// `any` that the parameter of a `fmt` function is: boxed with its type
+    /// unless the value shows it. The VM formats by that type, and finds an
+    /// `Error` or `String` method through it.
+    mutating func formatOperand(_ register: Int, for argument: GoExpression) -> Int {
+        converted(register, from: staticType(of: argument), to: .interface([]))
+    }
+
+    func isInterfaceType(_ type: GoType) -> Bool {
+        if case .interface = underlying(type) { return true }
+        return false
+    }
+
+    /// The function a `go` or `defer` of `fmt.Print` or `fmt.Println` runs:
+    /// the `print` instruction over its parameters, so the operands are
+    /// formatted in a frame of their own like any other call.
+    mutating func printWrapper(newline: Bool, operandCount: Int) -> String {
+        let name =
+            "$native.\(wrapperNamespace).$fmt.\(newline ? "Println" : "Print").\(operandCount)"
+        if nativeWrappers[name] == nil {
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: operandCount,
+                registerCount: operandCount,
+                operations: [
+                    .print(arguments: Array(0..<operandCount), newline: newline),
+                    .return,
+                ])
+        }
+        return name
+    }
+
+    /// The result type of a method call through an interface value, which
+    /// `type(of:)` does not resolve.
+    func interfaceCallResult(_ expression: GoExpression) -> GoType? {
+        guard case .call(.selector(let base, let name, _), _, _) = expression,
+            let baseType = try? type(of: base),
+            case .interface(let methods) = underlying(baseType)
+        else { return nil }
+        return methods.first { $0.name == name }?.results.first
+    }
+
+    /// Lowers the operands of `fmt.Print` or `fmt.Println`.
+    mutating func lowerFormatOperands(_ arguments: [GoExpression]) throws -> [Int] {
+        if arguments.count == 1, let operand = arguments[0].spreadOperand {
+            return [spreadOperands(try lower(operand))]
+        }
+        return try arguments.map { formatOperand(try lower($0), for: $0) }
+    }
+
+    /// Marks `slice`, the `[]any` of a `values...` argument, as the operands
+    /// of a `...any` parameter: the VM takes its elements in its place.
+    mutating func spreadOperands(_ slice: Int) -> Int {
+        let marked = allocateRegister()
+        operations.append(
+            .makeInterface(
+                destination: marked, source: slice,
+                typeName: GoPredeclared.spreadOperandsTypeName))
+        return marked
     }
 
     /// Lowers a native library call and returns one register per result, or
@@ -3700,8 +4008,11 @@ private struct IRLowerer {
         let registers = try lowerNativeOperands(
             native.function, receiver: native.receiver, arguments: arguments)
         let count = registers.count
-        let resultCount = native.function.results.count
-        let name = "$native.\(wrapperNamespace).\(native.function.symbol).\(count)"
+        // A `go` or `defer` drops the results like a statement does.
+        let symbol = native.function.statementSymbol ?? native.function.symbol
+        let resultCount =
+            native.function.statementSymbol == nil ? native.function.results.count : 0
+        let name = "$native.\(wrapperNamespace).\(symbol).\(count)"
         if nativeWrappers[name] == nil {
             nativeWrappers[name] = GoIRFunction(
                 name: name,
@@ -3709,7 +4020,7 @@ private struct IRLowerer {
                 registerCount: count + resultCount,
                 operations: [
                     .call(
-                        function: native.function.symbol,
+                        function: symbol,
                         arguments: Array(0..<count),
                         destinations: Array(count..<(count + resultCount))),
                     .return,

@@ -175,8 +175,16 @@ private struct Parser {
                 var parameters: [GoTypeExpression] = []
                 while !check(.rightParen) {
                     // Interface methods only declare types, not names
-                    parameters.append(try parseTypeExpression())
+                    let parameter = try parseParameterType()
+                    parameters.append(parameter)
                     if check(.comma) { advance() }
+                    if case .array(GoSpread.variadicLength, _, let position) = parameter,
+                        !check(.rightParen)
+                    {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "can only use ... with final parameter in list")
+                    }
                 }
                 advance()  // consume ')'
                 var results: [GoTypeExpression] = []
@@ -268,7 +276,7 @@ private struct Parser {
                         namePosition
                     ))
             }
-            let type = try parseTypeExpression()
+            let type = try parseParameterType()
             parameters.append(
                 contentsOf: names.map {
                     GoParameter(name: $0.0, type: type, position: $0.1)
@@ -281,6 +289,7 @@ private struct Parser {
             }
         }
         advance()
+        try requireFinalVariadic(parameters)
         var resultNames: [String?] = []
         var resultTypes: [GoTypeExpression] = []
         if case .identifier = current.kind {
@@ -1003,6 +1012,39 @@ private struct Parser {
             return try parseFunctionLiteral()
         default:
             throw diagnostic("expected expression")
+        }
+    }
+
+    /// The type of a parameter, where `...T` is a variadic one: an array type
+    /// of the marker length that stands for it.
+    mutating func parseParameterType() throws -> GoTypeExpression {
+        guard case .identifier(GoSpread.spelling) = current.kind else {
+            return try parseTypeExpression()
+        }
+        let position = current.position
+        advance()
+        return .array(
+            length: GoSpread.variadicLength, element: try parseTypeExpression(),
+            position: position)
+    }
+
+    /// Go allows `...` on the last parameter only, and on one name.
+    func requireFinalVariadic(_ parameters: [GoParameter]) throws {
+        func isVariadic(_ parameter: GoParameter) -> Bool {
+            if case .array(let length, _, _) = parameter.type {
+                return length == GoSpread.variadicLength
+            }
+            return false
+        }
+        for (index, parameter) in parameters.enumerated() where isVariadic(parameter) {
+            let sharesType =
+                index > 0 && parameters[index - 1].type == parameter.type
+                && parameters[index - 1].type.position == parameter.type.position
+            guard index == parameters.count - 1, !sharesType else {
+                throw GoDiagnostic(
+                    position: parameter.type.position,
+                    message: "can only use ... with final parameter in list")
+            }
         }
     }
 

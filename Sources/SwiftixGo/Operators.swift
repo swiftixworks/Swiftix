@@ -134,9 +134,30 @@ extension GoExpression {
 /// as an `.identifier` token carrying its spelling, and the parser represents
 /// `values...` as a `.call` whose callee is the reserved identifier `$spread`.
 /// The node's position is the `...`, which follows its operand.
+///
+/// A variadic parameter `values ...T` uses the same token. Its type is kept
+/// as an array type of length `variadicLength`, which no source array has:
+/// a signature holds that marker, and inside its function the parameter is a
+/// `[]T`.
 enum GoSpread {
     static let spelling = "..."
     static let calleeName = "$spread"
+    static let variadicLength = -1
+}
+
+extension GoType {
+    /// The element type when this is the marker type of a variadic parameter.
+    var variadicElement: GoType? {
+        if case .array(let length, let element) = self, length == GoSpread.variadicLength {
+            return element
+        }
+        return nil
+    }
+
+    /// The type a parameter of this declared type has inside its function.
+    var parameterType: GoType {
+        variadicElement.map { .slice($0) } ?? self
+    }
 }
 
 extension GoExpression {

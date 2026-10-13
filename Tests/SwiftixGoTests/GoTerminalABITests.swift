@@ -297,7 +297,8 @@ struct GoTerminalABITests: GoTestHarness {
 
         session.type("/app\n")
 
-        #expect(session.takeOutput().contains("001 é second\n"))
+        // `fmt.Print` puts a space between operands when neither is a string.
+        #expect(session.takeOutput().contains("0 0 1 é second\n"))
     }
 
     // MARK: - Terminal restoration

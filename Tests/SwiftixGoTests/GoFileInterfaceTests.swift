@@ -214,11 +214,10 @@ struct GoFileInterfaceTests: GoTestHarness {
         #expect(diagnostic("fmt.Fprintln(1, \"x\")") == "cannot use int as *os.File value")
         #expect(diagnostic("fmt.Fprint()") == "wrong number of arguments in call to fmt.Fprint")
         #expect(
-            diagnostic("n, err := fmt.Fprintln(os.Stdout, \"x\")\nfmt.Println(n, err)")
-                == "fmt.Fprintln results are not supported; call it as a statement")
+            diagnostic("n, err := fmt.Fprintln(os.Stdout, \"x\")\nfmt.Println(n, err)") == nil)
         #expect(
             diagnostic("n := fmt.Fprint(os.Stdout, \"x\")\nfmt.Println(n)")
-                == "fmt.Fprint results are not supported; call it as a statement")
+                == "multiple-value fmt.Fprint() in single-value context")
         #expect(
             diagnostic("n := os.Stdout.Write([]byte(\"x\"))\nfmt.Println(n)")
                 == "multiple-value Write() in single-value context")

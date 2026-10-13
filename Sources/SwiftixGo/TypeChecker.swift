@@ -50,7 +50,9 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
         case .structure: return "struct"
         case .pointer(let pointee): return "*\(pointee)"
         case .nilType: return "nil"
-        case .array(let length, let element): return "[\(length)]\(element)"
+        case .array(let length, let element):
+            // The marker type of a variadic parameter.
+            return length < 0 ? "...\(element)" : "[\(length)]\(element)"
         case .slice(let element): return "[]\(element)"
         case .map(let key, let value): return "map[\(key)]\(value)"
         case .channel(let direction, let element):
@@ -621,7 +623,7 @@ private struct FunctionChecker {
                     message: "\(parameter.name) redeclared in this block")
             }
             scopes[scopes.count - 1][parameter.name] = Binding(
-                type: parameterType,
+                type: parameterType.parameterType,
                 isConstant: false)
         }
         for (name, resultType) in zip(function.resultNames, signature.results) {
@@ -1339,7 +1341,7 @@ private struct FunctionChecker {
             if expression.spreadOperand != nil {
                 throw GoDiagnostic(
                     position: position,
-                    message: "can only use ... with the final argument of append")
+                    message: "can only use ... with final argument in list")
             }
             if let target = try conversionTarget(callee) {
                 return try conversionResultType(target, arguments: arguments, position: position)
@@ -1352,14 +1354,7 @@ private struct FunctionChecker {
                         position: position,
                         message: "multiple-value \(native.goName)() in single-value context")
                 }
-                guard let result = native.results.first else {
-                    if native.isStatementOnly {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "\(native.goName) results are not supported; call it as a statement")
-                    }
-                    return .void
-                }
+                guard let result = native.results.first else { return .void }
                 return result
             }
             if case .identifier(let name, let namePosition) = callee {
@@ -1519,13 +1514,14 @@ private struct FunctionChecker {
                     }
                     throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
                 }
-                guard arguments.count <= signature.parameters.count else {
+                let (arguments, parameters) = matched(arguments, to: signature.parameters)
+                guard arguments.count <= parameters.count else {
                     throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
                 }
-                guard arguments.count == signature.parameters.count else {
+                guard arguments.count == parameters.count else {
                     throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
                 }
-                for (argument, parameterType) in zip(arguments, signature.parameters) {
+                for (argument, parameterType) in zip(arguments, parameters) {
                     let argumentType = try type(of: argument)
                     guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
                         throw GoDiagnostic(
@@ -1543,9 +1539,7 @@ private struct FunctionChecker {
                 importedPaths.contains("fmt"),
                 name == "Print" || name == "Println"
             {
-                for argument in arguments where try type(of: argument) == .void {
-                    throw GoDiagnostic(position: argument.position, message: "no value used as value")
-                }
+                try checkAnyOperands(arguments[...])
                 return .void
             }
             if case .identifier("os", _) = base,
@@ -1949,12 +1943,13 @@ private struct FunctionChecker {
                 if case .interface(let methods) = underlying(baseType),
                     let method = methods.first(where: { $0.name == name })
                 {
-                    guard arguments.count == method.parameters.count else {
+                    let (arguments, parameters) = matched(arguments, to: method.parameters)
+                    guard arguments.count == parameters.count else {
                         throw GoDiagnostic(
                             position: position,
                             message: "wrong number of arguments in call to \(name)")
                     }
-                    for (argument, parameterType) in zip(arguments, method.parameters) {
+                    for (argument, parameterType) in zip(arguments, parameters) {
                         try require(argument, assignableTo: parameterType)
                     }
                     return method.results.first ?? .void
@@ -1968,13 +1963,14 @@ private struct FunctionChecker {
                     position: base.position,
                     message: "cannot call pointer method on non-addressable value")
             }
-            guard arguments.count <= signature.parameters.count else {
+            let (arguments, parameters) = matched(arguments, to: signature.parameters)
+            guard arguments.count <= parameters.count else {
                 throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
             }
-            guard arguments.count == signature.parameters.count else {
+            guard arguments.count == parameters.count else {
                 throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
             }
-            for (argument, parameterType) in zip(arguments, signature.parameters) {
+            for (argument, parameterType) in zip(arguments, parameters) {
                 try require(argument, assignableTo: parameterType)
             }
             return signature.results.first ?? .void
@@ -2465,11 +2461,27 @@ private struct FunctionChecker {
         for (argument, parameter) in zip(arguments, parameters) {
             try require(argument, assignableTo: parameter)
         }
-        for argument in arguments.dropFirst(parameters.count)
-        where try type(of: argument) == .void {
+        try checkAnyOperands(arguments.dropFirst(parameters.count))
+        return function
+    }
+
+    /// Checks the operands of a `...any` parameter: any number of values, or
+    /// one `[]any` followed by `...`.
+    mutating func checkAnyOperands(_ operands: ArraySlice<GoExpression>) throws {
+        if operands.count == 1, let operand = operands.first?.spreadOperand {
+            let operandType = try type(of: operand)
+            guard case .slice(let element) = underlying(operandType),
+                case .interface(let methods) = underlying(element), methods.isEmpty
+            else {
+                throw GoDiagnostic(
+                    position: operand.position,
+                    message: "cannot use \(operandType) as []interface{} value in argument")
+            }
+            return
+        }
+        for argument in operands where try type(of: argument) == .void {
             throw GoDiagnostic(position: argument.position, message: "no value used as value")
         }
-        return function
     }
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {
@@ -2493,6 +2505,25 @@ private struct FunctionChecker {
         }
         guard case .structure(let fields) = underlying(candidate) else { return nil }
         return fields
+    }
+
+    /// The arguments of a call paired with the parameter types they are
+    /// checked against. A variadic function takes its fixed parameters and
+    /// then any number of its element type, or one slice followed by `...`,
+    /// which stands here by its operand.
+    func matched(
+        _ arguments: [GoExpression],
+        to parameters: [GoType]
+    ) -> (arguments: [GoExpression], parameters: [GoType]) {
+        guard let element = parameters.last?.variadicElement else { return (arguments, parameters) }
+        let fixed = Array(parameters.dropLast())
+        if arguments.count == parameters.count, let operand = arguments.last?.spreadOperand {
+            return (arguments.dropLast() + [operand], fixed + [.slice(element)])
+        }
+        return (
+            arguments,
+            fixed + Array(repeating: element, count: max(0, arguments.count - fixed.count))
+        )
     }
 
     /// Whether a value of `source` supplies elements for a slice of `element`
@@ -2723,12 +2754,13 @@ private struct FunctionChecker {
             guard let signature = functionSignatures[name] else {
                 throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
             }
-            guard arguments.count == signature.parameters.count else {
+            let (arguments, parameters) = matched(arguments, to: signature.parameters)
+            guard arguments.count == parameters.count else {
                 throw GoDiagnostic(
                     position: position,
                     message: "wrong number of arguments in call to \(name)")
             }
-            for (argument, parameterType) in zip(arguments, signature.parameters) {
+            for (argument, parameterType) in zip(arguments, parameters) {
                 let argumentType = try type(of: argument)
                 guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
                     throw GoDiagnostic(
@@ -2744,11 +2776,6 @@ private struct FunctionChecker {
             return [try type(of: .call(callee: callee, arguments: arguments, position: position))]
         }
         if let native = try nativeCall(callee: callee, arguments: arguments, position: position) {
-            if native.results.isEmpty, native.isStatementOnly {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "\(native.goName) results are not supported; call it as a statement")
-            }
             return native.results
         }
         if case .selector(let base, let name, _) = callee {
@@ -2756,7 +2783,9 @@ private struct FunctionChecker {
                 packageName == "fmt",
                 importedPaths.contains("fmt")
             {
-                return []
+                // `fmt.Print` and `fmt.Println` return `(n int, err error)`.
+                return name == "Print" || name == "Println"
+                    ? [.int, GoPredeclared.errorType] : []
             }
             if case .identifier("strconv", _) = base,
                 importedPaths.contains("strconv"),
@@ -2899,19 +2928,30 @@ private struct FunctionChecker {
             default:
                 candidates = []
             }
-            guard let match = candidates.first(where: { methodSignatures[$0] != nil }),
-                let signature = methodSignatures[match]
-            else {
+            var signature: (parameters: [GoType], results: [GoType])?
+            for candidate in candidates {
+                if let found = methodSignatures[candidate] {
+                    signature = (found.parameters, found.results)
+                    break
+                }
+            }
+            if signature == nil, case .interface(let methods) = underlying(baseType),
+                let method = methods.first(where: { $0.name == name })
+            {
+                signature = (method.parameters, method.results)
+            }
+            guard let signature else {
                 throw GoDiagnostic(
                     position: callee.position,
                     message: "\(baseType) has no field or method \(name)")
             }
-            guard arguments.count == signature.parameters.count else {
+            let (arguments, parameters) = matched(arguments, to: signature.parameters)
+            guard arguments.count == parameters.count else {
                 throw GoDiagnostic(
                     position: position,
                     message: "wrong number of arguments in call to \(name)")
             }
-            for (argument, parameterType) in zip(arguments, signature.parameters) {
+            for (argument, parameterType) in zip(arguments, parameters) {
                 try require(argument, assignableTo: parameterType)
             }
             return signature.results
@@ -2957,6 +2997,9 @@ private struct FunctionChecker {
         switch statement {
         case .returnValues:
             return true
+        case .expression(.call(callee: .identifier("panic", _), arguments: _, position: _)):
+            // A call to the builtin ends a function as a return does.
+            return functionSignatures["panic"] == nil
         case .ifStatement(_, let thenBlock, let elseBlock, _):
             guard let elseBlock else { return false }
             return blockTerminates(thenBlock) && blockTerminates(elseBlock)

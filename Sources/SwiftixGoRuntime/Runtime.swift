@@ -875,6 +875,13 @@ public struct GoVirtualMachine: Sendable {
         // is handed to a later open.
         var openFiles: [Int64: GoFiles.OpenFile] = [:]
         var nextFileHandle = GoFiles.firstHandle
+        // Decoded type descriptors, by the type name that carries them.
+        var typeDescriptors: [String: GoTypeDescriptor] = [:]
+        // The results the native call being executed has from guest
+        // functions, and how many of them this pass has used. Nil outside
+        // such a call, where no guest function can be run.
+        var guestCallResults: [GoValue]?
+        var guestCallCursor = 0
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -1122,6 +1129,48 @@ public struct GoVirtualMachine: Sendable {
             try writeDescriptor(1, text)
         }
 
+        /// The operands of `fmt.Print` (no separator) or `fmt.Println`, each
+        /// as `%v` prints it. `scope.limit` bounds the whole text.
+        func formatOperands(
+            _ values: [GoValue],
+            prefix: String = "",
+            separator: String,
+            suffix: String,
+            scope: GoFormatScope
+        ) throws -> String {
+            var parts: [String] = []
+            parts.reserveCapacity(values.count * 2 + 1)
+            var byteCount = 0
+
+            func append(_ part: String) throws {
+                let count = part.utf8.count
+                guard byteCount <= scope.limit, count <= scope.limit - byteCount else {
+                    throw scope.overflow
+                }
+                byteCount += count
+                parts.append(part)
+            }
+
+            try append(prefix)
+            let plain = GoFormat.Directive(verb: "v")
+            var previousWasString = true
+            for (index, value) in values.enumerated() {
+                // Without a separator this is `fmt.Print`, which puts a space
+                // between two operands when neither is a string.
+                var isString = false
+                if case .string = plainOperand(value) { isString = true }
+                if index > 0 {
+                    try append(separator.isEmpty && !isString && !previousWasString ? " " : separator)
+                }
+                previousWasString = isString
+                var remaining = scope
+                remaining.limit = scope.limit - byteCount
+                try append(try formatValue(value, as: nil, plain, scope: remaining, depth: 0))
+            }
+            try append(suffix)
+            return parts.joined()
+        }
+
         func formatOutput(
             _ values: [GoValue],
             prefix: String = "",
@@ -1131,28 +1180,11 @@ public struct GoVirtualMachine: Sendable {
             guard outputBytesWritten <= resourceLimits.maximumOutputBytes else {
                 throw GoRuntimeError.resourceLimitExceeded("output bytes")
             }
-            let maximumBytes = resourceLimits.maximumOutputBytes - outputBytesWritten
-            var parts: [String] = []
-            parts.reserveCapacity(values.count * 2 + 1)
-            var byteCount = 0
-
-            func append(_ part: String) throws {
-                let count = part.utf8.count
-                guard byteCount <= maximumBytes, count <= maximumBytes - byteCount else {
-                    throw GoRuntimeError.resourceLimitExceeded("output bytes")
-                }
-                byteCount += count
-                parts.append(part)
-            }
-
-            try append(prefix)
-            for (index, value) in values.enumerated() {
-                if index > 0 { try append(separator) }
-                let remaining = maximumBytes - byteCount
-                try append(try describe(value, heap: heap, maximumBytes: remaining))
-            }
-            try append(suffix)
-            return parts.joined()
+            return try formatOperands(
+                values, prefix: prefix, separator: separator, suffix: suffix,
+                scope: GoFormatScope(
+                    limit: resourceLimits.maximumOutputBytes - outputBytesWritten,
+                    overflow: .resourceLimitExceeded("output bytes")))
         }
 
         func makeFrame(
@@ -1814,25 +1846,22 @@ public struct GoVirtualMachine: Sendable {
         }
 
         /// Run a library function that reaches the hosting process: `*os.File`
-        /// and `fmt.Fprint*` output, descriptor reads, and whole-file I/O.
+        /// writes and reads, and whole-file I/O.
         /// Arguments are the top `argumentCount` stack entries in call order.
         /// Returns `false` when `name` is not such a function.
         func executeHostNative(_ name: String, argumentCount: Int) throws -> Bool {
-            let expectedCount: Int?
+            let expectedCount: Int
             switch name {
-            case "$fmt.Fprint", "$fmt.Fprintln": expectedCount = nil
             case "$os.File.Write", "$os.File.WriteString", "$os.File.Read": expectedCount = 2
             case "$os.ReadFile": expectedCount = 1
             case "$os.WriteFile": expectedCount = 3
             default: return false
             }
-            guard argumentCount >= 1, stack.count >= argumentCount else {
-                throw GoRuntimeError.stackUnderflow
-            }
-            if let expectedCount, argumentCount != expectedCount {
+            guard argumentCount == expectedCount else {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
             let start = stack.count - argumentCount
             let operands = Array(stack[start...])
             stack.removeSubrange(start...)
@@ -1854,25 +1883,14 @@ public struct GoVirtualMachine: Sendable {
             if case .int(let handle) = operands[0], handle >= GoFiles.firstHandle,
                 openFiles[handle] == nil
             {
-                if name.hasPrefix("$os.File.") {
-                    let operation = name == "$os.File.Read" ? "read" : "write"
-                    stack.append(contentsOf: [
-                        .int(0), errorValue("\(operation): \(GoFiles.closedFile)"),
-                    ])
-                }
+                let operation = name == "$os.File.Read" ? "read" : "write"
+                stack.append(contentsOf: [
+                    .int(0), errorValue("\(operation): \(GoFiles.closedFile)"),
+                ])
                 return true
             }
 
             switch name {
-            case "$fmt.Fprint", "$fmt.Fprintln":
-                let newline = name == "$fmt.Fprintln"
-                try writeDescriptor(
-                    try descriptor(operands[0]),
-                    try formatOutput(
-                        Array(operands.dropFirst()),
-                        separator: newline ? " " : "",
-                        suffix: newline ? "\n" : ""),
-                    opened: opened)
             case "$os.File.Write":
                 try writeDescriptor(
                     try descriptor(operands[0]),
@@ -2019,128 +2037,834 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
-        /// Format `value` under one `fmt` directive. Slices, arrays, structs,
-        /// and maps apply the directive to each element, as Go does, so a
-        /// width pads every element and a wrong verb is marked per element.
-        /// `typeName` is the dynamic type an interface carried, and `limit`
-        /// bounds the text of one operand.
-        func formatOperand(
-            _ value: GoValue,
-            _ directive: GoFormat.Directive,
-            typeName: String? = nil,
-            limit: Int,
-            overflow: GoRuntimeError,
-            depth: Int = 0
-        ) throws -> String {
-            guard depth <= resourceLimits.maximumPointerDepth else { throw overflow }
-            /// The `%v` text of `value`, for a marker.
-            func plain() throws -> String {
-                try describe(value, heap: heap, maximumBytes: limit)
+        /// The descriptor an interface value's type name carries, if it is one.
+        func typeDescriptor(named typeName: String) -> GoTypeDescriptor? {
+            guard typeName.hasPrefix(GoTypeDescriptor.marker) else { return nil }
+            if let cached = typeDescriptors[typeName] { return cached }
+            guard let decoded = GoTypeDescriptor(typeName: typeName) else { return nil }
+            typeDescriptors[typeName] = decoded
+            return decoded
+        }
+
+        /// The address Go would print for a pointer, slice, map, or channel:
+        /// stable for one value and distinct between heap cells. Nil is 0.
+        func formatAddress(of value: GoValue) -> UInt64? {
+            func address(_ pointer: GoPointer, offset: Int = 0) -> UInt64 {
+                var within = UInt64(truncatingIfNeeded: offset) &* 8
+                for component in pointer.path {
+                    switch component {
+                    case .index(let index):
+                        within = within &* 31 &+ UInt64(truncatingIfNeeded: index) &+ 1
+                    case .field(let name):
+                        for byte in name.utf8 { within = within &* 31 &+ UInt64(byte) }
+                    }
+                }
+                return 0xC0_0000_0000 &+ (UInt64(truncatingIfNeeded: pointer.cell) << 12)
+                    &+ ((within &* 8) & 0xFF8)
             }
-            /// `prefix`, the formatted elements separated by spaces, `suffix`.
+            switch value {
+            case .nilValue: return 0
+            case .pointer(let pointer): return address(pointer)
+            case .slice(let slice): return address(slice.backing, offset: slice.start)
+            case .map(let map): return address(map.storage)
+            case .channel(let channel): return address(channel.storage)
+            default: return nil
+            }
+        }
+
+        /// The type name Go prints for a value that arrived without one: exact
+        /// for an `int`, a `string`, a `bool`, and a struct, and the nearest
+        /// spelling for anything an interface hid.
+        func inferredTypeName(of value: GoValue) -> String {
+            func element(_ zero: GoValue) -> String {
+                zero == .nilValue ? "interface {}" : inferredTypeName(of: zero)
+            }
+            switch value {
+            case .nilValue: return "<nil>"
+            case .int: return "int"
+            case .string: return "string"
+            case .bool: return "bool"
+            case .structure(let structure):
+                return structure.typeName.map(GoTypeDescriptor.goName) ?? "struct {...}"
+            case .slice(let slice): return "[]" + element(slice.zeroValue)
+            case .array(let elements):
+                return "[\(elements.count)]" + element(elements.first ?? .nilValue)
+            case .map: return "map[interface {}]interface {}"
+            case .pointer(let pointer):
+                return "*" + ((try? read(pointer: pointer, heap: heap)).map(inferredTypeName)
+                    ?? "interface {}")
+            case .channel: return "chan interface {}"
+            case .interface(let boxed):
+                if let descriptor = typeDescriptor(named: boxed.typeName) {
+                    return GoTypeDescriptor.name(of: descriptor.type)
+                }
+                if boxed.typeName == "error" { return "*errors.errorString" }
+                return GoTypeDescriptor.dynamicType(named: boxed.typeName)
+                    .map(GoTypeDescriptor.name(of:)) ?? inferredTypeName(of: boxed.value)
+            case .netConn: return "*net.TCPConn"
+            case .netListener: return "*net.TCPListener"
+            default: return "interface {}"
+            }
+        }
+
+        /// Format `operand` under one `fmt` directive the way Go's
+        /// `printValue` does. `declared` is its static type when the compiler
+        /// supplied one; an interface and an operand without a descriptor
+        /// show their own. Slices, arrays, structs, and maps apply the
+        /// directive to each element, so a width pads every element and a
+        /// wrong verb is marked per element. `depth` is 0 for an operand,
+        /// which is where a pointer to a struct prints as `&{...}`.
+        func formatValue(
+            _ operand: GoValue,
+            as declared: GoRuntimeType?,
+            _ directive: GoFormat.Directive,
+            scope: GoFormatScope,
+            depth: Int
+        ) throws -> String {
+            guard depth <= resourceLimits.maximumPointerDepth else { throw scope.overflow }
+            // The type a value was converted to an interface with.
+            if case .interface(let boxed) = operand,
+                let descriptor = typeDescriptor(named: boxed.typeName)
+            {
+                var typed = scope
+                typed.definitions = descriptor.definitions
+                return try formatValue(
+                    boxed.value, as: descriptor.type, directive, scope: typed, depth: depth)
+            }
+
+            var value = operand
+            var type = declared
+            var kind = declared.map(scope.underlying)
+            // Set for an error `errors.New` or `fmt.Errorf` made, which
+            // prints by its message as if it had an `Error` method.
+            var library: (message: String, wrapped: [GoValue])?
+            if kind?.isInterface ?? true {
+                // An interface, or an operand without a descriptor: the type
+                // is the value's own.
+                if case .interface(let boxed) = value {
+                    if boxed.typeName == GoErrors.legacyTypeName,
+                        case .string(let message) = boxed.value
+                    {
+                        return legacyError(message)
+                    }
+                    library = try libraryError(value)
+                    type = GoTypeDescriptor.dynamicType(named: boxed.typeName)
+                    value = boxed.value
+                } else {
+                    type = GoTypeDescriptor.inferred(from: value)
+                }
+                if value == .nilValue {
+                    // Inside a slice, struct, or map a nil interface is
+                    // `<nil>` under every verb; as an operand only under `%v`.
+                    if depth > 0 {
+                        guard directive.goSyntax, let declared else { return "<nil>" }
+                        return GoTypeDescriptor.name(of: declared) + "(nil)"
+                    }
+                    return directive.verb == "v"
+                        ? GoFormat.pad("<nil>", directive) : GoFormat.badVerb(directive)
+                }
+                kind = type.map(scope.underlying)
+            }
+
+            func typeName() -> String {
+                type.map(GoTypeDescriptor.name(of:)) ?? inferredTypeName(of: value)
+            }
+            // Under a verb for text Go prints a value by its `Error` method,
+            // or else its `String` method: an operand always, and inside
+            // another value wherever it is not behind an unexported field.
+            if scope.callsMethods, depth == 0 || scope.accessible,
+                GoFormat.usesTextMethod(directive)
+            {
+                if let library {
+                    return GoFormat.string(library.message, directive) ?? library.message
+                }
+                var owner: String?
+                switch type {
+                case .named(let symbol)?: owner = symbol
+                case .pointer(.named(let symbol))?: owner = "*" + symbol
+                default: break
+                }
+                if let owner {
+                    for name in GoFormat.textMethods {
+                        guard let function = method(name, of: owner) else { continue }
+                        // Go calls the method of a nil pointer as well, and
+                        // prints `<nil>` when that panics, as it must for a
+                        // method that takes the value the pointer lacks.
+                        let isNilPointer = value == .nilValue && owner.hasPrefix("*")
+                        if isNilPointer, !function.name.hasPrefix("*") {
+                            return GoFormat.nilText
+                        }
+                        let result = try guestCall(
+                            function, [try methodReceiver(value, for: function)],
+                            recovery: isNilPointer ? .failures : .panics)
+                        if case .interface(let caught)? = result,
+                            caught.typeName == GoFormat.panicMarker
+                        {
+                            if isNilPointer { return GoFormat.nilText }
+                            return "%!\(directive.verb)(PANIC=\(name) method: "
+                                + (try formatValue(
+                                    caught.value, as: nil, GoFormat.Directive(verb: "v"),
+                                    scope: scope, depth: 0)) + ")"
+                        }
+                        // Anything but a string is a method `fmt` cannot
+                        // print by, and the value prints as itself.
+                        if case .string(let text)? = result,
+                            let formatted = GoFormat.string(text, directive)
+                        {
+                            return formatted
+                        }
+                        break
+                    }
+                }
+            }
+            /// Go's marker for a verb that does not apply: the type, and the
+            /// value as `%v` prints it under the same flags.
+            func bad() throws -> String {
+                var plain = directive
+                plain.verb = "v"
+                // Go prints the value itself here, not by its methods.
+                var silent = scope
+                silent.callsMethods = false
+                return "%!\(directive.verb)(" + typeName() + "="
+                    + (try formatValue(value, as: type, plain, scope: silent, depth: 0)) + ")"
+            }
+            func nested(_ element: GoValue, _ elementType: GoRuntimeType?) throws -> String {
+                try formatValue(element, as: elementType, directive, scope: scope, depth: depth + 1)
+            }
+            /// `prefix`, the formatted elements, `suffix`.
             func aggregate(
                 _ prefix: String,
                 _ count: Int,
                 _ suffix: String,
                 element: (Int) throws -> String
             ) throws -> String {
+                let separator = directive.goSyntax ? ", " : " "
                 var parts = [prefix]
                 var byteCount = prefix.utf8.count + suffix.utf8.count
+                guard byteCount <= scope.limit else { throw scope.overflow }
                 for index in 0..<count {
-                    let part = (index > 0 ? " " : "") + (try element(index))
-                    guard part.utf8.count <= limit - byteCount else { throw overflow }
+                    let part = (index > 0 ? separator : "") + (try element(index))
+                    guard part.utf8.count <= scope.limit - byteCount else { throw scope.overflow }
                     byteCount += part.utf8.count
                     parts.append(part)
                 }
                 parts.append(suffix)
                 return parts.joined()
             }
-            func nested(_ element: GoValue) throws -> String {
-                try formatOperand(
-                    element, directive, limit: limit, overflow: overflow, depth: depth + 1)
+            /// The error of a failed library call prints its message under a
+            /// verb for text. Under any other verb Go reaches the pointer to a
+            /// struct that it is: `&{...}` for an operand, an address inside
+            /// another value. No heap cell stands behind this form.
+            func legacyError(_ message: String) -> String {
+                var plain = directive
+                plain.verb = "v"
+                if depth > 0, directive.goSyntax || !["v", "s", "x", "X", "q"].contains(directive.verb) {
+                    // No heap cell stands behind a library error, so the
+                    // address is derived from its message.
+                    var address: UInt64 = 0xC0_0000_0000
+                    for byte in message.utf8 { address = address &+ (UInt64(byte) << 4) }
+                    if directive.goSyntax {
+                        return "(*errors.errorString)("
+                            + (GoFormat.address(address, GoFormat.Directive(verb: "v")) ?? "") + ")"
+                    }
+                    return GoFormat.address(address, directive)
+                        ?? GoFormat.badVerb(
+                            directive, typeName: "*errors.errorString",
+                            value: GoFormat.address(address, plain) ?? "")
+                }
+                if directive.goSyntax {
+                    return "&errors.errorString{s:" + GoFormat.quote(message, asciiOnly: false) + "}"
+                }
+                if let text = GoFormat.string(message, directive) { return text }
+                let shown = GoFormat.string(message, plain) ?? message
+                if directive.verb == "w" {
+                    return GoFormat.badVerb(
+                        directive, typeName: "*errors.errorString", value: "&{" + shown + "}")
+                }
+                return "&{" + GoFormat.badVerb(directive, typeName: "string", value: shown) + "}"
             }
-            // `%#v` is not implemented; Go's bad-verb marker says so.
-            if directive.goSyntax {
-                if value == .nilValue { return GoFormat.badVerb(directive) }
-                return GoFormat.badVerb(
-                    directive,
-                    typeName: typeName ?? runtimeConcreteTypeName(value) ?? "value",
-                    value: try plain())
+            func sequence(
+                _ elements: [GoValue],
+                of element: GoRuntimeType?,
+                isNil: Bool = false
+            ) throws -> String {
+                if element.map(scope.underlying) == .byte,
+                    ["s", "q", "x", "X"].contains(directive.verb)
+                {
+                    let bytes = try elements.map { element -> UInt8 in
+                        guard case .int(let byte) = element else { throw GoRuntimeError.typeMismatch }
+                        return UInt8(truncatingIfNeeded: byte)
+                    }
+                    if let text = GoFormat.bytes(bytes, directive) { return text }
+                }
+                guard directive.goSyntax else {
+                    return try aggregate("[", elements.count, "]") {
+                        try nested(elements[$0], element)
+                    }
+                }
+                // Go names an operand that is exactly a `[]byte` that way.
+                let name = depth == 0 && type == .slice(.byte) ? "[]byte" : typeName()
+                if isNil { return name + "(nil)" }
+                return try aggregate(name + "{", elements.count, "}") {
+                    try nested(elements[$0], element)
+                }
+            }
+            func pointerLike(_ address: UInt64) throws -> String {
+                if directive.verb == "v" {
+                    if directive.goSyntax {
+                        var plain = GoFormat.Directive(verb: "v")
+                        plain.width = nil
+                        return "(" + typeName() + ")("
+                            + (address == 0 ? "nil" : GoFormat.address(address, plain) ?? "") + ")"
+                    }
+                    if address == 0 { return GoFormat.pad("<nil>", directive) }
+                }
+                return try GoFormat.address(address, directive) ?? bad()
+            }
+            func elementType() -> GoRuntimeType? {
+                switch kind {
+                case .slice(let element)?, .array(_, let element)?: return element
+                default: return nil
+                }
             }
 
             switch value {
-            case .interface(let boxed):
-                if boxed.typeName == GoFormat.byteSliceTypeName {
-                    let bytes = try sliceBytes(boxed.value)
-                    if let text = GoFormat.bytes(bytes, directive) { return text }
-                    return try aggregate("[", bytes.count, "]") { index in
-                        try nested(.int(Int64(bytes[index])))
-                    }
-                }
-                if boxed.typeName == "error", case .string(let message) = boxed.value {
-                    if let text = GoFormat.string(message, directive) { return text }
-                    // `%w` outside `fmt.Errorf` is a bad verb for the error
-                    // itself. Any other verb that is not for text reaches the
-                    // pointer to a struct that the error is: `&{...}`.
-                    if directive.verb == "w" {
-                        return GoFormat.badVerb(
-                            directive, typeName: "*errors.errorString", value: "&{\(message)}")
-                    }
-                    return "&{" + GoFormat.badVerb(directive, typeName: "string", value: message)
-                        + "}"
-                }
-                return try formatOperand(
-                    boxed.value, directive, typeName: boxed.typeName, limit: limit,
-                    overflow: overflow, depth: depth + 1)
             case .int(let integer):
-                return GoFormat.integer(integer, directive)
-                    ?? GoFormat.badVerb(
-                        directive, typeName: typeName ?? "int", value: String(integer))
+                return try GoFormat.integer(integer, directive, unsigned: kind == .byte) ?? bad()
             case .string(let text):
-                return GoFormat.string(text, directive)
-                    ?? GoFormat.badVerb(directive, typeName: typeName ?? "string", value: text)
+                return try GoFormat.string(text, directive) ?? bad()
             case .bool(let flag):
-                return GoFormat.boolean(flag, directive)
-                    ?? GoFormat.badVerb(
-                        directive, typeName: typeName ?? "bool", value: flag ? "true" : "false")
+                return try GoFormat.boolean(flag, directive) ?? bad()
             case .nilValue:
-                return directive.verb == "v"
-                    ? GoFormat.pad("<nil>", directive) : GoFormat.badVerb(directive)
+                // A nil of a declared type; a nil interface returned above.
+                switch kind {
+                case .slice(let element)?:
+                    return try sequence([], of: element, isNil: true)
+                case .map?:
+                    return directive.goSyntax ? typeName() + "(nil)" : "map[]"
+                default:
+                    return try pointerLike(0)
+                }
             case .array(let elements):
-                return try aggregate("[", elements.count, "]") { try nested(elements[$0]) }
+                return try sequence(elements, of: elementType())
             case .slice:
-                let elements = Array(try sliceElements(value))
-                return try aggregate("[", elements.count, "]") { try nested(elements[$0]) }
+                return try sequence(Array(try sliceElements(value)), of: elementType())
             case .structure(let structure):
-                return try aggregate("{", structure.fields.count, "}") { index in
+                var fieldTypes = [GoRuntimeType?](repeating: nil, count: structure.fields.count)
+                if case .structure(let declaredFields)? = kind,
+                    declaredFields.count == structure.fields.count
+                {
+                    fieldTypes = declaredFields.map(\.type)
+                }
+                let labelled = directive.labelsFields || directive.goSyntax
+                // Go cannot call the methods of a value it reaches through
+                // an unexported field.
+                var hidden = scope
+                hidden.accessible = false
+                return try aggregate(
+                    (directive.goSyntax ? typeName() : "") + "{", structure.fields.count, "}"
+                ) { index in
                     let field = structure.fields[index]
-                    return (directive.labelsFields ? field.name + ":" : "")
-                        + (try nested(field.value))
+                    let exported = field.name.unicodeScalars.first.map {
+                        GoUnicode.toLower($0) != $0
+                    } ?? false
+                    return (labelled ? field.name + ":" : "")
+                        + (try formatValue(
+                            field.value, as: fieldTypes[index], directive,
+                            scope: exported ? scope : hidden, depth: depth + 1))
                 }
             case .map(let mapValue):
                 guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
                 else { throw GoRuntimeError.typeMismatch }
-                let entries = storage.entries
-                return try aggregate("map[", entries.count, "]") { index in
-                    (try nested(entries[index].key)) + ":" + (try nested(entries[index].value))
+                var keyType: GoRuntimeType?
+                var valueType: GoRuntimeType?
+                if case .map(let declaredKey, let declaredValue)? = kind {
+                    (keyType, valueType) = (declaredKey, declaredValue)
                 }
+                // Go prints a map sorted by key.
+                let entries = storage.entries.enumerated().sorted { lhs, rhs in
+                    let order = GoFormat.keyOrder(lhs.element.key, rhs.element.key)
+                    return order == 0 ? lhs.offset < rhs.offset : order < 0
+                }.map(\.element)
+                return try aggregate(
+                    directive.goSyntax ? typeName() + "{" : "map[", entries.count,
+                    directive.goSyntax ? "}" : "]"
+                ) { index in
+                    (try nested(entries[index].key, keyType)) + ":"
+                        + (try nested(entries[index].value, valueType))
+                }
+            case .pointer(let pointer):
+                // An operand that points to a struct, array, slice, or map
+                // prints as `&` and the value; a nested pointer as an address.
+                if depth == 0, let pointee = try? read(pointer: pointer, heap: heap) {
+                    var pointeeType: GoRuntimeType?
+                    if case .pointer(let declaredPointee)? = kind { pointeeType = declaredPointee }
+                    let expands: Bool
+                    switch pointeeType.map(scope.underlying) {
+                    case .structure?, .array?, .slice?, .map?: expands = true
+                    case nil:
+                        switch pointee {
+                        case .structure, .array, .slice, .map: expands = true
+                        default: expands = false
+                        }
+                    default: expands = false
+                    }
+                    if expands {
+                        return "&" + (try formatValue(
+                            pointee, as: pointeeType, directive, scope: scope, depth: depth + 1))
+                    }
+                }
+                return try pointerLike(formatAddress(of: value) ?? 0)
+            case .channel:
+                return try pointerLike(formatAddress(of: value) ?? 0)
+            case .interface(let boxed):
+                return try formatValue(boxed.value, as: nil, directive, scope: scope, depth: depth)
             default:
-                // Pointers, channels, and library handles have one spelling.
-                guard directive.verb == "v" else {
-                    return GoFormat.badVerb(
-                        directive,
-                        typeName: typeName ?? runtimeConcreteTypeName(value) ?? "value",
-                        value: try plain())
-                }
-                return GoFormat.pad(try plain(), directive)
+                // Library handles have one spelling.
+                guard directive.verb == "v", !directive.goSyntax else { return try bad() }
+                return GoFormat.pad(
+                    try describe(value, heap: heap, maximumBytes: scope.limit), directive)
             }
         }
 
-        /// Run `fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, or `fmt.Fprintf`.
-        /// The format follows the fixed operands, and its verbs consume the
-        /// rest. Returns `false` when `name` is not such a function.
+        /// Format one operand of a `fmt` call, where `%T` and `%p` read the
+        /// operand itself instead of its value.
+        func formatOperand(
+            _ operand: GoValue,
+            _ directive: GoFormat.Directive,
+            scope: GoFormatScope
+        ) throws -> String {
+            switch directive.verb {
+            case "T":
+                var text = GoFormat.Directive(verb: "s")
+                text.minus = directive.minus
+                text.zero = directive.zero
+                text.width = directive.width
+                text.precision = directive.precision
+                return GoFormat.string(inferredTypeName(of: operand), text) ?? ""
+            case "p":
+                let value = plainOperand(operand)
+                if operand == .nilValue { return GoFormat.badVerb(directive) }
+                if let address = formatAddress(of: value),
+                    let text = GoFormat.address(address, directive)
+                {
+                    return text
+                }
+                var plain = directive
+                plain.verb = "v"
+                var silent = scope
+                silent.callsMethods = false
+                return "%!p(" + inferredTypeName(of: operand) + "="
+                    + (try formatValue(operand, as: nil, plain, scope: silent, depth: 0)) + ")"
+            case "w":
+                // `fmt.Errorf` prints the error a `%w` names as `%v` does.
+                // Anywhere else, and for an operand that is no error, the
+                // verb is a bad one.
+                var plain = directive
+                plain.verb = "v"
+                plain.wraps = false
+                if directive.wraps, try isError(operand) {
+                    return try formatValue(operand, as: nil, plain, scope: scope, depth: 0)
+                }
+                if operand == .nilValue { return GoFormat.badVerb(directive) }
+                var silent = scope
+                silent.callsMethods = false
+                return "%!w(" + inferredTypeName(of: operand) + "="
+                    + (try formatValue(operand, as: nil, plain, scope: silent, depth: 0)) + ")"
+            default:
+                return try formatValue(operand, as: nil, directive, scope: scope, depth: 0)
+            }
+        }
+
+        /// The operands of a `...any` parameter: the values given, or the
+        /// elements of the `[]any` a `values...` argument named.
+        func variadicOperands(_ values: [GoValue]) throws -> [GoValue] {
+            guard values.count == 1, case .interface(let boxed) = values[0],
+                boxed.typeName == GoFormat.spreadOperandsTypeName
+            else { return values }
+            return Array(try sliceElements(boxed.value))
+        }
+
+        /// The value of a `fmt` operand without the type the compiler boxed
+        /// it with.
+        func plainOperand(_ value: GoValue) -> GoValue {
+            if case .interface(let boxed) = value, typeDescriptor(named: boxed.typeName) != nil {
+                return boxed.value
+            }
+            return value
+        }
+
+        /// Take the result of the guest function a native call was waiting
+        /// for off the stack. An instruction that can make such calls does
+        /// this before it reads its operands, because the result lies above
+        /// them.
+        func resumeGuestCalls() throws {
+            let frameIndex = frames.count - 1
+            guard frames[frameIndex].awaitsGuestCall else { return }
+            frames[frameIndex].awaitsGuestCall = false
+            frames[frameIndex].guestCallRecovery = .none
+            frames[frameIndex].guestCallResults.append(try pop(&stack))
+        }
+
+        /// Run `body`, a native that may need guest functions run: a `String`
+        /// method while formatting, an `Unwrap` method while walking an error
+        /// chain. A native cannot run guest code, so the first function it
+        /// needs is called like any other instead, with `operands` back on
+        /// the stack and the instruction set to execute again once it
+        /// returns; the results gathered so far stay in the frame and are
+        /// handed out in the same order on the next pass. The result is nil
+        /// while a function is still to run.
+        func replayingGuestCalls<Result>(
+            operands: [GoValue],
+            _ body: () throws -> Result
+        ) throws -> Result? {
+            let frameIndex = frames.count - 1
+            guestCallResults = frames[frameIndex].guestCallResults
+            guestCallCursor = 0
+            defer { guestCallResults = nil }
+            do {
+                let result = try body()
+                frames[frameIndex].guestCallResults = []
+                return result
+            } catch let request as GoGuestCallRequest {
+                guard frames[frameIndex].guestCallResults.count
+                    < resourceLimits.maximumCollectionElements
+                else { throw GoRuntimeError.resourceLimitExceeded("guest calls of a native") }
+                guard frames.count < maximumCallDepth else {
+                    throw GoRuntimeError.callStackLimitExceeded
+                }
+                stack.append(contentsOf: operands)
+                frames[frameIndex].programCounter -= 1
+                frames[frameIndex].awaitsGuestCall = true
+                frames[frameIndex].guestCallRecovery = request.recovery
+                frames.append(
+                    try makeFrame(
+                        function: request.function, stackBase: stack.count,
+                        arguments: request.arguments, heap: &heap))
+                return nil
+            }
+        }
+
+        /// The result of calling `function`, from an earlier pass of the
+        /// native that is executing, or a request to run it now. Nil where
+        /// no guest function can be run.
+        ///
+        /// With a `recovery` a panic of the function does not unwind the
+        /// caller: the result is then the value it panicked with, boxed under
+        /// `GoFormat.panicMarker`.
+        func guestCall(
+            _ function: GoBytecodeFunction,
+            _ arguments: [GoValue],
+            recovery: GoGuestCallRecovery = .none
+        ) throws -> GoValue? {
+            guard let results = guestCallResults else { return nil }
+            guard guestCallCursor < results.count else {
+                throw GoGuestCallRequest(
+                    function: function, arguments: arguments, recovery: recovery)
+            }
+            guestCallCursor += 1
+            return results[guestCallCursor - 1]
+        }
+
+        /// Hand a panic of the guest function the frame on top was waiting
+        /// for to the native that asked for it, as the function's result.
+        func deliverGuestPanic(_ value: GoValue) {
+            frames[frames.count - 1].guestCallRecovery = .none
+            stack.append(
+                .interface(GoInterfaceValue(typeName: GoFormat.panicMarker, value: value)))
+        }
+
+        /// End a method `fmt` called on a nil pointer when it used the
+        /// pointer, which Go reports as a panic that `fmt` recovers from.
+        /// False when no such call is running in this goroutine.
+        func abandonFailedGuestCall() -> Bool {
+            guard
+                let waiting = frames.lastIndex(where: {
+                    $0.awaitsGuestCall && $0.guestCallRecovery == .failures
+                }), waiting + 1 < frames.count,
+                stack.count >= frames[waiting + 1].stackBase
+            else { return false }
+            let stackBase = frames[waiting + 1].stackBase
+            while frames.count > waiting + 1 {
+                let abandoned = frames.removeLast()
+                activeDeferredCallCount -= abandoned.deferredCalls.count
+                releaseFrame(abandoned)
+            }
+            stack.removeSubrange(stackBase...)
+            deliverGuestPanic(.nilValue)
+            return true
+        }
+
+        /// The method `name` of the dynamic type `owner` (`T` or `*T`) when it
+        /// takes `parameterCount` arguments besides its receiver and returns
+        /// one value. A pointer also has the methods of what it points to.
+        func method(_ name: String, of owner: String, parameterCount: Int = 0) -> GoBytecodeFunction? {
+            var owners = [owner]
+            if owner.hasPrefix("*") { owners.append(String(owner.dropFirst())) }
+            for candidate in owners {
+                if let function = functions[candidate + "." + name],
+                    function.parameterCount == parameterCount + 1, function.returnCount == 1
+                {
+                    return function
+                }
+            }
+            return nil
+        }
+
+        /// The receiver `function` takes for `value`: a method with a value
+        /// receiver takes the value a pointer points to.
+        func methodReceiver(_ value: GoValue, for function: GoBytecodeFunction) throws -> GoValue {
+            if !function.name.hasPrefix("*"), case .pointer(let pointer) = value {
+                return try read(pointer: pointer, heap: heap)
+            }
+            return value
+        }
+
+        // MARK: Library errors
+
+        /// A new error as `errors.New` and `fmt.Errorf` make them: distinct
+        /// from every other error, and wrapping `wrapped`.
+        ///
+        /// Without `joins` it wraps the one error given, which may be nil, as
+        /// one `%w` does; with it, all of them, as several do.
+        func makeError(
+            _ message: String,
+            wrapping wrapped: [GoValue] = [],
+            joins: Bool = false
+        ) throws -> GoValue {
+            let typeName: String
+            var fields = [GoStructFieldValue(name: "s", value: .string(message))]
+            if joins == false, wrapped.isEmpty {
+                typeName = GoErrors.plainType
+            } else if !joins {
+                typeName = GoErrors.wrappingType
+                fields = [
+                    GoStructFieldValue(name: "msg", value: .string(message)),
+                    GoStructFieldValue(name: "err", value: wrapped[0]),
+                ]
+            } else {
+                typeName = GoErrors.joiningType
+                let backing = try heap.allocate(.array(wrapped))
+                fields = [
+                    GoStructFieldValue(name: "msg", value: .string(message)),
+                    GoStructFieldValue(
+                        name: "errs",
+                        value: .slice(
+                            GoSliceValue(
+                                backing: GoPointer(cell: backing), start: 0,
+                                length: wrapped.count, capacity: wrapped.count,
+                                zeroValue: .nilValue))),
+                ]
+            }
+            let cell = try heap.allocate(
+                .structure(GoStructValue(typeName: String(typeName.dropFirst()), fields: fields)))
+            return .interface(
+                GoInterfaceValue(typeName: typeName, value: .pointer(GoPointer(cell: cell))))
+        }
+
+        /// The message of an error the library made and the errors it wraps,
+        /// or nil for any other value.
+        func libraryError(_ value: GoValue) throws -> (message: String, wrapped: [GoValue])? {
+            guard case .interface(let boxed) = value else { return nil }
+            if boxed.typeName == GoErrors.legacyTypeName, case .string(let message) = boxed.value {
+                return (message, [])
+            }
+            guard GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
+                case .structure(let structure) = try read(pointer: pointer, heap: heap),
+                case .string(let message)? = structure.fields.first?.value
+            else { return nil }
+            guard structure.fields.count == 2 else { return (message, []) }
+            if boxed.typeName == GoErrors.joiningType {
+                return (message, Array(try sliceElements(structure.fields[1].value)))
+            }
+            let wrapped = structure.fields[1].value
+            return (message, wrapped == .nilValue ? [] : [wrapped])
+        }
+
+        /// Whether `value` is an error: one the library made, or a value whose
+        /// type has an `Error` method.
+        func isError(_ value: GoValue) throws -> Bool {
+            if try libraryError(value) != nil { return true }
+            guard let target = methodTarget(value) else { return false }
+            return method("Error", of: target.owner) != nil
+        }
+
+        /// The type a method of `value` is looked up under and the receiver
+        /// it is called with, or nil for a value without methods.
+        func methodTarget(_ value: GoValue) -> (owner: String, receiver: GoValue)? {
+            switch value {
+            case .interface(let boxed):
+                guard let owner = GoTypeDescriptor.methodOwner(ofTypeName: boxed.typeName) else {
+                    return nil
+                }
+                return (owner, boxed.value)
+            case .structure(let structure):
+                return structure.typeName.map { ($0, value) }
+            default:
+                return nil
+            }
+        }
+
+        /// The first method of `target` that the dynamic type of `value`
+        /// lacks, or nil when it implements the interface. A pointer has the
+        /// methods of what it points to; a value has only its own.
+        func missingMethod(
+            of value: GoValue,
+            for target: GoErrors.InterfaceTarget
+        ) throws -> String? {
+            if case .interface(let boxed) = value, try libraryError(value) != nil {
+                let provided = GoErrors.methods(ofLibraryType: boxed.typeName)
+                return target.methods.first {
+                    !provided.contains($0.name) || $0.parameterCount != 0 || $0.resultCount != 1
+                }?.name
+            }
+            guard let first = target.methods.first else { return nil }
+            guard let owner = methodTarget(value)?.owner else { return first.name }
+            if target.implementers.contains(owner) { return nil }
+            // Which method is missing, for the message: one the type lacks,
+            // or else one it has with other parameter or result types.
+            var owners = [owner]
+            if owner.hasPrefix("*") { owners.append(String(owner.dropFirst())) }
+            let absent = target.methods.first { wanted in
+                !owners.contains {
+                    guard let function = functions[$0 + "." + wanted.name] else { return false }
+                    return function.parameterCount == wanted.parameterCount + 1
+                        && function.returnCount == wanted.resultCount
+                }
+            }
+            return (absent ?? first).name
+        }
+
+        /// What `err` wraps: what Go's `Unwrap() error` returns as one error,
+        /// and what `Unwrap() []error` returns as several.
+        func unwrapped(_ err: GoValue) throws -> (single: GoValue?, several: [GoValue]) {
+            if let library = try libraryError(err) {
+                guard case .interface(let boxed) = err, boxed.typeName == GoErrors.joiningType
+                else { return (library.wrapped.first, []) }
+                return (nil, library.wrapped)
+            }
+            guard let target = methodTarget(err),
+                let function = method("Unwrap", of: target.owner),
+                let result = try guestCall(
+                    function, [try methodReceiver(target.receiver, for: function)])
+            else { return (nil, []) }
+            switch result {
+            case .nilValue: return (nil, [])
+            case .slice: return (nil, Array(try sliceElements(result)))
+            default: return (result, [])
+            }
+        }
+
+        /// Run `errors.Unwrap`, `errors.Is`, or `errors.As`. Returns `false`
+        /// when `name` is not such a function.
+        func executeErrorNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoErrors.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            try resumeGuestCalls()
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+
+            /// Go's `errors.Is`: the chain of `err`, depth first, holds an
+            /// error equal to `target` or one whose `Is` method says so.
+            func matches(_ err: GoValue, _ target: GoValue, depth: Int) throws -> Bool {
+                guard depth <= resourceLimits.maximumPointerDepth else {
+                    throw GoRuntimeError.resourceLimitExceeded("error chain depth")
+                }
+                var current = err
+                while true {
+                    if current == target { return true }
+                    if let receiver = methodTarget(current), try libraryError(current) == nil,
+                        let function = method("Is", of: receiver.owner, parameterCount: 1),
+                        case .bool(true)? = try guestCall(
+                            function,
+                            [try methodReceiver(receiver.receiver, for: function), target])
+                    {
+                        return true
+                    }
+                    let inner = try unwrapped(current)
+                    if let single = inner.single {
+                        current = single
+                        continue
+                    }
+                    for element in inner.several where element != .nilValue {
+                        if try matches(element, target, depth: depth + 1) { return true }
+                    }
+                    return false
+                }
+            }
+            /// Go's `errors.As`: the first error in the chain whose type is
+            /// the target's, or implements the target interface.
+            func find(_ err: GoValue, typed specification: String, depth: Int) throws -> GoValue? {
+                guard depth <= resourceLimits.maximumPointerDepth else {
+                    throw GoRuntimeError.resourceLimitExceeded("error chain depth")
+                }
+                var current = err
+                while true {
+                    if let wanted = GoErrors.InterfaceTarget(specification) {
+                        if try missingMethod(of: current, for: wanted) == nil { return current }
+                    } else if GoTypeDescriptor.identity(of: current)
+                        == GoTypeDescriptor.identity(ofTypeName: specification)
+                    {
+                        // The target variable has the concrete type, so it
+                        // takes the value without its interface box.
+                        if case .interface(let boxed) = current { return boxed.value }
+                        return current
+                    }
+                    let inner = try unwrapped(current)
+                    if let single = inner.single {
+                        current = single
+                        continue
+                    }
+                    for element in inner.several where element != .nilValue {
+                        if let found = try find(element, typed: specification, depth: depth + 1) {
+                            return found
+                        }
+                    }
+                    return nil
+                }
+            }
+
+            let outcome = try replayingGuestCalls(operands: operands) { () -> [GoValue] in
+                let err = operands[0]
+                switch name {
+                case "$errors.Unwrap":
+                    return [err == .nilValue ? .nilValue : try unwrapped(err).single ?? .nilValue]
+                case "$errors.Is":
+                    let target = operands[1]
+                    if err == .nilValue || target == .nilValue { return [.bool(err == target)] }
+                    return [.bool(try matches(err, target, depth: 0))]
+                default:
+                    guard case .string(let specification) = operands[2] else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    guard case .pointer(let target) = operands[1] else {
+                        throw GoRuntimeError.panicError("errors: target must be a non-nil pointer")
+                    }
+                    guard err != .nilValue,
+                        let found = try find(err, typed: specification, depth: 0)
+                    else { return [.bool(false)] }
+                    try writePointer(found, through: target, heap: &heap)
+                    return [.bool(true)]
+                }
+            }
+            // A method is running first; this call executes again after it.
+            if let outcome { stack.append(contentsOf: outcome) }
+            return true
+        }
+
+        /// Run a `fmt` function: the `Sprint`, `Print`, and `Fprint` families
+        /// and `Errorf`. A file comes first, then a format if the function
+        /// takes one, then the operands. Returns `false` when `name` is not
+        /// such a function.
         func executeFormatNative(_ name: String, argumentCount: Int) throws -> Bool {
-            guard let fixedCount = GoFormat.fixedArgumentCounts[name] else { return false }
+            guard let native = GoFormat.native(named: name) else { return false }
+            try resumeGuestCalls()
+            let fixedCount = native.fixedArgumentCount
             guard argumentCount >= fixedCount else {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: fixedCount, actual: argumentCount)
@@ -2149,67 +2873,104 @@ public struct GoVirtualMachine: Sendable {
             let start = stack.count - argumentCount
             let operands = Array(stack[start...])
             stack.removeSubrange(start...)
-            guard case .string(let format) = operands[fixedCount - 1] else {
-                throw GoRuntimeError.typeMismatch
-            }
-            let values = Array(operands[fixedCount...])
+            let values = try variadicOperands(Array(operands[fixedCount...]))
 
             // A string result is bounded like any string, and printed text by
             // what is left of the run's output budget.
-            let returnsText = name == "$fmt.Sprintf" || name == "$fmt.Errorf"
-            let limit: Int
-            let overflow: GoRuntimeError
-            if returnsText {
-                limit = resourceLimits.maximumStringBytes
-                overflow = .resourceLimitExceeded("string bytes")
-            } else {
-                limit = max(0, resourceLimits.maximumOutputBytes - outputBytesWritten)
-                overflow = .resourceLimitExceeded("output bytes")
+            let returnsText = native.destination == .string || native.destination == .error
+            let scope =
+                returnsText
+                ? GoFormatScope(
+                    limit: resourceLimits.maximumStringBytes,
+                    overflow: .resourceLimitExceeded("string bytes"))
+                : GoFormatScope(
+                    limit: max(0, resourceLimits.maximumOutputBytes - outputBytesWritten),
+                    overflow: .resourceLimitExceeded("output bytes"))
+            var wrapped: [Int] = []
+            let formatted = try replayingGuestCalls(operands: operands) { () -> String in
+                wrapped = []
+                switch native.layout {
+                case .verbs:
+                    guard case .string(let format) = operands[fixedCount - 1] else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    return try GoFormat.render(
+                        format,
+                        operands: GoFormat.Operands(
+                            count: values.count,
+                            integer: { index in
+                                // A width or precision is an `int`, with or
+                                // without the compiler's note of a named type.
+                                if case .int(let integer) = plainOperand(values[index]) {
+                                    return integer
+                                }
+                                return nil
+                            },
+                            format: { index, directive in
+                                try formatOperand(values[index], directive, scope: scope)
+                            },
+                            describe: { index in
+                                let value = values[index]
+                                if value == .nilValue { return "<nil>" }
+                                return inferredTypeName(of: value) + "="
+                                    + (try formatValue(
+                                        value, as: nil, GoFormat.Directive(verb: "v"), scope: scope,
+                                        depth: 0))
+                            },
+                            wrapped: { wrapped.append($0) }),
+                        wrapsErrors: native.destination == .error,
+                        limit: scope.limit,
+                        overflow: scope.overflow)
+                case .operands:
+                    return try formatOperands(values, separator: "", suffix: "", scope: scope)
+                case .line:
+                    return try formatOperands(values, separator: " ", suffix: "\n", scope: scope)
+                }
             }
-            let text = try GoFormat.render(
-                format,
-                operands: GoFormat.Operands(
-                    count: values.count,
-                    integer: { index in
-                        if case .int(let integer) = values[index] { return integer }
-                        return nil
-                    },
-                    format: { index, directive in
-                        try formatOperand(
-                            values[index], directive, limit: limit, overflow: overflow)
-                    },
-                    describe: { index in
-                        let value = values[index]
-                        if value == .nilValue { return "<nil>" }
-                        let text = try formatOperand(
-                            value, GoFormat.Directive(verb: "v"), limit: limit,
-                            overflow: overflow)
-                        var typeName = runtimeConcreteTypeName(value) ?? "value"
-                        if typeName == "error" { typeName = "*errors.errorString" }
-                        return typeName + "=" + text
-                    }),
-                wrapsErrors: name == "$fmt.Errorf",
-                limit: limit,
-                overflow: overflow)
+            // A method is running first; this call executes again after it.
+            guard let text = formatted else { return true }
 
-            switch name {
-            case "$fmt.Sprintf":
+            let results: ((Int, String?) -> [GoValue])? =
+                native.returnsCount
+                ? { count, failure in [.int(Int64(count)), errorValue(failure)] } : nil
+            switch native.destination {
+            case .string:
                 stack.append(.string(text))
-            case "$fmt.Errorf":
-                stack.append(errorValue(text))
-            case "$fmt.Printf":
-                try emit(text)
-            default:
+            case .error:
+                // One `%w` wraps its operand, several wrap them all, in the
+                // order of the operands. An operand that is no error wraps
+                // nothing.
+                let indexes = Set(wrapped).sorted()
+                let errors = try indexes.map { index in
+                    try isError(values[index]) ? values[index] : GoValue.nilValue
+                }
+                switch errors.count {
+                case 0: stack.append(try makeError(text))
+                case 1: stack.append(try makeError(text, wrapping: errors))
+                default:
+                    stack.append(
+                        try makeError(
+                            text, wrapping: errors.filter { $0 != .nilValue }, joins: true))
+                }
+            case .standardOutput:
+                try writeDescriptor(1, text, results: results)
+            case .file:
                 var opened = false
                 if case .int(let handle) = operands[0], handle >= GoFiles.firstHandle {
-                    // Like `fmt.Fprint`, a closed file takes no output.
-                    guard openFiles[handle] != nil else { break }
+                    // A closed file takes no output, and says so when asked.
+                    guard openFiles[handle] != nil else {
+                        if let results {
+                            stack.append(
+                                contentsOf: results(0, "write: \(GoFiles.closedFile)"))
+                        }
+                        break
+                    }
                     opened = true
                 }
                 guard let file = try resolveFile(operands[0]) else {
                     throw GoRuntimeError.typeMismatch
                 }
-                try writeDescriptor(file.descriptor, text, opened: opened)
+                try writeDescriptor(file.descriptor, text, opened: opened, results: results)
             }
             return true
         }
@@ -2539,6 +3300,7 @@ public struct GoVirtualMachine: Sendable {
                 for deferred in frame.deferredCalls {
                     rootValues.append(contentsOf: deferred.arguments)
                 }
+                rootValues.append(contentsOf: frame.guestCallResults)
                 switch frame.pendingExit {
                 case .returning(let values):
                     rootValues.append(contentsOf: values)
@@ -2758,7 +3520,7 @@ public struct GoVirtualMachine: Sendable {
                 guard case .string(let message) = try pop(&stack) else {
                     throw GoRuntimeError.typeMismatch
                 }
-                stack.append(errorValue(message))
+                stack.append(try makeError(message))
             case "$strings.ToUpper", "$strings.ToLower":
                 guard case .string(let text) = try pop(&stack) else {
                     throw GoRuntimeError.typeMismatch
@@ -2901,6 +3663,16 @@ public struct GoVirtualMachine: Sendable {
 
         /// Run guest code until the program finishes or suspends on host input.
         func runSlice() throws {
+            while true {
+                do {
+                    return try runInstructions()
+                } catch GoRuntimeError.invalidPointer {
+                    guard abandonFailedGuestCall() else { throw GoRuntimeError.invalidPointer }
+                }
+            }
+        }
+
+        func runInstructions() throws {
             executionLoop: while true {
                 if frames.isEmpty {
                     if currentGoroutineID != 0 {
@@ -2980,7 +3752,13 @@ public struct GoVirtualMachine: Sendable {
                         guard !frames.isEmpty else {
                             throw GoRuntimeError.panicError(value.description)
                         }
-                        frames[frames.count - 1].pendingExit = .panicking(value)
+                        if frames[frames.count - 1].awaitsGuestCall,
+                            frames[frames.count - 1].guestCallRecovery != .none
+                        {
+                            deliverGuestPanic(value)
+                        } else {
+                            frames[frames.count - 1].pendingExit = .panicking(value)
+                        }
                     case .testFatal:
                         if !frames.isEmpty {
                             frames[frames.count - 1].pendingExit = .testFatal
@@ -3090,18 +3868,24 @@ public struct GoVirtualMachine: Sendable {
                 case .logicalOr:
                     try booleanBinary(&stack) { $0 || $1 }
                 case .print(let argumentCount, let newline):
+                    try resumeGuestCalls()
                     guard argumentCount >= 0, stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
                     let start = stack.count - argumentCount
-                    let values = Array(stack[start...])
+                    let operands = Array(stack[start...])
                     stack.removeSubrange(start...)
+                    let values = try variadicOperands(operands)
                     let separator = newline ? " " : ""
-                    try emit(
-                        try formatOutput(
-                            values,
-                            separator: separator,
-                            suffix: newline ? "\n" : ""))
+                    guard
+                        let text = try replayingGuestCalls(
+                            operands: operands,
+                            {
+                                try formatOutput(
+                                    values, separator: separator, suffix: newline ? "\n" : "")
+                            })
+                    else { break }
+                    try emit(text)
                 case .jump(let target):
                     try jump(to: target, frame: &frames[frameIndex])
                 case .jumpIfFalse(let target):
@@ -3123,6 +3907,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeFileNative(name, argumentCount: argumentCount)
                                 || executeTimeNative(name, argumentCount: argumentCount)
                                 || executeFormatNative(name, argumentCount: argumentCount)
+                                || executeErrorNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }
@@ -4718,11 +5503,22 @@ public struct GoVirtualMachine: Sendable {
                     let arguments = Array(stack[argStart...])
                     stack.removeSubrange(argStart...)
                     let receiver = try pop(&stack)
+                    // An error the library made has no function behind its
+                    // `Error` method.
+                    if methodName == "Error", arguments.isEmpty,
+                        let library = try libraryError(receiver)
+                    {
+                        stack.append(.string(library.message))
+                        break
+                    }
                     // Unwrap interface to get concrete type and value
                     let concreteTypeName: String
                     let concreteValue: GoValue
                     if case .interface(let iface) = receiver {
-                        concreteTypeName = iface.typeName
+                        // A value converted to an interface carries its type.
+                        guard let owner = GoTypeDescriptor.methodOwner(ofTypeName: iface.typeName)
+                        else { throw GoRuntimeError.typeMismatch }
+                        concreteTypeName = owner
                         concreteValue = iface.value
                     } else if case .structure(let sv) = receiver, let tn = sv.typeName {
                         concreteTypeName = tn
@@ -4730,11 +5526,15 @@ public struct GoVirtualMachine: Sendable {
                     } else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    // Resolve method: try TypeName.method and *TypeName.method
-                    let candidates = [
+                    // Resolve method: try TypeName.method and *TypeName.method,
+                    // and for a pointer the methods of what it points to.
+                    var candidates = [
                         concreteTypeName + "." + methodName,
                         "*" + concreteTypeName + "." + methodName,
                     ]
+                    if concreteTypeName.hasPrefix("*") {
+                        candidates.append(concreteTypeName.dropFirst() + "." + methodName)
+                    }
                     guard let functionName = candidates.first(where: { functions[$0] != nil }),
                         let function = functions[functionName]
                     else {
@@ -4743,7 +5543,13 @@ public struct GoVirtualMachine: Sendable {
                     guard frames.count < maximumCallDepth else {
                         throw GoRuntimeError.callStackLimitExceeded
                     }
-                    let allArgs = [concreteValue] + arguments
+                    // A method with a value receiver takes the value a
+                    // pointer points to.
+                    var receiverValue = concreteValue
+                    if !functionName.hasPrefix("*"), case .pointer(let pointer) = receiverValue {
+                        receiverValue = try read(pointer: pointer, heap: heap)
+                    }
+                    let allArgs = [receiverValue] + arguments
                     guard allArgs.count == function.parameterCount else {
                         throw GoRuntimeError.argumentCountMismatch(
                             function: functionName,
@@ -4762,27 +5568,60 @@ public struct GoVirtualMachine: Sendable {
                 case .typeAssert(let targetName, let commaOK):
                     let zero = try pop(&stack)
                     let source = try pop(&stack)
+                    // Types are compared by identity: a boxed value's, or the
+                    // one a bare `int`, `string`, `bool`, or struct shows.
                     let dynamicType: String?
                     let dynamicValue: GoValue
                     if case .interface(let interfaceValue) = source {
-                        dynamicType = interfaceValue.typeName
+                        dynamicType = GoTypeDescriptor.identity(ofTypeName: interfaceValue.typeName)
                         dynamicValue = interfaceValue.value
                     } else if source == .nilValue {
                         dynamicType = nil
                         dynamicValue = zero
                     } else {
-                        dynamicType = runtimeConcreteTypeName(source)
+                        dynamicType = GoTypeDescriptor.identity(of: source)
                         dynamicValue = source
                     }
-                    if dynamicType == targetName {
+                    if let wanted = GoErrors.InterfaceTarget(targetName) {
+                        // An interface takes any value whose type has its
+                        // methods, and the value keeps its own type.
+                        let missing =
+                            source == .nilValue
+                            ? "" : try missingMethod(of: source, for: wanted)
+                        if missing == nil {
+                            stack.append(source)
+                            if commaOK { stack.append(.bool(true)) }
+                        } else if commaOK {
+                            stack.append(zero)
+                            stack.append(.bool(false))
+                        } else {
+                            let name =
+                                wanted.typeName.isEmpty
+                                ? (wanted.methods.map(\.name) == ["Error"] ? "error" : "interface")
+                                : GoTypeDescriptor.goName(wanted.typeName)
+                            frames[frameIndex].pendingExit = .panicking(
+                                .string(
+                                    source == .nilValue
+                                        ? "interface conversion: interface is nil, not \(name)"
+                                        : "interface conversion: \(inferredTypeName(of: source)) is not \(name): missing method \(missing ?? "")"
+                                ))
+                        }
+                    } else if dynamicType == GoTypeDescriptor.identity(ofTypeName: targetName) {
                         stack.append(dynamicValue)
                         if commaOK { stack.append(.bool(true)) }
                     } else if commaOK {
                         stack.append(zero)
                         stack.append(.bool(false))
                     } else {
+                        let held = source == .nilValue ? "nil" : inferredTypeName(of: source)
+                        let wanted =
+                            GoTypeDescriptor(typeName: targetName).map {
+                                GoTypeDescriptor.name(of: $0.type)
+                            }
+                            ?? GoTypeDescriptor.dynamicType(named: targetName).map(
+                                GoTypeDescriptor.name(of:)) ?? targetName
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("interface conversion: \(dynamicType ?? "nil") is not \(targetName)"))
+                            .string("interface conversion: interface {} is \(held), not \(wanted)"))
                     }
                 case .rangeKeys:
                     let base = try pop(&stack)
@@ -5961,6 +6800,47 @@ private enum GoHeapLayout {
     }
 }
 
+/// Raised by a native to have a guest function run before it continues.
+private struct GoGuestCallRequest: Error {
+    let function: GoBytecodeFunction
+    let arguments: [GoValue]
+    let recovery: GoGuestCallRecovery
+}
+
+/// What a native does about a guest function it called that does not return.
+private enum GoGuestCallRecovery {
+    /// Nothing: a panic unwinds the caller like any other.
+    case none
+    /// It takes a panic as the result, as `fmt` does for a method.
+    case panics
+    /// The same, and a use of a nil pointer counts as a panic: the receiver
+    /// of the method is one.
+    case failures
+}
+
+/// What the operands of one `fmt` call share: the named types of the
+/// descriptor being formatted, and the bound on the text of one operand.
+private struct GoFormatScope {
+    var definitions: [String: GoRuntimeType] = [:]
+    var limit: Int
+    let overflow: GoRuntimeError
+    /// Whether a value is printed by its `Error` or `String` method. Go's
+    /// marker for a bad verb shows the value itself.
+    var callsMethods = true
+    /// False below an unexported struct field, where Go cannot call methods.
+    var accessible = true
+
+    /// `type` with every defined type replaced by what it is defined as.
+    func underlying(_ type: GoRuntimeType) -> GoRuntimeType {
+        if case .named(let name) = type, definitions[name] == nil,
+            let library = GoErrors.definitions[name]
+        {
+            return library
+        }
+        return GoTypeDescriptor(type: type, definitions: definitions).underlying(type)
+    }
+}
+
 /// Bytes a goroutine is waiting to write to a descriptor of its process.
 private struct PendingDescriptorWrite {
     let goroutineID: Int
@@ -6027,6 +6907,16 @@ private struct Frame {
     var deferredCalls: [DeferredCall] = []
     var pendingExit: FrameExit?
     let isDeferredCall: Bool
+    /// Results of the guest functions that the native call this frame is
+    /// executing has had run, in the order it asked for them: the `Error` and
+    /// `String` methods of `fmt` operands, the `Unwrap` and `Is` methods of
+    /// an error chain. The native runs again after each one returns, until it
+    /// needs no further result.
+    var guestCallResults: [GoValue] = []
+    /// Whether the value on top of the stack is the result of such a call.
+    var awaitsGuestCall = false
+    /// What becomes of a panic of the function being waited for.
+    var guestCallRecovery = GoGuestCallRecovery.none
 
     init(
         function: GoBytecodeFunction,

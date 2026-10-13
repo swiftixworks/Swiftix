@@ -1,0 +1,1546 @@
+/// Programs whose output was produced by Go itself.
+///
+/// Each `expected` string below is what `go run` of Go 1.24.5 printed for the
+/// `source` above it, copied without change except that a space ending a line
+/// is written as an escape; the tests require Swiftix Go to print the same
+/// bytes. Go prints the address of a pointer, which differs between runs and
+/// between the two implementations, so addresses are masked on both sides
+/// before comparing.
+///
+/// To add a case, run the program with Go and paste both texts.
+
+import SwiftixGo
+import SwiftixGoRuntime
+import Testing
+
+@Suite("Go conformance")
+struct GoConformanceTests {
+
+    /// Compiles and runs a whole `package main` and returns its output with
+    /// every address replaced by `0xADDR`.
+    private func run(_ source: String) throws -> [Substring] {
+        let executable = try GoCompiler.compile(sources: [
+            GoSourceFile(path: "main.go", text: source)
+        ])
+        var output = ""
+        try GoVirtualMachine(maximumInstructions: 10_000_000).run(executable) { output += $0 }
+        return lines(output)
+    }
+
+    private func lines(_ text: String) -> [Substring] {
+        text.replacing(/0x[0-9a-f]{9,}/, with: "0xADDR")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+    }
+
+    /// Compares line by line, so a failure shows the one line that differs.
+    private func expectSameOutput(_ source: String, _ expected: String) throws {
+        let actual = try run(source)
+        let wanted = lines(expected)
+        #expect(actual.count == wanted.count)
+        for (number, pair) in zip(actual, wanted).enumerated() {
+            #expect(pair.0 == pair.1, "line \(number + 1)")
+        }
+    }
+
+    @Test func verbsFlagsAndMarkers() throws {
+        try expectSameOutput(verbsFlagsAndMarkersSource, verbsFlagsAndMarkersExpected)
+    }
+
+    @Test func typesNilsPointersAndMaps() throws {
+        try expectSameOutput(typesNilsPointersAndMapsSource, typesNilsPointersAndMapsExpected)
+    }
+
+    @Test func argumentIndexesSprintAndCounts() throws {
+        try expectSameOutput(argumentIndexesSprintAndCountsSource, argumentIndexesSprintAndCountsExpected)
+    }
+
+    @Test func methodsAtEveryDepth() throws {
+        try expectSameOutput(methodsAtEveryDepthSource, methodsAtEveryDepthExpected)
+    }
+
+    @Test func nilReceiversAndPanickingMethods() throws {
+        try expectSameOutput(nilReceiversAndPanickingMethodsSource, nilReceiversAndPanickingMethodsExpected)
+    }
+
+    @Test func valuesInInterfaces() throws {
+        try expectSameOutput(valuesInInterfacesSource, valuesInInterfacesExpected)
+    }
+
+    @Test func assertionsToInterfaces() throws {
+        try expectSameOutput(assertionsToInterfacesSource, assertionsToInterfacesExpected)
+    }
+
+    @Test func interfaceMethodsWithSeveralResults() throws {
+        try expectSameOutput(interfaceMethodsWithSeveralResultsSource, interfaceMethodsWithSeveralResultsExpected)
+    }
+
+    @Test func variadicInterfaceMethodsAndFinalPanic() throws {
+        try expectSameOutput(variadicInterfaceMethodsAndFinalPanicSource, variadicInterfaceMethodsAndFinalPanicExpected)
+    }
+
+    @Test func errorIdentityWrappingIsAndAs() throws {
+        try expectSameOutput(errorIdentityWrappingIsAndAsSource, errorIdentityWrappingIsAndAsExpected)
+    }
+
+    @Test func variadicFunctionsAndSpreads() throws {
+        try expectSameOutput(variadicFunctionsAndSpreadsSource, variadicFunctionsAndSpreadsExpected)
+    }
+}
+
+private let verbsFlagsAndMarkersSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type point struct {
+	x    int
+	name string
+}
+
+type pair struct {
+	first  point
+	second []int
+}
+
+var errBoom = errors.New("boom")
+
+func main() {
+	fmt.Println(fmt.Sprintf("%d|%5d|%-5d|%05d|%+d|% d", 42, 42, 42, 42, 42, 42))
+	fmt.Println(fmt.Sprintf("%d %d %v %+v", -7, 0, -7, 7))
+	fmt.Println(fmt.Sprintf("%05d|%+05d|% 05d|%-05d|", -42, 42, 42, 42))
+	fmt.Println(fmt.Sprintf("%.3d|%8.3d|%-8.3d|%08.3d|", 7, 7, 7, 7))
+	fmt.Println(fmt.Sprintf("[%.0d][%3.0d][%.0d]", 0, 0, 5))
+	fmt.Println(fmt.Sprintf("%x %X %#x %#X %08x %#08x", 255, 255, 255, 255, 255, 255))
+	fmt.Println(fmt.Sprintf("%x %#x %d", -255, -255, -9223372036854775807-1))
+	fmt.Println(fmt.Sprintf("%b %o %#o %O %#b %8b|", 10, 10, 10, 10, 10, 5))
+	fmt.Println(fmt.Sprintf("%c%c|%3c|%-3c|%q %q %+q", 72, 19990, 65, 65, 65, 10, 233))
+	fmt.Println(fmt.Sprintf("%U %#U %U %.6U", 65, 65, 128512, 65))
+	fmt.Println(fmt.Sprintf("%c|%c", -1, 1114112))
+	fmt.Println(fmt.Sprintf("%08U|%-8U|%#x|%#o|%+x|% x|%+c|%05c", 65, 65, 0, 0, 255, 255, 65, 65))
+	fmt.Println(fmt.Sprintf("%+.3d|% .3d|%+5.2d|%-+6d|%- 6d|%+-6d|", 7, 7, 7, 7, 7, 7))
+	fmt.Println(fmt.Sprintf("%3q|%-5q|%05q|%#q|%#U|%#U", 65, 65, 65, 65, 10, 233))
+
+	data := []byte("hi")
+	numbers := []int{104, 105}
+	fmt.Println(fmt.Sprintf("%v %d %s %x %X %q %c", data, data, data, data, data, data, data))
+	fmt.Println(fmt.Sprintf("%v %x %c", numbers, numbers, numbers))
+	fmt.Println(fmt.Sprintf("% x|%# x|%#x|%.1x|%5s|%-5s|", data, data, data, data, data, data))
+	var none []byte
+	fmt.Println(fmt.Sprintf("[%s][%x][%q]", none, none, none))
+	fmt.Println(fmt.Sprintf("%s %x", data[1:], []byte{0, 171, 255}))
+	fmt.Println(fmt.Sprintf("%3d|%03d|%-3d|%+d|%o|%b", data, data, data, data, data, data))
+	fmt.Println(fmt.Sprintf("%8x|%-8x|%08x|% X|%#X|%.0x|", data, data, data, data, data, data))
+
+	fmt.Println(fmt.Sprintf("%s|%10s|%-10s|%.2s|%v|%6v|", "hello", "hello", "hello", "hello", "hi", "ab"))
+	fmt.Println(fmt.Sprintf("%x|%X|% x|%#x|%.2x|[%5x]|[%x]", "hello", "hello", "hello", "hello", "hello", "", ""))
+	fmt.Println(fmt.Sprintf("%05s|%-05s|%05t", "ab", "ab", true))
+	fmt.Println(fmt.Sprintf("%q %q %q", "a\tb\"c\n", "\x00\x7f", "é世"))
+	fmt.Println(fmt.Sprintf("%+q %#q %#q %8q|%.2q", "é", "hi", "a`b", "x", "hello"))
+	fmt.Println(fmt.Sprintf("%5s|%-4s|%.1s|%3c|", "世界", "é", "世界", 19990))
+	fmt.Println(fmt.Sprintf("%t %v %5t|%-6t|", true, false, true, false))
+	fmt.Println(fmt.Sprintf("100%% %5% %d%%", 7))
+	fmt.Println(fmt.Sprintf("%8x|%-8x|%08x|% X|%# X|%#.1x|%+q|%#+q|%-8q|", "ab", "ab", "ab", "ab", "ab", "ab", "aé\x01", "é", "x"))
+	fmt.Println(fmt.Sprintf("%q|%q|%q|%+q", "\u2028\ufeff", "\u00a0\u00ad", "😀\U0010ffff", "😀"))
+	fmt.Println(fmt.Sprintf("%.0s|%.10s|%2.1s|%-2.1s|%c", "abc", "abc", "abc", "abc", 233))
+
+	fmt.Println(fmt.Sprintf("%v %d %3d %x %s", []int{1, 2, 3}, []int{1, 2, 3}, []int{1, 2, 3}, []int{10, 255}, []int{7}))
+	fmt.Println(fmt.Sprintf("%s %q %v %5s|", []string{"a", "b"}, []string{"a", "b"}, []string{}, []string{"ab"}))
+	fmt.Println(fmt.Sprintf("%v %+v %d %s", point{x: 1, name: "a"}, point{x: 1, name: "a"}, point{x: 1, name: "a"}, point{x: 1, name: "a"}))
+	fmt.Println(fmt.Sprintf("%v|%+v", pair{first: point{x: 2, name: "b"}, second: []int{3, 4}}, pair{first: point{x: 2, name: "b"}, second: []int{3, 4}}))
+	fmt.Println(fmt.Sprintf("%v %d %x", map[string]int{"a": 1, "b": 20}, map[string]int{"k": 7}, map[int]string{255: "hi"}))
+	fmt.Println(fmt.Sprintf("%v %t %v", [][]int{[]int{1}, []int{2, 3}}, []bool{true, false}, [2]int{4, 5}))
+	fmt.Println(fmt.Sprintf("%5v|%-5v|%05v|%x|%X|%q", []int{1, 22}, []int{1, 22}, []int{1, 22}, []string{"a", "bc"}, point{x: 255, name: "z"}, point{x: 65, name: "z"}))
+	fmt.Println(fmt.Sprintf("%v %v %s %d", []bool{}, [0]int{}, []string{"x", ""}, [][]int{[]int{}, []int{1}}))
+
+	var noError error
+	var boxed any = 12
+	fmt.Println(fmt.Sprintf("%v|%s|%q|%x|%10v|%-6s|", errBoom, errBoom, errBoom, errBoom, errBoom, errBoom))
+	fmt.Println(fmt.Sprintf("%d %t", errBoom, errBoom))
+	fmt.Println(fmt.Sprintf("%v|%6v|%s|%d|%+v", noError, noError, noError, nil, nil))
+	fmt.Println(fmt.Sprintf("%v %d %05d %s", boxed, boxed, boxed, boxed))
+	wrapped := fmt.Errorf("open %s: %w (try %d)", "/data", errBoom, 2)
+	fmt.Println(wrapped.Error(), wrapped != nil, wrapped)
+	fmt.Println(fmt.Sprintf("%w", errBoom), fmt.Errorf("plain").Error())
+	fmt.Println(fmt.Sprintf("%+v|%.2v|%.2s|%X|%+q|%5q|", errBoom, errBoom, errBoom, errBoom, errBoom, errBoom))
+
+	fmt.Println(fmt.Sprintf("%d %s %t %z %f %!", "hi", 5, 1, 1, 3, 1))
+	fmt.Println(fmt.Sprintf("%d %x %c", true, false, true))
+	fmt.Println(fmt.Sprintf("%d %d|%s", 1))
+	fmt.Println(fmt.Sprintf("%d", 1, 2))
+	fmt.Println(fmt.Sprintf("hi", "x", 3, true, nil, errBoom))
+	fmt.Println(fmt.Sprintf("100%"))
+	fmt.Println(fmt.Sprintf("%5"))
+	fmt.Println(fmt.Sprintf("%-"))
+	fmt.Println(fmt.Sprintf("%."))
+	fmt.Println(fmt.Sprintf("%5.d|%.d|%5.s|%+s|% s|%#s|%0s|", 0, 3, "abc", "p", "q", "r", "s"))
+	fmt.Println(fmt.Sprintf("%é %世 %d", 1, 2, 3))
+	fmt.Println(fmt.Sprintf("%t %s %q %x %U", 5, true, true, true, "a"))
+	fmt.Println(fmt.Sprintf("%c %b %o %U %O", "a", "a", "a", true, "a"))
+
+	fmt.Println(fmt.Sprintf("%*d|%-*d|%.*s|%*.*s|", 5, 42, 5, 42, 2, "hello", 6, 3, "hello"))
+	fmt.Println(fmt.Sprintf("%*d|%.*d|", -5, 42, -1, 7))
+	fmt.Println(fmt.Sprintf("%*d", "x", 42))
+	fmt.Println(fmt.Sprintf("%.*d", "x", 42))
+	fmt.Println(fmt.Sprintf("%*d"))
+	fmt.Println(fmt.Sprintf("%*d", 1000001, 3))
+	fmt.Println(fmt.Sprintf("%0*d|%-0*d|%*s|%.*x|", 5, 42, 5, 42, -4, "ab", 1, "abc"))
+	fmt.Println(fmt.Sprintf("%*", 3), fmt.Sprintf("%.*", 3), fmt.Sprintf("%*.*d", 4))
+}
+"""#
+
+private let verbsFlagsAndMarkersExpected = #"""
+42|   42|42   |00042|+42| 42
+-7 0 -7 7
+-0042|+0042| 0042|42   |
+007|     007|007     |     007|
+[][   ][5]
+ff FF 0xff 0XFF 000000ff 0x000000ff
+-ff -0xff -9223372036854775808
+1010 12 012 0o12 0b1010      101|
+H世|  A|A  |'A' '\n' '\u00e9'
+U+0041 U+0041 'A' U+1F600 U+000041
+�|�
+  U+0041|U+0041  |0x0|0|+ff| ff|A|0000A
++007| 007|  +07|+7    | 7    |+7    |
+'A'|'A'  |00'A'|'A'|U+000A|U+00E9 'é'
+[104 105] [104 105] hi 6869 6869 "hi" [h i]
+[104 105] [68 69] [h i]
+68 69|0x68 0x69|0x6869|68|   hi|hi   |
+[][][""]
+i 00abff
+[104 105]|[104 105]|[104 105]|[+104 +105]|[150 151]|[1101000 1101001]
+    6869|6869    |00006869|68 69|0X6869||
+hello|     hello|hello     |he|hi|    ab|
+68656c6c6f|68656C6C6F|68 65 6c 6c 6f|0x68656c6c6f|6865|[     ]|[]
+000ab|ab   |0true
+"a\tb\"c\n" "\x00\x7f" "é世"
+"\u00e9" `hi` "a`b"      "x"|"he"
+   世界|é   |世|  世|
+true false  true|false |
+100% % 7%
+    6162|6162    |00006162|61 62|0X61 0X62|0x61|"a\u00e9\x01"|`é`|"x"     |
+"\u2028\ufeff"|"\u00a0\u00ad"|"😀\U0010ffff"|"\U0001f600"
+|abc| a|a |é
+[1 2 3] [1 2 3] [  1   2   3] [a ff] [%!s(int=7)]
+[a b] ["a" "b"] [] [   ab]|
+{1 a} {x:1 name:a} {1 %!d(string=a)} {%!s(int=1) a}
+{{2 b} [3 4]}|{first:{x:2 name:b} second:[3 4]}
+map[a:1 b:20] map[%!d(string=k):7] map[ff:6869]
+[[1] [2 3]] [true false] [4 5]
+[    1    22]|[1     22   ]|[00001 00022]|[61 6263]|{FF 7A}|{'A' "z"}
+[] [] [x ] [[] [1]]
+boom|boom|"boom"|626f6f6d|      boom|boom  |
+&{%!d(string=boom)} &{%!t(string=boom)}
+<nil>| <nil>|%!s(<nil>)|%!d(<nil>)|<nil>
+12 12 00012 %!s(int=12)
+open /data: boom (try 2) true open /data: boom (try 2)
+%!w(*errors.errorString=&{boom}) plain
+boom|bo|bo|626F6F6D|"boom"|"boom"|
+%!d(string=hi) %!s(int=5) %!t(int=1) %!z(int=1) %!f(int=3) %!!(int=1)
+%!d(bool=true) %!x(bool=false) %!c(bool=true)
+1 %!d(MISSING)|%!s(MISSING)
+1%!(EXTRA int=2)
+hi%!(EXTRA string=x, int=3, bool=true, <nil>, *errors.errorString=boom)
+100%!(NOVERB)
+%!(NOVERB)
+%!(NOVERB)
+%!.(MISSING)
+     |3|     |p|q|r|s|
+%!é(int=1) %!世(int=2) 3
+%!t(int=5) %!s(bool=true) %!q(bool=true) %!x(bool=true) %!U(string=a)
+%!c(string=a) %!b(string=a) %!o(string=a) %!U(bool=true) %!O(string=a)
+   42|42   |he|   hel|
+42   |%!(BADPREC)7|
+%!(BADWIDTH)42
+%!(BADPREC)42
+%!(BADWIDTH)%!d(MISSING)
+%!(BADWIDTH)3
+00042|42   |ab  |61|
+%!(NOVERB) %!(NOVERB) %!(BADPREC)%!d(MISSING)
+
+"""#
+
+private let typesNilsPointersAndMapsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type point struct {
+	x    int
+	name string
+}
+
+type pair struct {
+	first  point
+	second []int
+	third  map[string]int
+	fourth *point
+	raw    []byte
+	flag   bool
+	any    any
+	err    error
+	b      byte
+}
+
+type level int
+
+type label string
+
+type buffer []byte
+
+type table map[string]int
+
+type grid [2]point
+
+var errBoom = errors.New("boom")
+
+func main() {
+	var nilInts []int
+	var nilMap map[string]int
+	var nilPoint *point
+	var nilBytes []byte
+	var nilErr error
+	var nilAny any
+	p := point{x: 1, name: "a"}
+	ptr := &p
+	numbers := []int{3, 1, 2}
+	data := []byte("hi")
+	var letter byte = 65
+	ages := map[string]int{"zed": 26, "amy": 1, "bob": 2}
+	byNumber := map[int]string{30: "c", -1: "a", 2: "b"}
+	flags := map[bool]int{true: 1, false: 0}
+	var lvl level = 3
+	lbl := label("tag")
+	buf := buffer([]byte("xy"))
+	tbl := table{"k": 1}
+	var g grid
+	g[1].x = 9
+	var whole pair
+	whole.first = p
+	whole.second = numbers
+	whole.b = 7
+
+	fmt.Println(nilInts, nilMap, nilPoint, nilBytes, nilErr, nilAny)
+	fmt.Println(p, ptr == nil, numbers, data, letter, ages, byNumber, flags)
+	fmt.Println(lvl, lbl, buf, tbl, g, whole)
+	fmt.Print(1, 2, "a", "b", 3, 4, "c", 5, true, false, "\n")
+	fmt.Print("x", 1, 2, nilInts, numbers, "y", p, lvl, lbl, "\n")
+	fmt.Print(lbl, lbl, 1, lbl, "\n")
+
+	fmt.Println(fmt.Sprintf("%v|%d|%s|%x|%q", nilInts, nilInts, nilInts, nilInts, nilInts))
+	fmt.Println(fmt.Sprintf("%v|%d|%s|%x|%q", nilBytes, nilBytes, nilBytes, nilBytes, nilBytes))
+	fmt.Println(fmt.Sprintf("%v|%d|%s", nilMap, nilMap, nilMap))
+	fmt.Println(fmt.Sprintf("%v|%d|%s|%+v", nilPoint, nilPoint, nilPoint, nilPoint))
+	fmt.Println(fmt.Sprintf("%v|%d|%s|%+v", nilErr, nilErr, nilAny, nilAny))
+	fmt.Println(fmt.Sprintf("%v|%+v|%d|%s", whole, whole, whole.b, whole.raw))
+
+	fmt.Println(fmt.Sprintf("%T|%T|%T|%T|%T|%T", 1, "a", true, letter, nilInts, nilMap))
+	fmt.Println(fmt.Sprintf("%T|%T|%T|%T|%T|%T", p, ptr, nilPoint, numbers, data, ages))
+	fmt.Println(fmt.Sprintf("%T|%T|%T|%T|%T|%T", lvl, lbl, buf, tbl, g, whole))
+	fmt.Println(fmt.Sprintf("%T|%T|%T|%T|%10T|%-8T|%.3T|", nilErr, nilAny, errBoom, nil, 1, "a", true))
+	fmt.Println(fmt.Sprintf("%T|%T|%T", [][]string{}, map[int][]byte{}, [3]bool{}))
+
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v|%#v|%#v", 1, "a\n", true, letter, -5))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v|%#v", nilInts, nilMap, nilPoint, nilBytes))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", nilErr, nilAny, errBoom))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", p, numbers, data))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", ages, byNumber, flags))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v|%#v|%#v", lvl, lbl, buf, tbl, g))
+	fmt.Println(fmt.Sprintf("%#v", whole))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", []string{"a", "b"}, [2]bool{true, false}, []point{p}))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", []any{1, "a", nil}, map[string]any{"k": 1}, [][]int{[]int{1}, nil}))
+	fmt.Println(fmt.Sprintf("%#v|%#v|%#v", []error{errBoom, nil}, []byte{}, []int{}))
+
+	fmt.Println(fmt.Sprintf("%v|%+v|%s|%d", ptr, ptr, ptr, ptr))
+	fmt.Println(fmt.Sprintf("%v|%v|%v", &numbers, &ages, &g))
+	fmt.Println(fmt.Sprintf("%#v|%#v", ptr, &numbers))
+
+	fmt.Println(fmt.Sprintf("%v %d %s %x %X %q %c %U", letter, letter, letter, letter, letter, letter, letter, letter))
+	fmt.Println(fmt.Sprintf("%v %d %s %x %q", lvl, lvl, lvl, lbl, lbl))
+	fmt.Println(fmt.Sprintf("%v %s %x %q %d", buf, buf, buf, buf, buf))
+	fmt.Println(fmt.Sprintf("%s %d %t", []byte("a"), "x", data))
+	fmt.Println(fmt.Sprintf("%d|%s", 1, 2, letter, lvl, lbl, data, numbers, p, ptr == nil, nilInts, nilMap, errBoom, nil))
+	fmt.Println(fmt.Sprintf("%z %z %z %z %z", letter, lvl, numbers, p, nilInts))
+	fmt.Println(fmt.Sprintf("%p|%p|%p|%p", 5, "a", nil, nilPoint), fmt.Sprintf("%p", nilInts), fmt.Sprintf("%p", nilMap))
+	fmt.Println(fmt.Sprintf("%v|%s|%d", []*point{nil}, []error{nil}, []any{nil, 1, "a", true}))
+	fmt.Println(fmt.Sprintf("%5v|%-5v|%05v", ages, flags, byNumber))
+	fmt.Println(fmt.Sprintf("%v %v", map[point]int{point{x: 2, name: "b"}: 1, point{x: 1, name: "z"}: 2, point{x: 1, name: "a"}: 3}, map[[2]int]string{[2]int{2, 1}: "x", [2]int{1, 9}: "y"}))
+}
+"""#
+
+private let typesNilsPointersAndMapsExpected = #"""
+[] map[] <nil> [] <nil> <nil>
+{1 a} false [3 1 2] [104 105] 65 map[amy:1 bob:2 zed:26] map[-1:a 2:b 30:c] map[false:0 true:1]
+3 tag [120 121] map[k:1] [{0 } {9 }] {{1 a} [3 1 2] map[] <nil> [] false <nil> <nil> 7}
+1 2ab3 4c5 true false
+x1 2 [] [3 1 2]y{1 a} 3tag
+tagtag1tag
+[]|[]|[]|[]|[]
+[]|[]|||""
+map[]|map[]|map[]
+<nil>|0|%!s(*main.point=<nil>)|<nil>
+<nil>|%!d(<nil>)|%!s(<nil>)|<nil>
+{{1 a} [3 1 2] map[] <nil> [] false <nil> <nil> 7}|{first:{x:1 name:a} second:[3 1 2] third:map[] fourth:<nil> raw:[] flag:false any:<nil> err:<nil> b:7}|7|
+int|string|bool|uint8|[]int|map[string]int
+main.point|*main.point|*main.point|[]int|[]uint8|map[string]int
+main.level|main.label|main.buffer|main.table|main.grid|main.pair
+<nil>|<nil>|*errors.errorString|<nil>|       int|string  |boo|
+[][]string|map[int][]uint8|[3]bool
+1|"a\n"|true|0x41|-5
+[]int(nil)|map[string]int(nil)|(*main.point)(nil)|[]byte(nil)
+<nil>|<nil>|&errors.errorString{s:"boom"}
+main.point{x:1, name:"a"}|[]int{3, 1, 2}|[]byte{0x68, 0x69}
+map[string]int{"amy":1, "bob":2, "zed":26}|map[int]string{-1:"a", 2:"b", 30:"c"}|map[bool]int{false:0, true:1}
+3|"tag"|main.buffer{0x78, 0x79}|main.table{"k":1}|main.grid{main.point{x:0, name:""}, main.point{x:9, name:""}}
+main.pair{first:main.point{x:1, name:"a"}, second:[]int{3, 1, 2}, third:map[string]int(nil), fourth:(*main.point)(nil), raw:[]uint8(nil), flag:false, any:interface {}(nil), err:error(nil), b:0x7}
+[]string{"a", "b"}|[2]bool{true, false}|[]main.point{main.point{x:1, name:"a"}}
+[]interface {}{1, "a", interface {}(nil)}|map[string]interface {}{"k":1}|[][]int{[]int{1}, []int(nil)}
+[]error{(*errors.errorString)(0x1003051c0), error(nil)}|[]byte{}|[]int{}
+&{1 a}|&{x:1 name:a}|&{%!s(int=1) a}|&{1 %!d(string=a)}
+&[3 1 2]|&map[amy:1 bob:2 zed:26]|&[{0 } {9 }]
+&main.point{x:1, name:"a"}|&[]int{3, 1, 2}
+65 65 %!s(uint8=65) 41 41 'A' A U+0041
+3 3 %!s(main.level=3) 746167 "tag"
+[120 121] xy 7879 "xy" [120 121]
+a %!d(string=x) [%!t(uint8=104) %!t(uint8=105)]
+1|%!s(int=2)%!(EXTRA uint8=65, main.level=3, main.label=tag, []uint8=[104 105], []int=[3 1 2], main.point={1 a}, bool=false, []int=[], map[string]int=map[], *errors.errorString=boom, <nil>)
+%!z(uint8=65) %!z(main.level=3) [%!z(int=3) %!z(int=1) %!z(int=2)] {%!z(int=1) %!z(string=a)} []
+%!p(int=5)|%!p(string=a)|%!p(<nil>)|0x0 0x0 0x0
+[<nil>]|[<nil>]|[<nil> 1 %!d(string=a) %!d(bool=true)]
+map[  amy:    1   bob:    2   zed:   26]|map[false:0     true :1    ]|map[-0001:0000a 00002:0000b 00030:0000c]
+map[{1 a}:3 {1 z}:2 {2 b}:1] map[[1 9]:y [2 1]:x]
+
+"""#
+
+private let argumentIndexesSprintAndCountsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "os"
+
+type point struct {
+	x    int
+	name string
+}
+
+func main() {
+	fmt.Println(fmt.Sprintf("%[2]d %[1]d", 1, 2))
+	fmt.Println(fmt.Sprintf("%[1]d %[1]x %[1]o %[1]q", 65))
+	fmt.Println(fmt.Sprintf("%[3]*.[2]*[1]d|", 12, 4, 8))
+	fmt.Println(fmt.Sprintf("%[2]*[1]d|%[1]*d|", 5, 3))
+	fmt.Println(fmt.Sprintf("%d %d %[1]d %d", 1, 2, 3))
+	fmt.Println(fmt.Sprintf("%[1]d", 5), fmt.Sprintf("%[2]d", 5), fmt.Sprintf("%[0]d", 5), fmt.Sprintf("%[-1]d", 5))
+	fmt.Println(fmt.Sprintf("%[x]d", 5), fmt.Sprintf("%[1", 5), fmt.Sprintf("%[]d", 5), fmt.Sprintf("%[1]", 5))
+	fmt.Println(fmt.Sprintf("%[1]2d", 5), fmt.Sprintf("%[1].2d", 5), fmt.Sprintf("%.[1]*d", 3, 7), fmt.Sprintf("%[2]d %d", 1, 2))
+	fmt.Println(fmt.Sprintf("%[1]s %[1]q %[1]v %[2]T %[2]v", "a", point{x: 1, name: "b"}))
+	fmt.Println(fmt.Sprintf("%[3]v %[1]v", 1, 2, 3, 4), fmt.Sprintf("%[1]d %d %d", 1, 2, 3), fmt.Sprintf("%[5]d", 1))
+	fmt.Println(fmt.Sprintf("%[1]*d|%[2]*[1]d|%-[1]*d|", 3, 5))
+
+	fmt.Println(fmt.Sprint("a", "b", 1, 2, "c", 3, true, nil, 4))
+	fmt.Println(fmt.Sprint(), fmt.Sprint(1), fmt.Sprint("x"), fmt.Sprint(1, 2), fmt.Sprint(nil, nil), fmt.Sprint([]int{1}, []int{2}))
+	fmt.Print(fmt.Sprintln("a", 1, true, nil, []string{"x"}, point{x: 2, name: "p"}))
+	fmt.Print(fmt.Sprintln(), fmt.Sprintln("x"), fmt.Sprint(errors.New("e1"), errors.New("e2")), "\n")
+	fmt.Println(len(fmt.Sprintln("ab", "cd")), len(fmt.Sprint("ab", "cd")), len(fmt.Sprint(1, 2)))
+
+	n, err := fmt.Println("count me", 1)
+	fmt.Println(n, err)
+	n, err = fmt.Print("é\n")
+	fmt.Println(n, err == nil)
+	n, err = fmt.Printf("%05d|%s\n", 42, "x")
+	fmt.Println(n, err)
+	n, err = fmt.Fprintf(os.Stdout, "%v\n", []int{1, 2})
+	fmt.Println(n, err)
+	n, err = fmt.Fprintln(os.Stdout, "a", "b")
+	fmt.Println(n, err)
+	n, err = fmt.Fprint(os.Stdout, 1, 2, "x\n")
+	fmt.Println(n, err)
+	n, err = fmt.Print()
+	fmt.Println(n, err)
+	forwarded, forwardedErr := counted()
+	fmt.Println(forwarded, forwardedErr)
+}
+
+func counted() (int, error) {
+	return fmt.Println("forwarded")
+}
+"""#
+
+private let argumentIndexesSprintAndCountsExpected = #"""
+2 1
+65 41 101 'A'
+    0012|
+  5|    3|
+1 2 1 2
+5 %!d(BADINDEX) %!d(BADINDEX) %!d(BADINDEX)
+%!d(BADINDEX) %!(NOVERB) %!d(BADINDEX) %!(NOVERB)
+%!d(BADINDEX) %!d(BADINDEX) 007 2 %!d(MISSING)
+a "a" a main.point {1 b}
+3 1 1 2 3 %!d(BADINDEX)
+  5|    3|5  |
+ab1 2c3 true <nil> 4
+ 1 x 1 2 <nil> <nil> [1] [2]
+a 1 true <nil> [x] {2 p}
+
+x
+e1 e2
+6 4 3
+count me 1
+11 <nil>
+é
+3 true
+00042|x
+8 <nil>
+[1 2]
+6 <nil>
+a b
+4 <nil>
+1 2x
+5 <nil>
+0 <nil>
+forwarded
+10 <nil>
+
+"""#
+
+private let methodsAtEveryDepthSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "os"
+
+type celsius int
+
+func (c celsius) String() string {
+	return fmt.Sprintf("%d°C", int(c))
+}
+
+type point struct {
+	x int
+	y int
+}
+
+func (p point) String() string {
+	return fmt.Sprintf("(%d,%d)", p.x, p.y)
+}
+
+type failure struct {
+	code   int
+	reason string
+}
+
+func (f failure) Error() string {
+	return fmt.Sprintf("failure %d: %s", f.code, f.reason)
+}
+
+type ptrErr struct {
+	msg string
+}
+
+func (e *ptrErr) Error() string {
+	return "ptr: " + e.msg
+}
+
+type both struct {
+	n int
+}
+
+func (b both) Error() string {
+	return "error wins"
+}
+
+func (b both) String() string {
+	return "string loses"
+}
+
+type counter struct {
+	n int
+}
+
+func (c *counter) String() string {
+	return fmt.Sprintf("counter(%d)", c.n)
+}
+
+type plain struct {
+	a int
+	s celsius
+}
+
+type shape interface{ Area() int }
+
+type square struct {
+	side int
+}
+
+func (s *square) Area() int {
+	return s.side * s.side
+}
+
+func (s *square) String() string {
+	return "square"
+}
+
+type report struct {
+	Temp   celsius
+	hidden celsius
+	At     point
+	Err    error
+	inner  []celsius
+	Open   []celsius
+}
+
+type noisy int
+
+var calls int
+
+func (n noisy) String() string {
+	calls = calls + 1
+	return fmt.Sprintf("noisy%d#%d", int(n), calls)
+}
+
+type odd int
+
+func (o odd) String(extra int) string {
+	return "never"
+}
+
+func find(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return failure{code: code, reason: "nope"}
+}
+
+func broken() error {
+	var e ptrErr
+	e.msg = "boom"
+	return &e
+}
+
+func typedNil() error {
+	var e *ptrErr
+	return e
+}
+
+func describe(v any) string {
+	return fmt.Sprintf("%v/%T", v, v)
+}
+
+func main() {
+	var c celsius = 21
+	p := point{x: 1, y: 2}
+	f := failure{code: 7, reason: "bad"}
+	var pe ptrErr
+	pe.msg = "boom"
+	b := both{n: 1}
+	var cnt counter
+	cnt.n = 5
+	fmt.Println(c, p, f, &pe, b, &cnt, cnt)
+	fmt.Println(fmt.Sprintf("%v|%s|%d|%q|%x|%5v|%T", c, c, c, c, c, c, c))
+	fmt.Println(fmt.Sprintf("%v|%+v|%s|%d|%#v|%T", p, p, p, p, p, p))
+	fmt.Println(fmt.Sprintf("%v|%s|%d|%q|%T|%#v", f, f, f, f, f, f))
+	fmt.Println(fmt.Sprintf("%v|%s|%T", &pe, &pe, &pe), fmt.Sprintf("%v|%d", pe, pe))
+	fmt.Println(fmt.Sprintf("%v|%s|%v|%T|%T", &cnt, &cnt, cnt, &cnt, cnt))
+	fmt.Println(fmt.Sprintf("%v %s", b, b))
+	err := find(3)
+	fmt.Println(err, fmt.Sprintf("%v|%s|%q|%d", err, err, err, err), find(0))
+	e2 := broken()
+	fmt.Println(e2, e2.Error(), fmt.Sprintf("[%v] [%10s] [%-12v] %T", e2, e2, e2, e2))
+	e3 := typedNil()
+	fmt.Println(e3 == nil, e3 != nil, fmt.Sprintf("%T", e3))
+	var any1 any = c
+	var any2 any = p
+	fmt.Println(any1, any2, fmt.Sprintf("%v %v %d", any1, any2, any1))
+	fmt.Print(c, c, p, "x", f, "\n")
+	fmt.Println(fmt.Sprint(c, p), fmt.Sprintln(c, f))
+	fmt.Println(fmt.Sprintf("%z|%z|%!|", c, p, f), fmt.Sprintf("%d", c, p))
+	fmt.Println(fmt.Errorf("wrap: %w", err), fmt.Errorf("wrap: %v", f), errors.New("x"))
+	fmt.Printf("%v %s\n", c, p)
+	fmt.Fprintln(os.Stdout, c, p, f)
+	fmt.Println(describe(c), describe(p), describe(&cnt), describe(5), describe("s"), describe(nil), describe([]int{1}))
+	var sq square
+	sq.side = 3
+	var sh shape = &sq
+	fmt.Println(sh.Area(), sh, fmt.Sprintf("%v %T", sh, sh))
+	values := []any{c, p, f, &cnt, 1, "s", nil}
+	for _, v := range values {
+		fmt.Print(describe(v), " ")
+	}
+	fmt.Println()
+	fmt.Println([]celsius{1, 2}, map[string]celsius{"a": 3}, plain{a: 1, s: 30}, []point{p}, []error{err, nil, errors.New("n")})
+	fmt.Println(fmt.Sprintf("%v|%s|%d|%q|%x", []celsius{1, 2}, []celsius{1, 2}, []celsius{1, 2}, []celsius{7}, []celsius{8}))
+	rep := report{Temp: 1, hidden: 2, At: p, Err: err, inner: []celsius{3}, Open: []celsius{4}}
+	fmt.Println(rep)
+	fmt.Println(fmt.Sprintf("%+v|%s", rep, rep))
+	fmt.Println([]*counter{&cnt}, map[celsius]point{5: p}, [2]celsius{6, 7}, []any{c, p, 1})
+	fmt.Println(fmt.Sprintf("%d %d %x", noisy(1), noisy(2), noisy(3)), calls)
+	fmt.Println(fmt.Sprintf("%v %v %s %d %q", noisy(1), noisy(2), noisy(3), noisy(4), noisy(5)), calls)
+	padded := fmt.Sprintf("%5v|%-12v|", noisy(9), noisy(10))
+	fmt.Println(padded, calls)
+	fmt.Println([]noisy{7, 8}, map[noisy]noisy{1: 2})
+	fmt.Println(calls)
+	fmt.Println(odd(3), fmt.Sprintf("%v %s", odd(4), odd(5)))
+	fmt.Println(fmt.Sprintf("%v %v", &p, &f), fmt.Sprintf("%s", []*point{&p}) != "")
+	got, ok := any1.(celsius)
+	fmt.Println(got, ok)
+	asInt, isInt := any1.(int)
+	fmt.Println(asInt, isInt)
+	asPoint, isPoint := any2.(point)
+	fmt.Println(asPoint, isPoint, asPoint.x)
+	asErr, isFailure := err.(failure)
+	fmt.Println(asErr.code, isFailure)
+	asPtr, isPtr := e2.(*ptrErr)
+	fmt.Println(asPtr.msg, isPtr)
+	var list any = []int{1, 2}
+	ints, isList := list.([]int)
+	fmt.Println(ints, isList, len(ints))
+	words, isWords := list.([]string)
+	fmt.Println(words, isWords)
+	var m any = map[string]int{"a": 1}
+	table, isTable := m.(map[string]int)
+	fmt.Println(table, isTable)
+}
+"""#
+
+private let methodsAtEveryDepthExpected = #"""
+21°C (1,2) failure 7: bad ptr: boom error wins counter(5) {5}
+21°C|21°C|21|"21°C"|3231c2b043| 21°C|main.celsius
+(1,2)|(1,2)|(1,2)|{1 2}|main.point{x:1, y:2}|main.point
+failure 7: bad|failure 7: bad|{7 %!d(string=bad)}|"failure 7: bad"|main.failure|main.failure{code:7, reason:"bad"}
+ptr: boom|ptr: boom|*main.ptrErr {boom}|{%!d(string=boom)}
+counter(5)|counter(5)|{5}|*main.counter|main.counter
+error wins error wins
+failure 3: nope failure 3: nope|failure 3: nope|"failure 3: nope"|{3 %!d(string=nope)} <nil>
+ptr: boom ptr: boom [ptr: boom] [ ptr: boom] [ptr: boom   ] *main.ptrErr
+false true *main.ptrErr
+21°C (1,2) 21°C (1,2) 21
+21°C 21°C (1,2)xfailure 7: bad
+21°C (1,2) 21°C failure 7: bad
+
+%!z(main.celsius=21)|{%!z(int=1) %!z(int=2)}|{%!!(int=7) %!!(string=bad)}| 21%!(EXTRA main.point=(1,2))
+wrap: failure 3: nope wrap: failure 7: bad x
+21°C (1,2)
+21°C (1,2) failure 7: bad
+21°C/main.celsius (1,2)/main.point counter(5)/*main.counter 5/int s/string <nil>/<nil> [1]/[]int
+9 square square *main.square
+21°C/main.celsius (1,2)/main.point failure 7: bad/main.failure counter(5)/*main.counter 1/int s/string <nil>/<nil>\#u{20}
+[1°C 2°C] map[a:3°C] {1 30} [(1,2)] [failure 3: nope <nil> n]
+[1°C 2°C]|[1°C 2°C]|[1 2]|["7°C"]|[38c2b043]
+{1°C 2 (1,2) failure 3: nope [3] [4°C]}
+{Temp:1°C hidden:2 At:(1,2) Err:failure 3: nope inner:[3] Open:[4°C]}|{1°C %!s(main.celsius=2) (1,2) failure 3: nope [%!s(main.celsius=3)] [4°C]}
+[counter(5)] map[5°C:(1,2)] [6°C 7°C] [21°C (1,2) 1]
+1 2 6e6f697379332331 1
+noisy1#2 noisy2#3 noisy3#4 4 "noisy5#5" 5
+noisy9#6|noisy10#7   | 7
+[noisy7#8 noisy8#9] map[noisy1#10:noisy2#11]
+11
+3 4 %!s(main.odd=5)
+(1,2) failure 7: bad true
+21°C true
+0 false
+(1,2) true 1
+3 true
+boom true
+[1 2] true 2
+[] false
+map[a:1] true
+
+"""#
+
+private let nilReceiversAndPanickingMethodsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type node struct {
+	name string
+}
+
+func (n *node) String() string {
+	if n == nil {
+		return "nil node"
+	}
+	return "node " + n.name
+}
+
+type leaf struct {
+	name string
+}
+
+func (l *leaf) String() string {
+	return "leaf " + l.name
+}
+
+type plain struct {
+	name string
+}
+
+func (p plain) String() string {
+	return "plain " + p.name
+}
+
+type list []int
+
+func (l list) String() string {
+	return "list of " + fmt.Sprint(len(l))
+}
+
+type index map[string]int
+
+func (i index) String() string {
+	return "index of " + fmt.Sprint(len(i))
+}
+
+type fault struct {
+	code int
+}
+
+func (f *fault) Error() string {
+	if f == nil {
+		return "no fault"
+	}
+	return "fault " + fmt.Sprint(f.code)
+}
+
+type angry struct {
+	level int
+}
+
+func (a angry) String() string {
+	if a.level > 1 {
+		panic(errors.New("too angry"))
+	}
+	if a.level > 0 {
+		panic("angry")
+	}
+	return "calm"
+}
+
+type broken struct {
+	code int
+}
+
+func (b broken) Error() string {
+	panic("broken " + fmt.Sprint(b.code))
+}
+
+type Holder struct {
+	Node  *node
+	Leaf  *leaf
+	Plain *plain
+	List  list
+	Mood  angry
+}
+
+func main() {
+	var n *node
+	var l *leaf
+	var p *plain
+	var items list
+	var words index
+	var f *fault
+	present := node{name: "a"}
+
+	fmt.Println(n, &present, l, p, items, words, f)
+	fmt.Printf("%v|%s|%q|%x|%d\n", n, n, n, n, 7)
+	fmt.Printf("%v|%s|%q|%10v|%-10s|\n", l, l, l, l, l)
+	fmt.Printf("%v|%s|%q|%10v|\n", p, p, p, p)
+	fmt.Printf("%v|%s|%5v|%+v|%#v\n", items, items, words, words, items)
+	fmt.Printf("%v|%s|%q\n", f, f, f)
+	fmt.Println(fmt.Sprint(n, l), fmt.Sprintf("%v %v", p, f))
+
+	fmt.Println(angry{level: 0}, angry{level: 1}, angry{level: 2})
+	fmt.Printf("%s|%q|%8v|%x|%d\n", angry{level: 1}, angry{level: 1}, angry{level: 1}, angry{level: 1}, angry{level: 1})
+	fmt.Printf("%v|%s\n", broken{code: 3}, broken{code: 4})
+	fmt.Println([]angry{angry{level: 0}, angry{level: 1}}, map[string]angry{"a": angry{level: 2}})
+
+	h := Holder{Node: n, Leaf: l, Plain: p, List: items, Mood: angry{level: 1}}
+	fmt.Println(h)
+	fmt.Printf("%v|%+v\n", h, h)
+	fmt.Println([]*node{n, &present}, []*leaf{l}, []*plain{p})
+	fmt.Println("done")
+}
+"""#
+
+private let nilReceiversAndPanickingMethodsExpected = #"""
+nil node node a <nil> <nil> list of 0 index of 0 no fault
+nil node|nil node|"nil node"|6e696c206e6f6465|7
+<nil>|<nil>|<nil>|<nil>|<nil>|
+<nil>|<nil>|<nil>|<nil>|
+list of 0|list of 0|index of 0|index of 0|main.list(nil)
+no fault|no fault|"no fault"
+nil node <nil> <nil> no fault
+calm %!v(PANIC=String method: angry) %!v(PANIC=String method: too angry)
+%!s(PANIC=String method: angry)|%!q(PANIC=String method: angry)|%!v(PANIC=String method: angry)|%!x(PANIC=String method: angry)|{1}
+%!v(PANIC=Error method: broken 3)|%!s(PANIC=Error method: broken 4)
+[calm %!v(PANIC=String method: angry)] map[a:%!v(PANIC=String method: too angry)]
+{nil node <nil> <nil> list of 0 %!v(PANIC=String method: angry)}
+{nil node <nil> <nil> list of 0 %!v(PANIC=String method: angry)}|{Node:nil node Leaf:<nil> Plain:<nil> List:list of 0 Mood:%!v(PANIC=String method: angry)}
+[nil node node a] [<nil>] [<nil>]
+done
+
+"""#
+
+private let valuesInInterfacesSource = #"""
+package main
+
+import "fmt"
+
+type ptrErr struct {
+	msg string
+}
+
+func (e *ptrErr) Error() string {
+	return "ptr: " + e.msg
+}
+
+type celsius int
+
+func (c celsius) String() string {
+	return "hot"
+}
+
+type shape interface{ Area() int }
+
+type stringer interface{ String() string }
+
+type square struct {
+	side int
+}
+
+func (s *square) Area() int {
+	return s.side * s.side
+}
+
+func fail() error {
+	var e ptrErr
+	e.msg = "x"
+	return &e
+}
+
+func none() error {
+	var e *ptrErr
+	return e
+}
+
+func main() {
+	err := fail()
+	fmt.Println(err.Error())
+	fmt.Println(err)
+	fmt.Println(none() == nil)
+	var s stringer = celsius(3)
+	fmt.Println(s.String(), s)
+	var sq square
+	sq.side = 3
+	var sh shape = &sq
+	fmt.Println(sh.Area())
+	var boxed any = celsius(4)
+	c, ok := boxed.(celsius)
+	fmt.Println(c, ok, boxed)
+	n, isInt := boxed.(int)
+	fmt.Println(n, isInt)
+	var five any = 5
+	fmt.Println(five != nil)
+	values := []any{1, "a", celsius(2), nil, &sq}
+	for _, v := range values {
+		fmt.Printf("%T ", v)
+	}
+	fmt.Println()
+}
+"""#
+
+private let valuesInInterfacesExpected = #"""
+ptr: x
+ptr: x
+false
+hot hot
+9
+hot true hot
+0 false
+true
+int string main.celsius <nil> *main.square\#u{20}
+
+"""#
+
+private let assertionsToInterfacesSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type namer interface {
+	name() string
+}
+
+type sizer interface {
+	size() int
+}
+
+type both interface {
+	name() string
+	size() int
+}
+
+type resizer interface {
+	resize(int) (int, bool)
+}
+
+type file struct {
+	label string
+	bytes int
+}
+
+func (f file) name() string {
+	return f.label
+}
+
+func (f *file) size() int {
+	return f.bytes
+}
+
+func (f *file) resize(to int) (int, bool) {
+	old := f.bytes
+	f.bytes = to
+	return old, to > old
+}
+
+type tag string
+
+func (t tag) name() string {
+	return "tag " + string(t)
+}
+
+type failure struct {
+	code int
+}
+
+func (f failure) Error() string {
+	return "failure " + fmt.Sprint(f.code)
+}
+
+func describe(value interface{}) string {
+	text := ""
+	n, isNamer := value.(namer)
+	if isNamer {
+		text += "namer(" + n.name() + ") "
+	}
+	s, isSizer := value.(sizer)
+	if isSizer {
+		text += "sizer(" + fmt.Sprint(s.size()) + ") "
+	}
+	b, isBoth := value.(both)
+	if isBoth {
+		text += "both(" + b.name() + "," + fmt.Sprint(b.size()) + ") "
+	}
+	_, isResizer := value.(resizer)
+	if isResizer {
+		text += "resizer "
+	}
+	e, isError := value.(error)
+	if isError {
+		text += "error(" + e.Error() + ") "
+	}
+	_, isAny := value.(interface{})
+	if isAny {
+		text += "any"
+	}
+	return text
+}
+
+func mustName(value interface{}) string {
+	defer func() {
+		fmt.Println("recovered:", recover())
+	}()
+	return value.(namer).name()
+}
+
+func main() {
+	f := file{label: "a.txt", bytes: 3}
+	fmt.Println(describe(f))
+	fmt.Println(describe(&f))
+	fmt.Println(describe(tag("x")))
+	fmt.Println(describe(7))
+	fmt.Println(describe("text"))
+	fmt.Println(describe(nil))
+	fmt.Println(describe(failure{code: 2}))
+	fmt.Println(describe(errors.New("plain")))
+	fmt.Println(describe(fmt.Errorf("wrap: %w", errors.New("inner"))))
+
+	var n namer = &f
+	r, ok := n.(resizer)
+	fmt.Println(ok)
+	old, grew := r.resize(10)
+	fmt.Println(old, grew, n.(sizer).size())
+	_, isFile := n.(*file)
+	_, isValue := n.(file)
+	fmt.Println(isFile, isValue)
+
+	fmt.Println(mustName(tag("y")))
+	fmt.Println(mustName(42))
+	fmt.Println(mustName(nil))
+	var err error = failure{code: 9}
+	fmt.Println(mustName(err))
+}
+"""#
+
+private let assertionsToInterfacesExpected = #"""
+namer(a.txt) any
+namer(a.txt) sizer(3) both(a.txt,3) resizer any
+namer(tag x) any
+any
+any
+
+error(failure 2) any
+error(plain) any
+error(wrap: inner) any
+true
+3 true 10
+true false
+recovered: <nil>
+tag y
+recovered: interface conversion: int is not main.namer: missing method name
+
+recovered: interface conversion: interface is nil, not main.namer
+
+recovered: interface conversion: main.failure is not main.namer: missing method name
+
+
+"""#
+
+private let interfaceMethodsWithSeveralResultsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type store interface {
+	get(string) (string, bool)
+	put(string, string) (int, error)
+	stats() (int, int, int)
+}
+
+type memory struct {
+	values map[string]string
+	writes int
+}
+
+func (m *memory) get(key string) (string, bool) {
+	value, ok := m.values[key]
+	return value, ok
+}
+
+func (m *memory) put(key string, value string) (int, error) {
+	if key == "" {
+		return 0, errors.New("empty key")
+	}
+	m.values[key] = value
+	m.writes++
+	return len(value), nil
+}
+
+func (m *memory) stats() (int, int, int) {
+	return len(m.values), m.writes, 0
+}
+
+func lookup(s store, key string) (string, bool) {
+	return s.get(key)
+}
+
+func main() {
+	backing := memory{values: map[string]string{}, writes: 0}
+	var s store = &backing
+	n, err := s.put("a", "alpha")
+	fmt.Println(n, err)
+	n, err = s.put("", "x")
+	fmt.Println(n, err)
+	value, ok := s.get("a")
+	fmt.Println(value, ok)
+	value, ok = lookup(s, "missing")
+	fmt.Println(value == "", ok)
+	keys, writes, misses := s.stats()
+	fmt.Println(keys, writes, misses)
+}
+"""#
+
+private let interfaceMethodsWithSeveralResultsExpected = #"""
+5 <nil>
+0 empty key
+alpha true
+true false
+1 1 0
+
+"""#
+
+private let variadicInterfaceMethodsAndFinalPanicSource = #"""
+package main
+
+import "fmt"
+
+type summer interface {
+	sum(int, ...int) (int, int)
+}
+
+type strict interface {
+	sum(int, []int) (int, int)
+}
+
+type adder struct {
+	base int
+}
+
+func (a adder) sum(first int, values ...int) (int, int) {
+	total := a.base + first
+	for _, value := range values {
+		total += value
+	}
+	return total, len(values)
+}
+
+func fail(code int) int {
+	if code > 0 {
+		panic("positive")
+	}
+	panic(fmt.Sprintf("code %d", code))
+}
+
+func main() {
+	defer func() {
+		fmt.Println("recovered", recover())
+	}()
+	var s summer = adder{base: 10}
+	total, count := s.sum(1)
+	fmt.Println(total, count)
+	total, count = s.sum(1, 2, 3)
+	fmt.Println(total, count)
+	total, count = s.sum(1, []int{4, 5}...)
+	fmt.Println(total, count)
+	var value interface{} = adder{base: 1}
+	_, isSummer := value.(summer)
+	_, isStrict := value.(strict)
+	fmt.Println(isSummer, isStrict)
+	fmt.Println(fail(0))
+}
+"""#
+
+private let variadicInterfaceMethodsAndFinalPanicExpected = #"""
+11 0
+16 2
+20 2
+true false
+recovered code 0
+
+"""#
+
+private let errorIdentityWrappingIsAndAsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "io"
+
+var errNotFound = errors.New("not found")
+var errOther = errors.New("not found")
+
+type codeErr struct {
+	code int
+}
+
+func (e codeErr) Error() string {
+	return fmt.Sprintf("code %d", e.code)
+}
+
+type pathErr struct {
+	op    string
+	inner error
+}
+
+func (e *pathErr) Error() string {
+	return e.op + ": " + e.inner.Error()
+}
+
+func (e *pathErr) Unwrap() error {
+	return e.inner
+}
+
+type always struct {
+	tag string
+}
+
+func (a always) Error() string {
+	return "always " + a.tag
+}
+
+func (a always) Is(target error) bool {
+	return target == errOther
+}
+
+type multi struct {
+	all []error
+}
+
+func (m multi) Error() string {
+	return "multi"
+}
+
+func (m multi) Unwrap() []error {
+	return m.all
+}
+
+type temporary interface{ Temporary() bool }
+
+type flaky struct {
+	n int
+}
+
+func (f flaky) Error() string {
+	return "flaky"
+}
+
+func (f flaky) Temporary() bool {
+	return f.n > 0
+}
+
+func lookup(key string) error {
+	if key == "" {
+		return errNotFound
+	}
+	return nil
+}
+
+func load(key string) error {
+	err := lookup(key)
+	if err != nil {
+		return fmt.Errorf("load %q: %w", key, err)
+	}
+	return nil
+}
+
+func main() {
+	a := errors.New("same")
+	b := errors.New("same")
+	c := a
+	fmt.Println(a == b, a == c, a != b, errNotFound == errOther, errNotFound == errNotFound)
+	fmt.Println(a, a.Error(), fmt.Sprintf("%v|%s|%q|%T|%#v", a, a, a, a, a))
+	fmt.Println(fmt.Sprintf("%d|%x|%5v|%-6s|", a, a, a, a))
+
+	e1 := fmt.Errorf("plain %d", 1)
+	e2 := fmt.Errorf("plain %d", 1)
+	fmt.Println(e1, e1 == e2, fmt.Sprintf("%T", e1), errors.Unwrap(e1) == nil)
+
+	w := load("")
+	fmt.Println(w, fmt.Sprintf("%T", w), errors.Unwrap(w) == errNotFound, errors.Unwrap(errors.Unwrap(w)) == nil)
+	fmt.Println(errors.Is(w, errNotFound), errors.Is(w, errOther), errors.Is(w, w), errors.Is(nil, errNotFound), errors.Is(w, nil), errors.Is(nil, nil))
+	ww := fmt.Errorf("outer: %w", w)
+	fmt.Println(ww, errors.Is(ww, errNotFound), errors.Unwrap(ww) == w, fmt.Sprintf("%v|%+v|%s", ww, ww, ww))
+	fmt.Println(fmt.Sprintf("%#v", w) != "", fmt.Sprintf("%d", w) != "")
+
+	both := fmt.Errorf("two: %w and %w", errNotFound, a)
+	fmt.Println(both, fmt.Sprintf("%T", both), errors.Unwrap(both) == nil, errors.Is(both, errNotFound), errors.Is(both, a), errors.Is(both, b))
+	reordered := fmt.Errorf("%[2]w then %[1]w", a, errNotFound)
+	fmt.Println(reordered, errors.Is(reordered, a), errors.Is(reordered, errNotFound), fmt.Sprintf("%T", reordered))
+	notAnError := fmt.Errorf("value %w", 5)
+	fmt.Println(notAnError, fmt.Sprintf("%T", notAnError), errors.Unwrap(notAnError) == nil)
+	mixed := fmt.Errorf("%w %w", 5, a)
+	fmt.Println(mixed, fmt.Sprintf("%T", mixed), errors.Is(mixed, a))
+	nilWrap := fmt.Errorf("nil: %w", nil)
+	fmt.Println(nilWrap, fmt.Sprintf("%T", nilWrap), errors.Unwrap(nilWrap) == nil)
+	fmt.Println(fmt.Sprintf("%w", a), fmt.Sprintf("%w", 5), fmt.Sprintf("%w", nil))
+
+	var pe pathErr
+	pe.op = "open"
+	pe.inner = errNotFound
+	var chain error = &pe
+	fmt.Println(chain, errors.Unwrap(chain) == errNotFound, errors.Is(chain, errNotFound), errors.Is(chain, a))
+	deep := fmt.Errorf("deep: %w", chain)
+	fmt.Println(deep, errors.Is(deep, errNotFound), errors.Unwrap(errors.Unwrap(deep)) == errNotFound)
+
+	var ce error = codeErr{code: 7}
+	wrappedCode := fmt.Errorf("wrapped: %w", ce)
+	fmt.Println(errors.Is(wrappedCode, codeErr{code: 7}), errors.Is(wrappedCode, codeErr{code: 8}), errors.Is(ce, ce))
+	var target codeErr
+	fmt.Println(errors.As(wrappedCode, &target), target.code, target)
+	var missing codeErr
+	fmt.Println(errors.As(w, &missing), missing.code)
+	var found *pathErr
+	fmt.Println(errors.As(deep, &found), found.op, found == &pe)
+	var notThere *pathErr
+	fmt.Println(errors.As(w, &notThere), notThere == nil)
+
+	var al error = always{tag: "x"}
+	fmt.Println(errors.Is(al, errOther), errors.Is(al, errNotFound), errors.Is(fmt.Errorf("w: %w", al), errOther))
+	var m error = multi{all: []error{a, nil, w}}
+	fmt.Println(errors.Is(m, a), errors.Is(m, errNotFound), errors.Is(m, b), errors.Unwrap(m) == nil)
+	var asCode codeErr
+	fmt.Println(errors.As(multi{all: []error{a, wrappedCode}}, &asCode), asCode.code)
+
+	var temp temporary
+	var fl error = flaky{n: 1}
+	fmt.Println(errors.As(fmt.Errorf("x: %w", fl), &temp), temp.Temporary(), errors.As(w, &temp))
+	var anyErr error
+	fmt.Println(errors.As(w, &anyErr), anyErr == w)
+
+	fmt.Println(errors.Is(io.EOF, io.EOF), errors.Is(fmt.Errorf("read: %w", io.EOF), io.EOF), errors.Unwrap(io.EOF) == nil)
+	fmt.Println(errors.Is(a, b), errors.Is(a, a), errors.Unwrap(nil) == nil)
+	list := []error{a, w, nil, ce}
+	fmt.Println(list, fmt.Sprintf("%v|%s|%q", list, list, list))
+}
+"""#
+
+private let errorIdentityWrappingIsAndAsExpected = #"""
+false true true false true
+same same same|same|"same"|*errors.errorString|&errors.errorString{s:"same"}
+&{%!d(string=same)}|73616d65| same|same  |
+plain 1 false *errors.errorString true
+load "": not found *fmt.wrapError true true
+true false true false false true
+outer: load "": not found true true outer: load "": not found|outer: load "": not found|outer: load "": not found
+true true
+two: not found and same *fmt.wrapErrors true true true false
+not found then same true true *fmt.wrapErrors
+value %!w(int=5) *fmt.wrapError true
+%!w(int=5) same *fmt.wrapErrors true
+nil: %!w(<nil>) *fmt.wrapError true
+%!w(*errors.errorString=&{same}) %!w(int=5) %!w(<nil>)
+open: not found true true false
+deep: open: not found true true
+true false true
+true 7 code 7
+false 0
+true open true
+false true
+true false true
+true true false true
+true 7
+true true false
+true true
+true true true
+false true true
+[same load "": not found <nil> code 7] [same load "": not found <nil> code 7]|[same load "": not found <nil> code 7]|["same" "load \"\": not found" <nil> "code 7"]
+
+"""#
+
+private let variadicFunctionsAndSpreadsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "strings"
+
+func sum(values ...int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func join(separator string, parts ...string) string {
+	return strings.Join(parts, separator)
+}
+
+func describe(label string, values ...any) string {
+	text := label + ":"
+	for i := 0; i < len(values); i++ {
+		text += fmt.Sprintf(" %v/%T", values[i], values[i])
+	}
+	return text
+}
+
+func shape(values ...int) string {
+	return fmt.Sprintf("%d %d %v %t", len(values), cap(values), values, values == nil)
+}
+
+func first(values ...string) (string, int) {
+	if len(values) == 0 {
+		return "", 0
+	}
+	return values[0], len(values)
+}
+
+func mutate(values ...int) {
+	if len(values) > 0 {
+		values[0] = 99
+	}
+}
+
+type logger struct {
+	prefix string
+	lines  []string
+}
+
+func (l *logger) logf(format string, args ...any) {
+	l.lines = append(l.lines, l.prefix+fmt.Sprintf(format, args...))
+}
+
+func (l logger) count(extra ...int) int {
+	return len(l.lines) + len(extra)
+}
+
+func wrap(err error, context ...string) error {
+	if len(context) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %w", strings.Join(context, "/"), err)
+}
+
+func bytes(prefix string, data ...byte) []byte {
+	return append([]byte(prefix), data...)
+}
+
+func main() {
+	fmt.Println(sum(), sum(1), sum(1, 2, 3), sum([]int{4, 5, 6}...))
+	numbers := []int{7, 8}
+	fmt.Println(sum(numbers...), sum(numbers[:1]...), sum(append(numbers, 9)...))
+	fmt.Println(join(","), join(",", "a"), join("-", "a", "b", "c"), join("+", []string{"x", "y"}...))
+	fmt.Println(describe("none"), describe("mixed", 1, "a", true, nil, 2), describe("slice", numbers))
+	fmt.Println(describe("spread", []any{1, "b"}...))
+	fmt.Println(shape(), shape(1, 2), shape(numbers...))
+	var empty []int
+	fmt.Println(shape(empty...), shape([]int{}...))
+	head, count := first("a", "b")
+	fmt.Println(head, count)
+	head, count = first()
+	fmt.Println(head == "", count)
+	mutate(numbers...)
+	fmt.Println(numbers)
+	mutate(1, 2)
+	var log logger
+	log.prefix = "> "
+	log.logf("plain")
+	log.logf("%d-%s", 1, "x")
+	log.logf("%v %v %v", []any{1, 2, 3}...)
+	fmt.Println(log.lines, log.count(), log.count(1, 2))
+	base := errors.New("base")
+	fmt.Println(wrap(base), wrap(base, "a"), wrap(base, "a", "b"), errors.Is(wrap(base, "x"), base))
+	fmt.Println(string(bytes("ab")), string(bytes("ab", 99, 100)), string(bytes("", []byte("xyz")...)))
+	fmt.Println(fmt.Sprintf("%d %d", []any{1, 2}...), fmt.Sprint([]any{"a", 1}...), fmt.Sprintln([]any{"b", 2}...))
+	args := []any{"x", 3}
+	fmt.Printf("%s=%d\n", args...)
+	fmt.Println(args...)
+}
+"""#
+
+private let variadicFunctionsAndSpreadsExpected = #"""
+0 1 6 15
+15 7 24
+ a a-b-c x+y
+none: mixed: 1/int a/string true/bool <nil>/<nil> 2/int slice: [7 8]/[]int
+spread: 1/int b/string
+0 0 [] true 2 2 [1 2] false 2 2 [7 8] false
+0 0 [] true 0 0 [] false
+a 2
+true 0
+[99 8]
+[> plain > 1-x > 1 2 3] 3 5
+base a: base a/b: base true
+ab abcd xyz
+1 2 a1 b 2
+
+x=3
+x 3
+
+"""#
