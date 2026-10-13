@@ -243,6 +243,30 @@ format, behavior and platform changes are recorded here.
   embedded fields, tags in a column of their own, and raw strings as Go's
   does; `gofmt -r` renames labels and rewrites the operand and the case types
   of a type switch.
+- `net/http` serves requests with the program's handlers: `http.HandleFunc`,
+  `http.Handle`, `http.ListenAndServe`, `http.Serve`, `http.Server`,
+  `http.ServeMux` with Go 1.22 method, host, and wildcard patterns
+  (`GET /items/{id}`, `r.PathValue`), `http.Handler`, `http.HandlerFunc`,
+  `http.Error`, `http.NotFound`, `http.Redirect`, `http.StripPrefix`, and the
+  status and method constants. A handler is any function value, each
+  connection runs in its own goroutine, a panic ends its request alone, and
+  responses match Go's byte for byte apart from `Date`. The server used to
+  answer `200 OK` without calling the handler, and `w.Write` in a handler was
+  `http.ResponseWriter has no field or method Write`.
+- `http.Get`, `Head`, `Post`, `PostForm`, `NewRequest`, and `Client.Do` with
+  redirects; the response has `Status`, `StatusCode`, `Header`, `Body`, and
+  `ContentLength`.
+- `net/url`: `Parse`, `URL`, `Values`, `QueryEscape`, `PathEscape`, and their
+  inverses. Was `package net/url is not available`.
+- `io.Reader`, `io.Writer`, `io.Closer`, `io.ReadCloser`, `io.ReadAll`,
+  `io.WriteString`, `io.Copy`, `io.NopCloser`, `io.Discard`,
+  `io.ErrUnexpectedEOF`, and `strings.NewReader`.
+- `defer` and `go` of a method of an interface value (`defer
+  resp.Body.Close()`, was `unsupported defer expression`) and of the builtin
+  `close` (`defer close(done)` ended the run with `missing function: close`).
+- `swiftix-go run` gives the program a loopback interface, so a program can
+  reach a server it started; a connection from `listener.Accept` knows its
+  peer address. `ProcessContext.tcpPeer` is public.
 
 
 ### Changed
@@ -430,6 +454,10 @@ format, behavior and platform changes are recorded here.
   method twice is `duplicate method M` (it was accepted).
 - The message for an unsupported numeric type is `type float64 is not
   supported; the numeric types are the integer types`.
+- `fmt.Fprint`, `Fprintln`, and `Fprintf` write to any value with a `Write`
+  method (was `cannot use *buf as *os.File value`). A first argument that is
+  no writer is `cannot use int as io.Writer value in argument to
+  fmt.Fprintln`.
 
 
 ### Fixed
@@ -556,6 +584,7 @@ format, behavior and platform changes are recorded here.
   `gofmt -r` rewrites inside `[]interface{}{1, 2}`; a comment after the
   closing brace of a field whose type is a struct of several lines follows
   the brace after one blank.
+
 
 
 ## 0.13.1 — 2026-10-08
