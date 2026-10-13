@@ -599,6 +599,13 @@ private struct FormatPrinter {
     /// clause of a `for`, `if`, or `switch`. Its lines are those of a type,
     /// and what it interrupted goes on where it ends.
     var suspendedHeaders: [Int: FormatHeader] = [:]
+    /// Whether the token being handled follows the name of a label, whose
+    /// colon it is; whether that colon is the token before the one being
+    /// handled; and whether a comment stands between a label and the
+    /// statement it names, which begins a line of its own.
+    var pendingLabel = false
+    var followsLabel = false
+    var labelAwaitsStatement = false
 
     mutating func render() -> String {
         for (index, token) in tokens.enumerated() {
@@ -1233,6 +1240,18 @@ private struct FormatPrinter {
             beginTopLevelDeclaration(token.text)
         }
 
+        if labelAwaitsStatement {
+            // The statement after a label and the comment beside it.
+            labelAwaitsStatement = false
+            if !lineIsEmpty { finishLine() }
+        }
+        let closedLabel = followsLabel
+        followsLabel = false
+        if isLabel(token, next: next) {
+            beginLabel(token)
+            return
+        }
+
         // A function type ends where what it stands in goes on: at the
         // parenthesis that closes around it, or at a separator beside it.
         if pendingFunction, pendingFunctionIsType, parenthesisDepth <= functionTypeDepth,
@@ -1368,6 +1387,13 @@ private struct FormatPrinter {
             append("]")
             afterTypeBracket = typeBrackets.popLast() ?? false
             _ = sliceBrackets.popLast()
+        case "{" where previous?.text == "select" && next?.text == "}" && next?.kind == .symbol:
+            // Go's printer keeps a `select` without clauses on one line.
+            ensureSpace()
+            append("{")
+            braceDepth += 1
+            compositeDepths.insert(braceDepth)
+            pendingSwitch = false
         case "{":
             // `interface{}` stays on its line; an interface with methods is
             // a block like a struct.
@@ -1482,6 +1508,25 @@ private struct FormatPrinter {
                 trimTrailingWhitespace()
             }
             append(GoSpread.spelling)
+        case ":" where pendingLabel:
+            // The colon of a label, which has a line to itself: the
+            // statement it names begins the next one. A comment on the
+            // line stays beside the label.
+            pendingLabel = false
+            followsLabel = true
+            append(":")
+            if let next, next.leadingNewlines == 0,
+                next.kind == .lineComment || next.kind == .blockComment
+            {
+                labelAwaitsStatement = true
+            } else {
+                finishLine()
+            }
+        case ";" where closedLabel:
+            // The empty statement a label names, written out.
+            append(";")
+            finishLine()
+            endStatement()
         case ":" where sliceBrackets.last.map({
             $0.parenthesisDepth == parenthesisDepth && $0.braceDepth == braceDepth
         }) ?? false:
@@ -1736,6 +1781,32 @@ private struct FormatPrinter {
         pendingIf = header.pendingIf
         pendingSwitch = header.pendingSwitch
         forHeader = header.forHeader
+    }
+
+    /// Whether `token` is the name of a label: a word before a colon where
+    /// a statement begins, which is nowhere a key of a literal, a field, or
+    /// the last value of a `case` can stand.
+    func isLabel(_ token: FormatToken, next: FormatToken?) -> Bool {
+        guard token.kind == .word, token.text != "default", let next, next.kind == .symbol,
+            next.text == ":", braceDepth > 0, parenthesisDepth == statementBase,
+            sliceBrackets.isEmpty, pendingCaseDepth == nil,
+            !compositeDepths.contains(braceDepth), !typeBodyDepths.contains(braceDepth)
+        else { return false }
+        if lineIsEmpty { return true }
+        // The statements of a body the source has on one line.
+        return oneLineBodies[braceDepth] != nil && (previous?.text == "{" || previous?.text == ";")
+    }
+
+    /// Writes the name of a label, on a line of its own that Go's printer
+    /// indents one level less than the statements around it.
+    mutating func beginLabel(_ token: FormatToken) {
+        if !lineIsEmpty { finishLine() }
+        append(token.text)
+        lineIndent = max(0, indent + continuationIndent - 1)
+        pendingLabel = true
+        previous = token
+        previousCode = token
+        previousWasUnaryOperator = false
     }
 
     mutating func beginCase(_ keyword: String) {

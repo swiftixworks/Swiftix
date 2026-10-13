@@ -1249,7 +1249,7 @@ private struct PackageDependencyAnalyzer {
                 result.formUnion(
                     dependencies(
                         of: switchCase.body,
-                        localTypes: localTypes,
+                        localTypes: clauseTypes(of: switchCase, in: statement, localTypes),
                         visitingFunctions: &visitingFunctions))
             }
             return result
@@ -1270,6 +1270,25 @@ private struct PackageDependencyAnalyzer {
             }
             return result
         }
+    }
+
+    /// The types of the variables a clause of a switch sees: in a type
+    /// switch, the name it binds is one more, of the type of the clause.
+    private func clauseTypes(
+        of switchCase: GoSwitchCase, in statement: GoStatement, _ localTypes: [String: GoType]
+    ) -> [String: GoType] {
+        guard let typeSwitch = statement.typeSwitch, let name = typeSwitch.binding?.name else {
+            return localTypes
+        }
+        var types = localTypes
+        if switchCase.expressions.count == 1,
+            case .typeExpression(let syntax, _) = switchCase.expressions[0], !syntax.isNilCase
+        {
+            types[name] = compilerResolve(syntax)
+        } else {
+            types[name] = type(of: typeSwitch.operand, localTypes: localTypes) ?? .interface([])
+        }
+        return types
     }
 
     private func resolvedMethodKey(
@@ -1445,6 +1464,10 @@ private struct IRLowerer {
     /// Whether this lowerer is lowering the body of a literal, and leaves
     /// the literals it meets to the lowerer that started it.
     var isLiteralBody = false
+    /// Whether the function has a `goto`, and whether one jumps back, so
+    /// that a declaration outside any loop may be reached again.
+    var hasGoto = false
+    var jumpsBackward = false
 
     mutating func lower(
         _ function: GoFunctionDeclaration,
@@ -1455,6 +1478,7 @@ private struct IRLowerer {
         // A variable a literal inside captures is reached through a pointer
         // like one whose address is taken, and is renewed in a loop alike.
         addressedVariables.capture(capturedNames(in: function.body))
+        (hasGoto, jumpsBackward) = function.body.gotoStatements
         // A literal takes a pointer to each variable it captures before its
         // own parameters, and gives each a local that is that variable.
         let capturePointers = captures.map { _ in allocateRegister() }
@@ -1776,6 +1800,10 @@ private struct IRLowerer {
     mutating func lower(_ block: GoBlock, createsScope: Bool = true) throws {
         if createsScope { scopes.append([:]) }
         defer { if createsScope { scopes.removeLast() } }
+        if block.hasLabels {
+            try lowerStatements(withLabels: block.statements)
+            return
+        }
         for statement in block.statements { try lower(statement) }
     }
 
@@ -2392,6 +2420,11 @@ private struct IRLowerer {
         // iteration and UTF-8 string offsets use Go-compatible values.
         let collectionRegister = try lower(collection)
         let collectionType = underlying(try type(of: collection))
+        if try lowerIntegerRange(
+            collection, limit: collectionRegister, indexName: indexName, body: body)
+        {
+            return
+        }
         if case .channel(_, let elementType) = collectionType {
             let receiveLabel = allocateLabel()
             let endLabel = allocateLabel()
@@ -2504,6 +2537,10 @@ private struct IRLowerer {
 
     mutating func lowerSwitchStatement(_ statement: GoStatement) throws {
         guard case .switchStatement(let expression, let cases, _) = statement else { return }
+        if statement.isTypeSwitch {
+            try lowerTypeSwitchStatement(statement)
+            return
+        }
         let switchRegister = try expression.map { try lower($0) } ?? constant(.bool(true))
         let endLabel = allocateLabel()
         let caseLabels = cases.map { _ in allocateLabel() }
@@ -2528,10 +2565,232 @@ private struct IRLowerer {
         for (index, switchCase) in cases.enumerated() {
             operations.append(.label(caseLabels[index]))
             try lower(switchCase.body)
+            // A clause that ends in `fallthrough` goes on with the next,
+            // which is not asked whether it matches.
+            let next = switchCase.fallsThrough && index + 1 < cases.count ? index + 1 : nil
+            operations.append(.jump(target: next.map { caseLabels[$0] } ?? endLabel))
+        }
+        breakLabels.removeLast()
+        operations.append(.label(endLabel))
+    }
+
+    // MARK: Labels and jumps
+
+    /// The statements of a block that has a label. A label names the
+    /// statement after it, and is where a `goto` arrives.
+    ///
+    /// A `goto` may jump over the declaration of a constant, which Go
+    /// allows: a constant is no variable. Here it is a local that its
+    /// declaration stores, so a label first stores the constants its block
+    /// declared before it for whoever arrives by a `goto`; who comes the
+    /// ordinary way is jumped around that.
+    mutating func lowerStatements(withLabels statements: [GoStatement]) throws {
+        var constants: [GoStatement] = []
+        var index = 0
+        while index < statements.count {
+            let statement = statements[index]
+            index += 1
+            guard let label = statement.label else {
+                if hasGoto, statement.declaresConstants { constants.append(statement) }
+                try lower(statement)
+                continue
+            }
+            if hasGoto {
+                let resume = constants.isEmpty ? nil : allocateLabel()
+                if let resume { operations.append(.jump(target: resume)) }
+                operations.append(.label(gotoLabel(label)))
+                for constant in constants { try storeConstants(of: constant) }
+                if let resume { operations.append(.label(resume)) }
+            }
+            // A label before a label names no loop, `switch`, or `select`.
+            if index < statements.count, !statements[index].isLabel {
+                try lowerLabeled(statements[index], label: label)
+                index += 1
+            }
+        }
+    }
+
+    /// Stores the constants `declaration` declared in their locals again.
+    mutating func storeConstants(of declaration: GoStatement) throws {
+        switch declaration {
+        case .declaration(let name, let explicitType, let expression?, _, _):
+            guard let binding = lookup(name) else { return }
+            let value = try lowerConverted(expression, to: explicitType.map(resolve))
+            operations.append(.copy(destination: binding.register, source: value))
+        case .multiDeclaration(let names, let expression, _):
+            guard let variables = expression.variables else { return }
+            let declared = variables.type.map(resolve)
+            for (name, value) in zip(names, variables.values) {
+                guard let binding = lookup(name) else { continue }
+                let source = try lowerConverted(value, to: declared)
+                operations.append(.copy(destination: binding.register, source: source))
+            }
+        default:
+            break
+        }
+    }
+
+    /// Lowers the statement the label `label` names. While it is lowered,
+    /// `break label` and `continue label` find the targets it opens: a
+    /// loop, a `switch`, and a `select` each push theirs where the label
+    /// found the two stacks. The lowerer keeps no table of labels; what one
+    /// stands for is in the scope it is written in, under the name of the
+    /// jump, which no variable has.
+    mutating func lowerLabeled(_ statement: GoStatement, label: String) throws {
+        let scope = scopes.count - 1
+        let breakName = GoBranch.breakTo(label).calleeName
+        let continueName = GoBranch.continueTo(label).calleeName
+        scopes[scope][breakName] = LoweredBinding(register: breakLabels.count, type: .void)
+        scopes[scope][continueName] = LoweredBinding(register: continueLabels.count, type: .void)
+        defer {
+            scopes[scope][breakName] = nil
+            scopes[scope][continueName] = nil
+        }
+        try lower(statement)
+    }
+
+    /// The IR label a `goto` to the label `name` jumps to, kept in the
+    /// scope of the function: a label is the function's.
+    mutating func gotoLabel(_ name: String) -> Int {
+        let key = GoBranch.label(name).calleeName
+        if let known = scopes[0][key] { return known.register }
+        let label = allocateLabel()
+        scopes[0][key] = LoweredBinding(register: label, type: .void)
+        return label
+    }
+
+    /// Lowers the statement `expression` when it is a label or a jump the
+    /// tree has no case for, and says whether it was one. Whether it is in
+    /// place was checked on the tree the parser made.
+    mutating func lowerJump(_ expression: GoExpression) throws -> Bool {
+        guard let branch = expression.branch else { return false }
+        switch branch.kind {
+        case .label, .fallthrough:
+            // A label is lowered with its block, and a clause that ends in
+            // `fallthrough` jumps to the next one.
+            break
+        case .goto(let name):
+            operations.append(.jump(target: gotoLabel(name)))
+        case .breakTo(let name):
+            guard let depth = lookup(branch.kind.calleeName)?.register, depth < breakLabels.count
+            else {
+                throw GoDiagnostic(position: branch.position, message: "invalid break label \(name)")
+            }
+            operations.append(.jump(target: breakLabels[depth]))
+        case .continueTo(let name):
+            guard let depth = lookup(branch.kind.calleeName)?.register,
+                depth < continueLabels.count
+            else {
+                throw GoDiagnostic(
+                    position: branch.position, message: "invalid continue label \(name)")
+            }
+            operations.append(.jump(target: continueLabels[depth]))
+        }
+        return true
+    }
+
+    /// A type switch: the operand is read once, and each type of a clause
+    /// is asked of it as a type assertion with `, ok` is, in the order of
+    /// the source; `nil` matches the interface value that holds nothing.
+    /// In a clause of one type the name the switch binds is the asserted
+    /// value, and in any other the operand itself.
+    mutating func lowerTypeSwitchStatement(_ statement: GoStatement) throws {
+        guard let typeSwitch = statement.typeSwitch else { return }
+        let operand = try lower(typeSwitch.operand)
+        let operandType = try type(of: typeSwitch.operand)
+        let endLabel = allocateLabel()
+        let caseLabels = typeSwitch.cases.map { _ in allocateLabel() }
+        // What a failed assertion leaves in its destination, which nothing
+        // reads, and what `nil` is compared with.
+        let nothing = constant(.nilValue)
+        var bound: [(register: Int, type: GoType)?] = Array(
+            repeating: nil, count: typeSwitch.cases.count)
+        for (index, clause) in typeSwitch.cases.enumerated() {
+            for case .typeExpression(let syntax, let position) in clause.expressions {
+                let matches = allocateRegister()
+                if syntax.isNilCase {
+                    operations.append(
+                        .binary(destination: matches, operator: .equal, left: operand, right: nothing))
+                } else {
+                    let type = resolve(syntax)
+                    guard let targetName = assertedTypeName(type) else {
+                        throw GoDiagnostic(position: position, message: "unsupported asserted type")
+                    }
+                    let value = allocateRegister()
+                    operations.append(
+                        .typeAssert(
+                            destination: value, okDestination: matches, source: operand,
+                            targetName: targetName, zero: nothing))
+                    if clause.expressions.count == 1 { bound[index] = (value, type) }
+                }
+                operations.append(.jumpIfTrue(condition: matches, target: caseLabels[index]))
+            }
+        }
+        let defaultIndex = typeSwitch.cases.firstIndex(where: \.isDefault)
+        operations.append(.jump(target: defaultIndex.map { caseLabels[$0] } ?? endLabel))
+
+        breakLabels.append(endLabel)
+        for (index, clause) in typeSwitch.cases.enumerated() {
+            operations.append(.label(caseLabels[index]))
+            scopes.append([:])
+            if let name = typeSwitch.binding?.name {
+                let source = bound[index] ?? (operand, operandType)
+                let variable = allocateRegister()
+                startVariable(variable, named: name, type: source.type)
+                operations.append(.copy(destination: variable, source: source.register))
+                scopes[scopes.count - 1][name] = LoweredBinding(
+                    register: variable, type: source.type)
+            }
+            try lower(clause.body, createsScope: false)
+            scopes.removeLast()
             operations.append(.jump(target: endLabel))
         }
         breakLabels.removeLast()
         operations.append(.label(endLabel))
+    }
+
+    /// `for i := range n` over an integer, when `collection` is one: `i`
+    /// is each integer below `n` in turn, of the type of `n`, which is read
+    /// once and is in the register `collection` was lowered to. Go makes
+    /// `i` a variable of the iteration, so what the body does to it does
+    /// not reach the count. Returns false for any other collection.
+    mutating func lowerIntegerRange(
+        _ expression: GoExpression, limit collection: Int, indexName: String?, body: GoBlock
+    ) throws -> Bool {
+        let type = try type(of: expression)
+        guard underlying(type) == .int else { return false }
+        let limit = allocateRegister()
+        operations.append(.copy(destination: limit, source: collection))
+        let counter = allocateRegister()
+        operations.append(.copy(destination: counter, source: constant(.int(0))))
+        let conditionLabel = allocateLabel()
+        let postLabel = allocateLabel()
+        let endLabel = allocateLabel()
+        operations.append(.label(conditionLabel))
+        let condition = allocateRegister()
+        operations.append(
+            .binary(destination: condition, operator: .less, left: counter, right: limit))
+        operations.append(.jumpIfFalse(condition: condition, target: endLabel))
+        if let indexName, indexName != GoValueList.blank {
+            let variable = allocateRegister()
+            if mayBeAddressed(indexName, type: type) { renewVariable(variable) }
+            operations.append(.copy(destination: variable, source: counter))
+            scopes[scopes.count - 1][indexName] = LoweredBinding(register: variable, type: type)
+        }
+        breakLabels.append(endLabel)
+        continueLabels.append(postLabel)
+        try lower(body)
+        breakLabels.removeLast()
+        continueLabels.removeLast()
+        operations.append(.label(postLabel))
+        let incremented = allocateRegister()
+        operations.append(
+            .binary(
+                destination: incremented, operator: .add, left: counter, right: constant(.int(1))))
+        operations.append(.copy(destination: counter, source: incremented))
+        operations.append(.jump(target: conditionLabel))
+        operations.append(.label(endLabel))
+        return true
     }
 
     mutating func lowerSelectStatement(_ statement: GoStatement) throws {
@@ -2661,6 +2920,7 @@ private struct IRLowerer {
     }
 
     mutating func lowerExpressionStatement(_ expression: GoExpression) throws {
+        if try lowerJump(expression) { return }
         if case .call(let callee, let arguments, let position) = expression {
             if let forwarded = try forwardedCall(callee: callee, arguments: arguments) {
                 try lowerExpressionStatement(
@@ -3913,7 +4173,9 @@ private struct IRLowerer {
     /// when a loop can reach the declaration again and a pointer can reach
     /// the variable: each iteration then has its own, as in Go.
     mutating func startVariable(_ register: Int, named name: String, type: GoType) {
-        guard !continueLabels.isEmpty, mayBeAddressed(name, type: type) else { return }
+        guard !continueLabels.isEmpty || jumpsBackward, mayBeAddressed(name, type: type) else {
+            return
+        }
         renewVariable(register)
     }
 

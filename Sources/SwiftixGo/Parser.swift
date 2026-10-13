@@ -91,6 +91,9 @@ private struct Parser {
             parser.iotaDepth = 1
             file = try parser.parseFile()
         }
+        // What is wrong with the labels and jumps of a function is no
+        // syntax error to Go, and is reported by the checker in its turn.
+        file.branchErrors = GoBranchChecker.errors(in: file, tokens: tokens)
         return (file, parser.parentheses)
     }
 
@@ -801,6 +804,7 @@ private struct Parser {
     /// The statement at the current token, or the several a `var` or
     /// `const` declaration stands for.
     mutating func parseStatements() throws -> [GoStatement] {
+        if isAtLabel { return try parseLabeledStatements() }
         if check(.variable) || check(.constant) { return try parseDeclarations() }
         if check(.typeKeyword) {
             declaresLocalTypes = true
@@ -813,6 +817,7 @@ private struct Parser {
     }
 
     mutating func parseStatement() throws -> GoStatement {
+        if let jump = try parseJump() { return jump }
         if check(.return) { return try parseReturn() }
         if check(.if) || check(.for) || check(.switchKeyword) || check(.selectKeyword) {
             return try parseHeaderStatement()
@@ -1071,13 +1076,10 @@ private struct Parser {
         let position = current.position
         advance()
         var header: (initializer: GoStatement?, expression: GoExpression?) = (nil, nil)
-        if !check(.leftBrace) {
-            header = try parseHeader(closesHeader: true)
-            if header.expression == nil, header.initializer != nil, !check(.leftBrace) {
-                throw diagnostic("expected '{' after switch expression")
-            }
-        }
+        if !check(.leftBrace) { header = try parseSwitchHeader() }
         let expression = header.expression
+        // The clauses of a type switch list types.
+        let listsTypes = expression?.isTypeSwitchGuard ?? false
         try expect(.leftBrace, message: "expected '{' after switch expression")
         skipSemicolons()
 
@@ -1090,10 +1092,10 @@ private struct Parser {
             if check(.caseKeyword) {
                 isDefault = false
                 advance()
-                expressions.append(try parseExpression())
+                expressions.append(try parseCase(listsTypes: listsTypes))
                 while check(.comma) {
                     advance()
-                    expressions.append(try parseExpression())
+                    expressions.append(try parseCase(listsTypes: listsTypes))
                 }
             } else if check(.defaultKeyword) {
                 isDefault = true
@@ -1128,6 +1130,151 @@ private struct Parser {
             expression: expression, cases: cases, position: position)
         guard let initializer = header.initializer else { return statement }
         return .initialized(statement, by: initializer, position: position)
+    }
+
+    /// The header of a `switch`, after the keyword and up to its `{`: an
+    /// optional initializer, then nothing, the expression switched on, or
+    /// the guard of a type switch, `x.(type)` or `v := x.(type)`. The guard
+    /// that binds a name is written like a short declaration, and comes back
+    /// as the guard with the name in it.
+    mutating func parseSwitchHeader() throws -> (initializer: GoStatement?, expression: GoExpression?) {
+        var initializer: GoStatement?
+        var tag: GoStatement?
+        var start = index
+        if check(.semicolon) {
+            advance()
+        } else {
+            let first = try parseSimpleStatement(allowCompositeLiteral: false)
+            if check(.semicolon) {
+                initializer = first
+                advance()
+            } else {
+                tag = first
+            }
+        }
+        if tag == nil, !check(.leftBrace) {
+            start = index
+            tag = try parseSimpleStatement(allowCompositeLiteral: false)
+        }
+        switch tag {
+        case nil:
+            return (initializer, nil)
+        case .expression(let expression)?:
+            return (initializer, expression)
+        case .declaration(let name, nil, let value?, false, let position)?:
+            if let typeGuard = value.bindingTypeSwitch(name, at: position) {
+                return (initializer, typeGuard)
+            }
+            throw GoDiagnostic(
+                position: operatorPosition(.declare, from: start), message: "cannot use := as value")
+        case .multiDeclaration?:
+            throw GoDiagnostic(
+                position: operatorPosition(.declare, from: start), message: "cannot use := as value")
+        case .assignment?, .multiAssignment?:
+            throw GoDiagnostic(
+                position: operatorPosition(.assign, from: start),
+                message: "cannot use assignment as value")
+        default:
+            throw diagnostic("expected '{' after switch expression")
+        }
+    }
+
+    /// Where the first token of `kind` is among those of the statement that
+    /// began at the token `start` and ends before the current one.
+    func operatorPosition(_ kind: GoTokenKind, from start: Int) -> GoSourcePosition {
+        tokens[start..<index].first { $0.kind == kind }?.position ?? tokens[start].position
+    }
+
+    /// One entry of a `case`: an expression, or a type in a type switch.
+    mutating func parseCase(listsTypes: Bool) throws -> GoExpression {
+        try listsTypes ? parseCaseType() : parseExpression()
+    }
+
+    /// One type of a clause of a type switch, where `nil` is one.
+    mutating func parseCaseType() throws -> GoExpression {
+        if check(.leftParen) {
+            // `case (T):`, as Go allows.
+            advance()
+            let type = try parseCaseType()
+            try expect(.rightParen, message: "expected ')'")
+            return type
+        }
+        let type = try parseTypeExpression()
+        return .typeExpression(type, position: type.position)
+    }
+
+    /// `x.(type)`, at the `type` after `.(`. Only the header of a switch
+    /// may hold one; the checker refuses it elsewhere.
+    mutating func parseTypeSwitchGuard(
+        of operand: GoExpression, at position: GoSourcePosition
+    ) throws -> GoExpression {
+        advance()
+        try expect(.rightParen, message: "expected ')' after asserted type")
+        return .typeSwitchGuard(operand, position: position)
+    }
+
+    // MARK: Labels and jumps
+
+    /// Whether a label begins here: a name before a colon, where a
+    /// statement begins.
+    var isAtLabel: Bool {
+        guard case .identifier(let name) = current.kind, lookahead(1).kind == .colon else {
+            return false
+        }
+        return !GoBitwiseOperator.isOperatorSpelling(name)
+    }
+
+    /// The label at the current token and the statement it names, which is
+    /// the next of its list. Before a `}` the statement may be left out, and
+    /// nowhere else.
+    mutating func parseLabeledStatements() throws -> [GoStatement] {
+        guard case .identifier(let name) = current.kind else { return [] }
+        let position = current.position
+        advance()
+        let colon = current.position
+        advance()
+        if check(.caseKeyword) || check(.defaultKeyword) || check(.eof) {
+            throw GoDiagnostic(position: colon, message: "missing statement after label")
+        }
+        let label = GoStatement.branch(.label(name), position: position)
+        if check(.rightBrace) || check(.semicolon) { return [label] }
+        return [label] + (try parseStatements())
+    }
+
+    /// `break L`, `continue L`, `goto L`, or `fallthrough`, when the
+    /// statement at the current token is one. The lexer has no token for
+    /// the last two keywords: each is an identifier that begins a statement.
+    mutating func parseJump() throws -> GoStatement? {
+        let position = current.position
+        let jump: (String) -> GoBranch
+        switch current.kind {
+        case .breakKeyword:
+            jump = GoBranch.breakTo
+        case .continueKeyword:
+            jump = GoBranch.continueTo
+        case .identifier(GoBranch.gotoKeyword):
+            jump = GoBranch.goto
+        case .identifier(GoBranch.fallthroughKeyword):
+            advance()
+            return .branch(.fallthrough, position: position)
+        default:
+            return nil
+        }
+        guard case .identifier(let label) = lookahead(1).kind,
+            !GoBitwiseOperator.isOperatorSpelling(label)
+        else {
+            // A `break` or `continue` without a label is a statement the
+            // tree has a case for.
+            if case .identifier = current.kind {
+                throw GoDiagnostic(
+                    position: lookahead(1).position, message: "expected label after goto")
+            }
+            return nil
+        }
+        advance()
+        let labelPosition = current.position
+        advance()
+        return .branch(jump(label), position: position, labelPosition: labelPosition)
     }
 
     mutating func parseSelect() throws -> GoStatement {
@@ -1400,6 +1547,10 @@ private struct Parser {
                 advance()
                 if check(.leftParen) {
                     advance()
+                    if check(.typeKeyword) {
+                        expression = try parseTypeSwitchGuard(of: expression, at: position)
+                        continue
+                    }
                     let assertedType = try parseTypeExpression()
                     try expect(.rightParen, message: "expected ')' after asserted type")
                     expression = .typeAssertion(

@@ -217,6 +217,7 @@ extension GoScopedRewriter {
                     position: position)
             ]
         case .switchStatement(let expression, let cases, let position):
+            if statement.isTypeSwitch { return [try rewriteTypeSwitch(statement)] }
             return [
                 .switchStatement(
                     expression: try expression.map { try rewrite($0) },
@@ -245,6 +246,37 @@ extension GoScopedRewriter {
                     position: position)
             ]
         }
+    }
+
+    /// A type switch. Its operand and the types of its clauses are read
+    /// where the switch stands; the name it binds is declared in each
+    /// clause, which is a scope of its own, and is no type to look up.
+    private mutating func rewriteTypeSwitch(_ statement: GoStatement) throws -> GoStatement {
+        guard let typeSwitch = statement.typeSwitch else { return statement }
+        var rewritten = typeSwitch
+        rewritten.operand = try rewrite(typeSwitch.operand)
+        // The name as a conformer spells its declarations.
+        var name = typeSwitch.binding?.name
+        let cases = try typeSwitch.cases.map { clause in
+            let types = try clause.expressions.map { try rewrite($0) }
+            openScope()
+            defer { closeScope() }
+            if let binding = typeSwitch.binding {
+                name = try declared(binding.name, at: binding.position)
+            }
+            return GoSwitchCase(
+                expressions: types, body: try rewrite(clause.body), isDefault: clause.isDefault,
+                position: clause.position)
+        }
+        if let binding = typeSwitch.binding, cases.isEmpty {
+            // No clause declares it; it is spelled as one would.
+            openScope()
+            defer { closeScope() }
+            name = try declared(binding.name, at: binding.position)
+        }
+        rewritten.cases = cases
+        if let name { rewritten.binding?.name = name }
+        return rewritten.statement
     }
 
     // MARK: Expressions

@@ -224,7 +224,8 @@ public enum GoSourceRewriter {
                     // Of a type declared here the source holds the name;
                     // the call around it is the parser's.
                     consider(.identifier(declaration.name, position: declaration.position))
-                } else {
+                } else if statement.branch == nil {
+                    // A label or a jump holds no expression.
                     consider(expression)
                 }
             case .deferStatement(let expression, _), .goStatement(let expression, _):
@@ -247,9 +248,13 @@ public enum GoSourceRewriter {
                 consider(collection)
                 visit(body, consider: consider)
             case .switchStatement(let expression, let cases, _):
-                if let expression { consider(expression) }
+                // Of the guard of a type switch the operand is an
+                // expression; of its clauses, the types.
+                if let expression { consider(expression.typeSwitchGuard?.operand ?? expression) }
                 for switchCase in cases {
-                    switchCase.expressions.forEach(consider)
+                    for expression in switchCase.expressions {
+                        consider(expression.typeNameOperand ?? expression)
+                    }
                     visit(switchCase.body, consider: consider)
                 }
             case .selectStatement(let cases, _):
@@ -939,6 +944,26 @@ private extension String {
 
 private extension Set where Element == Character {
     static let whitespaces: Set<Character> = [" ", "\t", "\n", "\r"]
+}
+
+extension GoExpression {
+    /// A type that is a name, as the expression Go's tree has for it: an
+    /// identifier, or a selection from a package. A rule is written in
+    /// expressions, and matches the type of a type switch clause as one.
+    fileprivate var typeNameOperand: GoExpression? {
+        guard case .typeExpression(.named(let name, let position), _) = self else { return nil }
+        guard let dot = name.firstIndex(of: ".") else {
+            return .identifier(name, position: position)
+        }
+        let qualifier = String(name[..<dot])
+        let width = qualifier.utf8.count + 1
+        return .selector(
+            base: .identifier(qualifier, position: position),
+            name: String(name[name.index(after: dot)...]),
+            position: GoSourcePosition(
+                path: position.path, offset: position.offset + width, line: position.line,
+                column: position.column + width))
+    }
 }
 
 /// Parentheses of a rewrite rule, which the tree has no node for: an

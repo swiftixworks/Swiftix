@@ -594,6 +594,7 @@ private struct FileRewriter {
                 body: try rewrite(body),
                 position: position)
         case .switchStatement(let expression, let cases, let position):
+            if statement.isTypeSwitch { return try rewriteTypeSwitch(statement) }
             return .switchStatement(
                 expression: try expression.map { try rewrite($0) },
                 cases: try cases.map { switchCase in
@@ -616,6 +617,25 @@ private struct FileRewriter {
                 },
                 position: position)
         }
+    }
+
+    /// A type switch: the name it binds is a variable of each clause, and
+    /// the type its guard is carried by is none to resolve.
+    private mutating func rewriteTypeSwitch(_ statement: GoStatement) throws -> GoStatement {
+        guard let typeSwitch = statement.typeSwitch else { return statement }
+        var rewritten = typeSwitch
+        rewritten.operand = try rewrite(typeSwitch.operand)
+        rewritten.cases = try typeSwitch.cases.map { clause in
+            let types = try clause.expressions.map { try rewrite($0) }
+            scopes.append([])
+            defer { scopes.removeLast() }
+            declare(typeSwitch.binding?.name)
+            return GoSwitchCase(
+                expressions: types, body: try rewrite(clause.body), isDefault: clause.isDefault,
+                position: clause.position)
+        }
+        if let binding = typeSwitch.binding { rewritten.binding?.name = renamed(binding.name) }
+        return rewritten.statement
     }
 
     // MARK: Expressions

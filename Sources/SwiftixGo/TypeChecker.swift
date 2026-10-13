@@ -391,6 +391,7 @@ public enum GoTypeChecker {
             try checker.requireInitializer(
                 expression, assignableTo: binding.type, isConstant: declaration.isConstant)
         }
+        try checkBranches(ofInitializersIn: files)
 
         if first.packageName == "main", functionSignatures["main"] == nil {
             throw GoDiagnostic(
@@ -421,7 +422,7 @@ public enum GoTypeChecker {
                     availablePackages: availablePackages,
                     globalBindings: globalBindings,
                     namePositions: file.namePositions)
-                try checker.check(function)
+                try checker.check(function, branchErrors: file.branchErrors)
                 literalCaptures.merge(checker.captures) { first, _ in first }
             }
         }
@@ -452,6 +453,21 @@ public enum GoTypeChecker {
                     position: entry.position, message: "cannot declare \(name) - must be func")
             }
             try reservePackageName(entry.name, at: entry.position, names: &names)
+        }
+    }
+
+    /// A function literal among the initializers of package-level variables
+    /// has labels and jumps of its own, which the parser checked.
+    private static func checkBranches(ofInitializersIn files: [GoFile]) throws {
+        for file in files where !file.branchErrors.isEmpty {
+            for declaration in file.globalDeclarations {
+                guard let expression = declaration.expression else { continue }
+                var first: GoDiagnostic?
+                GoFunctionLiterals.forEach(in: expression) { literal in
+                    first = first ?? file.branchErrors[literal.position.offset]?.first
+                }
+                if let first { throw first }
+            }
         }
     }
 
@@ -729,7 +745,6 @@ private struct Binding {
 private enum SwitchCaseConstant: Hashable {
     case int(Int64)
     case string(String)
-    case bool(Bool)
 }
 
 private struct FunctionChecker {
@@ -762,7 +777,6 @@ private struct FunctionChecker {
     /// The variables of the functions around it that each literal reads or
     /// assigns. The compiler passes the literal a pointer to each.
     var captures: [String: [String]] = [:]
-
     init(
         importedPaths: Set<String>,
         functionSignatures: [String: FunctionSignature],
@@ -1160,11 +1174,73 @@ private struct FunctionChecker {
         if let limit, first.position.path != limit.path || first.position.offset >= limit.offset {
             return nil
         }
+        // The name a type switch binds is kept as its guard has it, and
+        // reported in the words Go has for it.
+        let prefix = GoTypeSwitch.bindingPrefix
         return GoDiagnostic(
-            position: first.position, message: "declared and not used: \(first.name)")
+            position: first.position,
+            message: first.name.hasPrefix(prefix)
+                ? "\(first.name.dropFirst(prefix.count)) declared and not used"
+                : "declared and not used: \(first.name)")
     }
 
-    mutating func check(_ function: GoFunctionDeclaration) throws {
+    /// What to report for `function` when checking its body from `self`
+    /// ended in `diagnostic`.
+    ///
+    /// Go checks on after an error and reports all it finds in the order of
+    /// the source, so an unused variable declared before this error comes
+    /// first, and so does a label or a jump that is out of place. Whether a
+    /// variable is unused takes the rest of the function to say: it is
+    /// checked again, past its errors. This is done here, off the stack the
+    /// body was checked on, which a deeply nested function nearly fills.
+    func firstError(
+        of function: GoFunctionDeclaration, before diagnostic: GoDiagnostic,
+        branchErrors: [Int: [GoDiagnostic]]
+    ) -> GoDiagnostic {
+        var recovery = self
+        recovery.isRecovering = true
+        try? recovery.checkBlock(function.body, createsScope: false)
+        recovery.endScope()
+        var branchError = branchError(in: function, of: branchErrors)
+        if let found = branchError, found.position.offset >= diagnostic.position.offset {
+            branchError = nil
+        }
+        return Self.first(of: [recovery.unusedVariable(before: diagnostic.position), branchError])
+            ?? diagnostic
+    }
+
+    /// Reports the first variable of `function` that nothing reads, or the
+    /// first label or jump of it that is out of place, whichever the source
+    /// has first.
+    func reportUnused(
+        in function: GoFunctionDeclaration, branchErrors: [Int: [GoDiagnostic]]
+    ) throws {
+        let first = Self.first(of: [unusedVariable(), branchError(in: function, of: branchErrors)])
+        if let first { throw first }
+    }
+
+    /// The first error among the labels and jumps of `function` and of the
+    /// function literals in it, of those the parser found in the file.
+    func branchError(
+        in function: GoFunctionDeclaration, of branchErrors: [Int: [GoDiagnostic]]
+    ) -> GoDiagnostic? {
+        guard !branchErrors.isEmpty else { return nil }
+        var errors = branchErrors[function.position.offset] ?? []
+        GoFunctionLiterals.forEach(in: function.body) { literal in
+            errors += branchErrors[literal.position.offset] ?? []
+        }
+        return Self.first(of: errors)
+    }
+
+    /// The diagnostic that comes first in the source, which is the one Go
+    /// prints first.
+    static func first(of diagnostics: [GoDiagnostic?]) -> GoDiagnostic? {
+        diagnostics.compactMap { $0 }.min { $0.position.offset < $1.position.offset }
+    }
+
+    mutating func check(
+        _ function: GoFunctionDeclaration, branchErrors: [Int: [GoDiagnostic]] = [:]
+    ) throws {
         // Where the parser saw the function's name, the end of its body, and
         // the names of its results.
         let positions = namePositions[function.position.offset]
@@ -1234,18 +1310,10 @@ private struct FunctionChecker {
         do {
             try checkBlock(function.body, createsScope: false)
         } catch let diagnostic as GoDiagnostic {
-            // Go checks on after an error and reports all it finds in the
-            // order of the source, so an unused variable declared before
-            // this error comes first. Whether one is unused takes the rest
-            // of the function to say: check it again, past its errors.
-            var recovery = entry
-            recovery.isRecovering = true
-            try? recovery.checkBlock(function.body, createsScope: false)
-            recovery.endScope()
-            throw recovery.unusedVariable(before: diagnostic.position) ?? diagnostic
+            throw entry.firstError(of: function, before: diagnostic, branchErrors: branchErrors)
         }
         endScope()
-        if let diagnostic = unusedVariable() { throw diagnostic }
+        try reportUnused(in: function, branchErrors: branchErrors)
         if !signature.results.isEmpty, !blockTerminates(function.body) {
             // Go reports the return a function lacks where its body ends.
             throw GoDiagnostic(
@@ -1623,6 +1691,7 @@ private struct FunctionChecker {
         guard case .expression(let expression) = statement else {
             return
         }
+        if try isLabelOrJump(expression) { return }
         guard case .call = expression else {
             if case .unary(.receive, _, _) = expression {
                 _ = try type(of: expression)
@@ -1773,11 +1842,15 @@ private struct FunctionChecker {
                     message: "cannot range over send-only channel")
             }
             guard valueName == nil else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "range over channel permits only one iteration variable")
+                throw tooManyRangeVariables(over: collectionType, at: position)
             }
             elementType = element
+        case .int:
+            // `for i := range n`: the integers below `n`.
+            guard valueName == nil else {
+                throw tooManyRangeVariables(over: collectionType, at: position)
+            }
+            elementType = .int
         default:
             throw GoDiagnostic(
                 position: collection.position,
@@ -1790,7 +1863,7 @@ private struct FunctionChecker {
             } else if case .channel(_, let element) = underlying(collectionType) {
                 indexType = element
             } else {
-                indexType = .int
+                indexType = integerRangeType(collectionType)
             }
             scopes[scopes.count - 1][indexName] = Binding(type: indexType, isConstant: false)
         }
@@ -1815,51 +1888,216 @@ private struct FunctionChecker {
         guard case .switchStatement(let expression, let cases, _) = statement else {
             return
         }
+        if statement.isTypeSwitch {
+            try checkTypeSwitchStatement(statement)
+            return
+        }
         let switchType = try expression.map { try type(of: $0) } ?? .bool
         guard switchType != .void else {
             throw GoDiagnostic(
                 position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
                 message: "switch expression used as value")
         }
-        guard isComparable(switchType) else {
-            throw GoDiagnostic(
-                position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
-                message: "switch expression is not comparable")
-        }
-        var hasDefault = false
+        try requireSwitchable(
+            switchType,
+            at: expression?.position ?? cases.first?.position ?? syntheticPosition())
+        var firstDefault: GoSourcePosition?
         var constants: Set<SwitchCaseConstant> = []
         breakableDepth += 1
         defer { breakableDepth -= 1 }
         for switchCase in cases {
             if switchCase.isDefault {
-                guard !hasDefault else {
-                    throw GoDiagnostic(
-                        position: switchCase.position,
-                        message: "multiple defaults in switch")
-                }
-                hasDefault = true
+                try requireOneDefault(at: switchCase.position, after: firstDefault)
+                firstDefault = switchCase.position
             }
             for caseExpression in switchCase.expressions {
-                let caseType = try type(of: caseExpression)
-                // An untyped constant case adopts an integer switch type.
-                let matchesSwitch = try caseType == switchType
-                    || (isInteger(switchType)
-                        && isAssignable(caseExpression, ofType: caseType, to: switchType))
-                guard matchesSwitch else {
-                    throw GoDiagnostic(
-                        position: caseExpression.position,
-                        message: "invalid case \(caseType) in switch on \(switchType)")
-                }
+                try requireCase(caseExpression, of: switchType)
                 if let constant = switchCaseConstant(caseExpression),
                     !constants.insert(constant).inserted
                 {
                     throw GoDiagnostic(
-                        position: caseExpression.position,
-                        message: "duplicate case in switch")
+                        position: caseExpression.startPosition,
+                        message: "duplicate case in expression switch")
                 }
             }
             try checkBlock(switchCase.body)
         }
+    }
+
+    /// Whether a value of `type` compares with nil and with nothing else:
+    /// a slice, a map, and a function. A switch on one has `nil` for its
+    /// only case, as Go allows.
+    func comparesWithNilAlone(_ type: GoType) -> Bool {
+        !isComparable(type) && isAssignable(.nilType, to: type)
+    }
+
+    /// What a `switch` is on has a type, and one whose values compare.
+    func requireSwitchable(_ type: GoType, at position: GoSourcePosition) throws {
+        guard type != .nilType else {
+            throw GoDiagnostic(
+                position: position, message: "use of untyped nil in switch expression")
+        }
+        guard isComparable(type) || comparesWithNilAlone(type) else {
+            throw GoDiagnostic(position: position, message: "switch expression is not comparable")
+        }
+    }
+
+    /// A case of a switch on a value of `switchType` compares with it: it
+    /// has that type, is an untyped constant an integer type adopts, or is
+    /// `nil` for a type that has it.
+    mutating func requireCase(_ caseExpression: GoExpression, of switchType: GoType) throws {
+        let caseType = try type(of: caseExpression)
+        let nilAlone = comparesWithNilAlone(switchType)
+        let matches = try nilAlone
+            ? caseType == .nilType
+            : caseType == switchType
+                || (isInteger(switchType)
+                    && isAssignable(caseExpression, ofType: caseType, to: switchType))
+                || (caseType == .nilType && isAssignable(.nilType, to: switchType))
+        guard matches else {
+            // Go adds why to a case a slice, a map, or a function cannot
+            // be compared with.
+            let note = nilAlone
+                ? " (" + incomparableMessage(switchType).dropFirst("invalid operation: ".count)
+                    + ")" : ""
+            throw GoDiagnostic(
+                position: caseExpression.position,
+                message: "invalid case \(caseType) in switch on \(switchType)" + note)
+        }
+    }
+
+    /// A `switch` or a `select` has one `default`: Go reports a second one
+    /// with the place of the first.
+    func requireOneDefault(
+        at position: GoSourcePosition, after first: GoSourcePosition?
+    ) throws {
+        guard let first else { return }
+        throw GoDiagnostic(
+            position: position,
+            message: "multiple defaults (first at \(GoBranchChecker.place(first)))")
+    }
+
+    /// Whether the statement `expression` is a label or a jump the tree has
+    /// no case for. Whether it is in place was checked on the tree the
+    /// parser made; see `GoBranchChecker`. `x.(type)` as a statement is
+    /// refused here as Go refuses it anywhere outside a switch.
+    func isLabelOrJump(_ expression: GoExpression) throws -> Bool {
+        if expression.isTypeSwitchGuard {
+            throw GoDiagnostic(
+                position: expression.startPosition, message: GoTypeSwitch.misplacedGuardMessage)
+        }
+        return expression.branch != nil
+    }
+
+    /// The type of the first variable of a `range` over anything but a map
+    /// or a channel: an `int`, or, over an integer, the type of the integer.
+    func integerRangeType(_ collectionType: GoType) -> GoType {
+        isInteger(collectionType) ? collectionType : .int
+    }
+
+    /// What Go says of a `range` with a second variable where it has one
+    /// value to give: over a channel, and over an integer.
+    func tooManyRangeVariables(
+        over type: GoType, at position: GoSourcePosition
+    ) -> GoDiagnostic {
+        GoDiagnostic(
+            position: namePositions[position.offset]?.last ?? position,
+            message: "range over \(type) permits only one iteration variable")
+    }
+
+    /// `switch v := x.(type) { case T: ... }`. The operand is a value of an
+    /// interface type; each clause lists types, of which none comes twice
+    /// and each is one a value of that interface can have. A clause is a
+    /// scope: the name the switch binds has the type of the clause when it
+    /// lists one, and the type of the operand when it lists several, `nil`,
+    /// or is the `default`.
+    private mutating func checkTypeSwitchStatement(_ statement: GoStatement) throws {
+        guard let typeSwitch = statement.typeSwitch else { return }
+        let operandType = try type(of: typeSwitch.operand)
+        guard case .interface(let methods) = underlying(operandType) else {
+            throw GoDiagnostic(
+                position: typeSwitch.operand.startPosition,
+                message: "\(operandType) is not an interface")
+        }
+        var firstDefault: GoSourcePosition?
+        var seen: [GoType?] = []
+        var isBindingUsed = false
+        breakableDepth += 1
+        defer { breakableDepth -= 1 }
+        for clause in typeSwitch.cases {
+            if clause.isDefault {
+                try requireOneDefault(at: clause.position, after: firstDefault)
+                firstDefault = clause.position
+            }
+            let types = try caseTypes(of: clause, inSwitchOn: methods, seen: &seen)
+            scopes.append([:])
+            defer { scopes.removeLast() }
+            if let binding = typeSwitch.binding {
+                let single = types.count == 1 ? types[0] : nil
+                scopes[scopes.count - 1][binding.name] = Binding(
+                    type: single ?? operandType, isConstant: false)
+            }
+            try checkBlock(clause.body, createsScope: false)
+            if let binding = typeSwitch.binding,
+                scopes[scopes.count - 1][binding.name]?.isUsed == true
+            {
+                isBindingUsed = true
+            }
+            endScope()
+        }
+        if let binding = typeSwitch.binding, !isBindingUsed {
+            // The name is one variable to Go, however many clauses declare
+            // it: unused when none of them reads it.
+            unused.append((binding.position, GoTypeSwitch.bindingPrefix + binding.name))
+        }
+    }
+
+    /// The types a clause of a type switch lists, nil for `nil`. `seen`
+    /// holds those of the clauses before it: a type comes once, and is one
+    /// a value of an interface with `methods` can have.
+    func caseTypes(
+        of clause: GoSwitchCase, inSwitchOn methods: [GoInterfaceMethod], seen: inout [GoType?]
+    ) throws -> [GoType?] {
+        var types: [GoType?] = []
+        for case .typeExpression(let syntax, let position) in clause.expressions {
+            let caseType = syntax.isNilCase ? nil : canonical(try declaredType(syntax))
+            if let caseType, isImpossibleDynamicType(caseType, ofInterface: methods) {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "impossible type switch case: \(syntax.spelling)")
+            }
+            guard !seen.contains(caseType) else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "duplicate case \(syntax.spelling) in type switch")
+            }
+            seen.append(caseType)
+            types.append(caseType)
+        }
+        return types
+    }
+
+    /// `type` with the methods of an interface in one order, so that two
+    /// interface types with the same methods are equal.
+    func canonical(_ type: GoType) -> GoType {
+        guard case .interface(let methods) = type else { return type }
+        return .interface(methods.sorted { $0.name < $1.name })
+    }
+
+    /// Whether no value of an interface with `methods` can hold a value of
+    /// `type`: a type that is no interface and lacks one of the methods.
+    /// Of a type of the run-time library the methods are not known here.
+    func isImpossibleDynamicType(_ type: GoType, ofInterface methods: [GoInterfaceMethod]) -> Bool {
+        if methods.isEmpty { return false }
+        if case .interface = underlying(type) { return false }
+        var base = type
+        if case .pointer(let pointee) = type { base = pointee }
+        if case .named(let name) = base, typeDefinitions[name] == nil,
+            GoPredeclared.underlying(of: name) == nil
+        {
+            return false
+        }
+        return !satisfies(type, interface: methods)
     }
 
     private mutating func checkSelectStatement(_ statement: GoStatement) throws {
@@ -1870,7 +2108,7 @@ private struct FunctionChecker {
             // `select {}` is valid and blocks forever.
             return
         }
-        var hasDefault = false
+        var firstDefault: GoSourcePosition?
         breakableDepth += 1
         defer { breakableDepth -= 1 }
         for selectCase in cases {
@@ -1884,12 +2122,8 @@ private struct FunctionChecker {
                 }
                 try check(communication)
             } else {
-                guard !hasDefault else {
-                    throw GoDiagnostic(
-                        position: selectCase.position,
-                        message: "multiple defaults in select")
-                }
-                hasDefault = true
+                try requireOneDefault(at: selectCase.position, after: firstDefault)
+                firstDefault = selectCase.position
             }
             try checkBlock(selectCase.body, createsScope: false)
             endScope()
@@ -3493,6 +3727,10 @@ private struct FunctionChecker {
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             default:
                 guard availableTypes.contains(name) else {
+                    if name.hasPrefix(GoTypeSwitch.guardName) {
+                        throw GoDiagnostic(
+                            position: position, message: GoTypeSwitch.misplacedGuardMessage)
+                    }
                     throw GoDiagnostic(
                         position: position,
                         message: GoPredeclared.unsupportedNumericTypes.contains(name)
@@ -4427,14 +4665,12 @@ private struct FunctionChecker {
         throw GoDiagnostic(position: position, message: "unsupported function call in multi-value context")
     }
 
+    /// The value of a case that is an integer or string constant, which
+    /// Go allows a switch once. It does not compare the cases of a switch
+    /// on a `bool`.
     func switchCaseConstant(_ expression: GoExpression) -> SwitchCaseConstant? {
-        switch expression {
-        case .integer(let value, _): return .int(value)
-        case .string(let value, _): return .string(value)
-        case .identifier("true", _): return .bool(true)
-        case .identifier("false", _): return .bool(false)
-        default: return nil
-        }
+        if case .string(let value, _) = expression { return .string(value) }
+        return untypedConstantValue(expression).map { .int($0) }
     }
 
     func isSelectCommunication(_ statement: GoStatement) -> Bool {
@@ -4456,56 +4692,10 @@ private struct FunctionChecker {
         }
     }
 
+    /// Whether `block` ends its function, so that no `return` is missing
+    /// after it. See `GoTermination`.
     func blockTerminates(_ block: GoBlock) -> Bool {
-        guard let last = block.statements.last else { return false }
-        return statementTerminates(last)
-    }
-
-    func statementTerminates(_ statement: GoStatement) -> Bool {
-        if let scoped = statement.initialized { return statementTerminates(scoped.statement) }
-        if let block = statement.block { return blockTerminates(block) }
-        switch statement {
-        case .returnValues:
-            return true
-        case .expression(.call(callee: .identifier("panic", _), arguments: _, position: _)):
-            // A call to the builtin ends a function as a return does.
-            return functionSignatures["panic"] == nil
-        case .ifStatement(_, let thenBlock, let elseBlock, _):
-            guard let elseBlock else { return false }
-            return blockTerminates(thenBlock) && blockTerminates(elseBlock)
-        case .forStatement(_, let condition, _, let body, _):
-            return condition == nil && !containsBreakTargetingCurrentConstruct(body)
-        case .switchStatement(_, let cases, _):
-            guard cases.contains(where: \.isDefault), !cases.isEmpty else { return false }
-            return cases.allSatisfy {
-                blockTerminates($0.body) && !containsBreakTargetingCurrentConstruct($0.body)
-            }
-        default:
-            return false
-        }
-    }
-
-    func containsBreakTargetingCurrentConstruct(_ block: GoBlock) -> Bool {
-        for statement in block.statements {
-            // A `break` in a block of its own looks past the block.
-            if let inner = statement.block {
-                if containsBreakTargetingCurrentConstruct(inner) { return true }
-                continue
-            }
-            // An `if` with an initializer is still that `if`.
-            switch statement.initialized?.statement ?? statement {
-            case .breakStatement:
-                return true
-            case .ifStatement(_, let thenBlock, let elseBlock, _):
-                if containsBreakTargetingCurrentConstruct(thenBlock) { return true }
-                if let elseBlock, containsBreakTargetingCurrentConstruct(elseBlock) { return true }
-            case .forStatement, .forRangeStatement, .switchStatement:
-                continue
-            default:
-                continue
-            }
-        }
-        return false
+        GoTermination(panicIsBuiltin: functionSignatures["panic"] == nil).terminates(block)
     }
 }
 

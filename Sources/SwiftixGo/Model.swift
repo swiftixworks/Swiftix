@@ -170,6 +170,12 @@ public struct GoFile: Sendable, Equatable {
         }
     }
 
+    /// What is wrong with the labels and jumps of each function and
+    /// function literal, by the offset of its `func`. The parser finds them
+    /// on the tree it made; Go reports them among the errors of the type
+    /// checker, in the order of the source. See `GoBranchChecker`.
+    var branchErrors: [Int: [GoDiagnostic]] = [:]
+
     /// Where Go reports `function`: at its name.
     func namePosition(of function: GoFunctionDeclaration) -> GoSourcePosition {
         namePositions[function.position.offset]?.first ?? function.position
@@ -211,6 +217,7 @@ public struct GoFile: Sendable, Equatable {
         file.hasResolvedImports = hasResolvedImports
         file.importRenames = importRenames
         file.hasOpenLiterals = hasOpenLiterals
+        file.branchErrors = branchErrors
         return file
     }
 
