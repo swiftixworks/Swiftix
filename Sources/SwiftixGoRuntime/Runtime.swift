@@ -2329,6 +2329,13 @@ public struct GoVirtualMachine: Sendable {
                 default: break
                 }
                 if let owner {
+                    // A library type's `String` is native: its text needs
+                    // no frame, and no second pass of this call.
+                    if let text = try GoLibraryMethods.text(
+                        of: value, owner: owner, read: { try read(pointer: $0, heap: heap) })
+                    {
+                        return value == .nilValue ? text : GoFormat.string(text, directive) ?? text
+                    }
                     for name in GoFormat.textMethods {
                         guard let function = method(name, of: owner) else { continue }
                         // Go calls the method of a nil pointer as well, and

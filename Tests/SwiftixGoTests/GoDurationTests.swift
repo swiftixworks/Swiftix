@@ -666,6 +666,68 @@ struct GoDurationTests: GoTestHarness {
                 gave up after 1.5s (1500000000 ns)
 
                 """)
+        #expect(
+            try runGoMain(
+                #"""
+                var none *time.Duration
+                d := 90 * time.Second
+                fmt.Println(none, &d == nil)
+                fmt.Printf("%v|%s|%d|%q|%x|%5v|%-5v|\n", none, none, none, none, none, none, none)
+                b := box{P: none, D: d, A: d, h: d, S: []time.Duration{d, 0}, M: map[string]*time.Duration{"n": nil}}
+                fmt.Println(b.D, b.A, b.S, b.M, b.P)
+                fmt.Printf("%v\n%+v\n", b, b)
+                fmt.Printf("%8v|%-8v|%08v|%.2v|%8.3s|%q|% x|%#x|%X\n", d, d, d, d, d, d, d, d, d)
+                fmt.Printf("%v %v\n", []any{d, none, &d == nil}, [2]any{d, 1})
+                fmt.Printf("%s %v %d\n", []time.Duration{d}, map[time.Duration]time.Duration{d: d}, map[time.Duration]time.Duration{d: d})
+                """#,
+                imports: ["fmt", "time"],
+                declarations: """
+                    type box struct {
+                        P *time.Duration
+                        D time.Duration
+                        A any
+                        h time.Duration
+                        S []time.Duration
+                        M map[string]*time.Duration
+                    }
+                    """)
+                == """
+                <nil> false
+                <nil>|<nil>|0|<nil>|<nil>|<nil>|<nil>|
+                1m30s 1m30s [1m30s 0s] map[n:<nil>] <nil>
+                {<nil> 1m30s 1m30s 90000000000 [1m30s 0s] map[n:<nil>]}
+                {P:<nil> D:1m30s A:1m30s h:90000000000 S:[1m30s 0s] M:map[n:<nil>]}
+                   1m30s|1m30s   |0001m30s|1m|     1m3|"1m30s"|31 6d 33 30 73|0x316d333073|316D333073
+                [1m30s <nil> false] [1m30s 1]
+                [1m30s] map[1m30s:1m30s] map[90000000000:90000000000]
+
+                """)
+    }
+
+    /// The text of a duration is computed where `fmt` formats it: printing a
+    /// thousand of them is one instruction, not a method frame for each. The
+    /// program and what it prints are Go's.
+    @Test func fmtPrintsADurationWithoutCallingAFunction() throws {
+        let output = try runGoMain(
+            """
+            samples := []time.Duration{1500 * time.Microsecond}
+            for len(samples) < 1024 {
+                samples = append(samples, samples...)
+            }
+            text := fmt.Sprint(samples)
+            fmt.Println(len(samples), len(text), text[:16])
+            """,
+            imports: ["fmt", "time"],
+            machine: GoVirtualMachine(maximumInstructions: 1_000))
+
+        #expect(output == "1024 6145 [1.5ms 1.5ms 1.5\n")
+        #expect(
+            try GoLibraryMethods.text(of: .int(1_500_000_000), owner: "time.Duration") { _ in .nilValue }
+                == "1.5s")
+        #expect(
+            try GoLibraryMethods.text(of: .nilValue, owner: "*time.Duration") { _ in .nilValue }
+                == "<nil>")
+        #expect(try GoLibraryMethods.text(of: .int(5), owner: "interval") { _ in .nilValue } == nil)
     }
 
     /// `Nanoseconds`, `Microseconds`, and `Milliseconds` (an `int` here, an

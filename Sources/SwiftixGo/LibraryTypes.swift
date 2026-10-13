@@ -12,7 +12,8 @@
 /// interface value carries says what it is defined as (`GoTypeEncoder`); the
 /// VM then formats, compares, and asserts it like any defined type, and
 /// finds its methods under the names a program's methods have, where the
-/// runtime provides them (`GoLibraryMethods` in `SwiftixGoRuntime`).
+/// runtime provides them (`GoLibraryMethods` in `SwiftixGoRuntime`). `fmt`
+/// prints it by the text of its `String` without calling a function.
 ///
 /// In Go the type is defined over `int64`. Here it is over `int`, which is
 /// 64 bits wide as well.

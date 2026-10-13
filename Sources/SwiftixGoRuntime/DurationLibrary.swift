@@ -4,11 +4,11 @@
 /// Go's `time` package so that every value prints, rounds, and parses as it
 /// does there. `GoLibraryMethods` makes the methods of the type functions of
 /// every program: the compiler calls a method it can see by its reserved
-/// native name, and what finds a method by the name of the dynamic type
-/// (`fmt` looking for `String`, a call through an interface, a method value,
-/// a panic that is reported) finds one of these, as it finds a method the
-/// program declared. Pure functions of their arguments; no process or
-/// executor state.
+/// native name, and what finds a method by the name of the dynamic type (a
+/// call through an interface, a method value, a panic that is reported)
+/// finds one of these, as it finds a method the program declared. `fmt`
+/// alone does not call one: it asks for the text. Pure functions of their
+/// arguments; no process or executor state.
 
 enum GoDuration {
     static let nanosecond: Int64 = 1
@@ -258,6 +258,8 @@ extension GoNative {
 /// descriptor an interface value carries. Its methods are looked up the same
 /// way, as functions named `<type>.<method>`, and these are the functions:
 /// each loads its operands and makes the reserved native call of the method.
+/// A missing method, an assertion to an interface, and a panic's report
+/// therefore need nothing of their own for a library type.
 /// They are no part of an image, so an image that boxes no such value is
 /// what it was, and one that does needs a runtime that has them.
 enum GoLibraryMethods {
@@ -280,6 +282,28 @@ enum GoLibraryMethods {
         }
         return functions
     }()
+
+    /// What `fmt` prints for a value of the dynamic type `owner` (`T` or
+    /// `*T`) under a verb for text, when `owner` is a library type: the
+    /// result of its `String` method, computed here. `fmt` would get the
+    /// same from the function above, at the price of a frame and of
+    /// formatting its operands again for every value printed. A nil
+    /// pointer prints as `<nil>`, as for a method a program declared on the
+    /// value. Nil for a type of the program, and for a value that is not
+    /// what the type holds.
+    static func text(
+        of value: GoValue, owner: String, read: (GoPointer) throws -> GoValue
+    ) throws -> String? {
+        guard owner == durationTypeName || owner == "*" + durationTypeName else { return nil }
+        var held = value
+        if owner.hasPrefix("*") {
+            if value == .nilValue { return GoFormat.nilText }
+            guard case .pointer(let pointer) = value else { return nil }
+            held = try read(pointer)
+        }
+        guard case .int(let nanoseconds) = held else { return nil }
+        return GoDuration.string(nanoseconds)
+    }
 
     /// Mark of a line among the implementers of an interface target that
     /// names a library type which does not implement it. The VM keeps no
