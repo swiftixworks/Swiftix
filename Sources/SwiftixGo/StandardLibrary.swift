@@ -340,6 +340,7 @@ extension GoStandardLibrary {
             + GoPredeclared.conversionCallNames
             + [
                 GoPredeclared.copyElements, GoPredeclared.appendElements,
+                GoPredeclared.newVariable,
                 "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
                 "$errors.Unwrap", "$errors.Is", GoPredeclared.errorsAs,
                 "$fmt.Fprint", "$fmt.Fprintln", "$fmt.Fprint.n", "$fmt.Fprintln.n",
@@ -399,6 +400,11 @@ enum GoPredeclared {
 
     /// Native call the builtin `copy` lowers to.
     static let copyElements = "$copy"
+
+    /// Native call that puts its operand in a variable of its own and
+    /// returns a pointer to it: `&T{...}`, where every evaluation makes a
+    /// new variable.
+    static let newVariable = "$new"
 
     /// Native call `append(slice, source...)` lowers to, with the element
     /// zero value as its third operand.

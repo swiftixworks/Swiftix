@@ -659,27 +659,7 @@ private struct FunctionChecker {
             guard scopes[scopes.count - 1][name] == nil else {
                 throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
             }
-            if let expression, case .call(let callee, let arguments, let callPosition) = expression {
-                if case .identifier(let name, _) = callee,
-                    name != "len" && name != "cap" && name != "append" && name != "make" && name != "panic" && name != "recover" && name != "delete",
-                    let signature = functionSignatures[name],
-                    signature.results.count > 1
-                {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "multiple-value \(name)() (value of type (\(signature.results.map(\.description).joined(separator: ", ")))) in single-value context")
-                } else if case .selector(let base, let name, _) = callee,
-                    !(base == .identifier("fmt", position: base.position) && importedPaths.contains("fmt"))
-                {
-                    let results = (try? callResultTypes(
-                        callee: callee, arguments: arguments, position: callPosition)) ?? []
-                    if results.count > 1 {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "multiple-value \(name)() in single-value context")
-                    }
-                }
-            }
+            if let expression { try requireSingleValue(expression, at: position) }
             let declared = try explicitType.map { try declaredType($0) }
             let expressionType = try expression.map { try type(of: $0) }
             if let declared, let expression, let expressionType,
@@ -704,6 +684,11 @@ private struct FunctionChecker {
                     ? expression.flatMap { untypedConstantValue($0) } : nil)
 
         case .assignment(let target, let expression, _):
+            if target.isBlank {
+                // `_ = x` evaluates `x` and keeps nothing.
+                try requireValue(expression)
+                return
+            }
             let targetType = try assignableType(of: target)
             let expressionType = try type(of: expression)
             guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
@@ -713,6 +698,35 @@ private struct FunctionChecker {
             }
 
         case .multiDeclaration(let names, let expression, let position):
+            if let variables = expression.variables {
+                if variables.isConstant {
+                    // Constants are values of the compiler: one declaration each.
+                    guard variables.values.count == names.count else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: Self.mismatch(
+                                variables: names.count, values: variables.values.count))
+                    }
+                    for (name, value) in zip(names, variables.values) {
+                        try check(
+                            .declaration(
+                                name: name, explicitType: variables.type, expression: value,
+                                isConstant: true, position: position))
+                    }
+                    return
+                }
+                try checkVariables(
+                    names, type: variables.type, values: variables.values, position: position)
+                return
+            }
+            if let values = expression.valueList {
+                try checkParallelDeclaration(names, values: values, position: position)
+                return
+            }
+            if names.allSatisfy({ $0 == GoValueList.blank || scopes[scopes.count - 1][$0] != nil }) {
+                throw GoDiagnostic(
+                    position: position, message: "no new variables on left side of :=")
+            }
             if let statements = GoStatement.redeclaration(
                 names: names, expression: expression, position: position,
                 declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
@@ -769,7 +783,7 @@ private struct FunctionChecker {
             guard case .call(let callee, let arguments, let callPosition) = expression else {
                 throw GoDiagnostic(
                     position: position,
-                    message: "multiple-value context requires function call")
+                    message: Self.mismatch(variables: names.count, values: 1))
             }
             let resultTypes = try callResultTypes(
                 callee: callee, arguments: arguments, position: callPosition)
@@ -791,6 +805,28 @@ private struct FunctionChecker {
             }
 
         case .multiAssignment(let targets, let expression, let position):
+            if let values = expression.valueList {
+                guard targets.count == values.count else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: Self.mismatch(variables: targets.count, values: values.count))
+                }
+                for (target, value) in zip(targets, values) {
+                    if target.isBlank {
+                        try requireValue(value)
+                        continue
+                    }
+                    let targetType = try assignableType(of: target)
+                    try requireSingleValue(value, at: value.position)
+                    let valueType = try type(of: value)
+                    guard try isAssignable(value, ofType: valueType, to: targetType) else {
+                        throw GoDiagnostic(
+                            position: value.position,
+                            message: "cannot use \(valueType) as \(targetType) value in assignment")
+                    }
+                }
+                return
+            }
             if case .unary(.receive, let channel, _) = expression,
                 case .channel(let direction, let elementType) = underlying(try type(of: channel))
             {
@@ -803,6 +839,7 @@ private struct FunctionChecker {
                         message: "assignment mismatch: channel receive returns 2 values")
                 }
                 for (target, resultType) in zip(targets, [elementType, GoType.bool]) {
+                    if target.isBlank { continue }
                     let targetType = try assignableType(of: target)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
@@ -822,6 +859,7 @@ private struct FunctionChecker {
                 }
                 try require(key, assignableTo: keyType)
                 for (target, resultType) in zip(targets, [valueType, .bool]) {
+                    if target.isBlank { continue }
                     let targetType = try assignableType(of: target)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
@@ -840,6 +878,7 @@ private struct FunctionChecker {
                 _ = try type(of: expression)
                 let resultTypes = [try declaredType(assertedType), GoType.bool]
                 for (target, resultType) in zip(targets, resultTypes) {
+                    if target.isBlank { continue }
                     let targetType = try assignableType(of: target)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
@@ -852,7 +891,7 @@ private struct FunctionChecker {
             guard case .call(let callee, let arguments, let callPosition) = expression else {
                 throw GoDiagnostic(
                     position: position,
-                    message: "multiple-value context requires function call")
+                    message: Self.mismatch(variables: targets.count, values: 1))
             }
             let resultTypes = try callResultTypes(
                 callee: callee, arguments: arguments, position: callPosition)
@@ -862,6 +901,7 @@ private struct FunctionChecker {
                     message: "assignment mismatch: \(targets.count) variables but function returns \(resultTypes.count) values")
             }
             for (target, resultType) in zip(targets, resultTypes) {
+                if target.isBlank { continue }
                 let targetType = try assignableType(of: target)
                 guard isAssignable(resultType, to: targetType) else {
                     throw GoDiagnostic(
@@ -1214,7 +1254,7 @@ private struct FunctionChecker {
                         else {
                             throw GoDiagnostic(
                                 position: element.position,
-                                message: "unknown field \(element.key ?? "") in struct literal")
+                                message: "unknown field \(element.key ?? "") in struct literal of type \(literalType)")
                         }
                         guard seen.insert(key).inserted else {
                             throw GoDiagnostic(
@@ -1223,9 +1263,15 @@ private struct FunctionChecker {
                         }
                         try require(element.value, assignableTo: field.type)
                     }
-                } else {
+                } else if !elements.isEmpty {
+                    // `T{}` is the zero value; a literal without field names
+                    // gives every field.
                     guard elements.count == fields.count else {
-                        throw GoDiagnostic(position: position, message: "too few values in struct literal")
+                        throw GoDiagnostic(
+                            position: position,
+                            message:
+                                "too \(elements.count < fields.count ? "few" : "many") values in struct literal of type \(literalType)"
+                        )
                     }
                     for (element, field) in zip(elements, fields) {
                         try require(element.value, assignableTo: field.type)
@@ -1996,6 +2042,14 @@ private struct FunctionChecker {
                 }
                 return operandType
             case .address:
+                // A composite literal is the one operand that is not a
+                // variable: `&T{...}` makes one.
+                if case .compositeLiteral = operand { return .pointer(try type(of: operand)) }
+                guard isAddressable(operand) else {
+                    throw GoDiagnostic(
+                        position: operand.position,
+                        message: "invalid operation: cannot take address of a value that is not a variable")
+                }
                 return .pointer(try assignableType(of: operand))
             case .dereference:
                 let operandType = try type(of: operand)
@@ -2134,6 +2188,179 @@ private struct FunctionChecker {
             }
         default:
             throw GoDiagnostic(position: expression.position, message: "cannot assign to expression")
+        }
+    }
+
+    /// Rejects a call with several results where one value is wanted.
+    mutating func requireSingleValue(
+        _ expression: GoExpression,
+        at position: GoSourcePosition
+    ) throws {
+        guard case .call(let callee, let arguments, let callPosition) = expression else { return }
+        if case .identifier(let name, _) = callee,
+            name != "len" && name != "cap" && name != "append" && name != "make" && name != "panic" && name != "recover" && name != "delete",
+            let signature = functionSignatures[name],
+            signature.results.count > 1
+        {
+            throw GoDiagnostic(
+                position: position,
+                message: "multiple-value \(name)() (value of type (\(signature.results.map(\.description).joined(separator: ", ")))) in single-value context")
+        } else if case .selector(let base, let name, _) = callee,
+            !(base == .identifier("fmt", position: base.position) && importedPaths.contains("fmt"))
+        {
+            let results = (try? callResultTypes(
+                callee: callee, arguments: arguments, position: callPosition)) ?? []
+            if results.count > 1 {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "multiple-value \(name)() in single-value context")
+            }
+        }
+    }
+
+    /// Requires `expression` to have a value: not a call without a result
+    /// or with several, and not an untyped `nil`, which has no type to give
+    /// a variable.
+    mutating func requireValue(_ expression: GoExpression) throws {
+        try requireSingleValue(expression, at: expression.position)
+        let valueType = try type(of: expression)
+        guard valueType != .void else {
+            throw GoDiagnostic(position: expression.position, message: "no value used as value")
+        }
+        guard valueType != .nilType else {
+            throw GoDiagnostic(
+                position: expression.position, message: "use of untyped nil in assignment")
+        }
+    }
+
+    static func mismatch(variables: Int, values: Int) -> String {
+        "assignment mismatch: \(variables) variable\(variables == 1 ? "" : "s") but \(values) value\(values == 1 ? "" : "s")"
+    }
+
+    /// `var a, b T`, `var a, b = x, y`, `var a, b T = x, y`, and
+    /// `var n, err = f()`. Every name is new: a `var` reuses none.
+    mutating func checkVariables(
+        _ names: [String],
+        type: GoTypeExpression?,
+        values: [GoExpression],
+        position: GoSourcePosition
+    ) throws {
+        let declared = try type.map { try declaredType($0) }
+        var seen: Set<String> = []
+        for name in names where name != GoValueList.blank {
+            guard scopes[scopes.count - 1][name] == nil, seen.insert(name).inserted else {
+                throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
+            }
+        }
+        if values.isEmpty {
+            guard let declared else {
+                throw GoDiagnostic(
+                    position: position, message: "missing variable type or initialization")
+            }
+            for name in names where name != GoValueList.blank {
+                scopes[scopes.count - 1][name] = Binding(type: declared, isConstant: false)
+            }
+            return
+        }
+        if values.count == 1, names.count > 1 {
+            // One call, map index, type assertion, or receive for them all.
+            switch values[0] {
+            case .call, .index, .typeAssertion, .unary(.receive, _, _): break
+            default:
+                throw GoDiagnostic(
+                    position: position,
+                    message: Self.mismatch(variables: names.count, values: 1))
+            }
+            try check(.multiDeclaration(names: names, expression: values[0], position: position))
+            if let declared {
+                for name in names where name != GoValueList.blank {
+                    guard let found = scopes[scopes.count - 1][name]?.type, found == declared else {
+                        throw GoDiagnostic(
+                            position: values[0].position,
+                            message: "cannot use a value of another type as \(declared) value in assignment")
+                    }
+                }
+            }
+            return
+        }
+        guard values.count == names.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: Self.mismatch(variables: names.count, values: values.count))
+        }
+        var types: [GoType] = []
+        for value in values {
+            try requireValueOrNil(value, declared: declared)
+            let valueType = try self.type(of: value)
+            if let declared {
+                guard try isAssignable(value, ofType: valueType, to: declared) else {
+                    throw GoDiagnostic(
+                        position: value.position,
+                        message: "cannot use \(valueType) as \(declared) value in variable declaration")
+                }
+                types.append(declared)
+            } else {
+                types.append(valueType)
+            }
+        }
+        for (name, valueType) in zip(names, types) where name != GoValueList.blank {
+            scopes[scopes.count - 1][name] = Binding(type: valueType, isConstant: false)
+        }
+    }
+
+    /// A value of a declaration: any value when the type is written, since
+    /// `nil` then has one, and a typed value otherwise.
+    mutating func requireValueOrNil(_ expression: GoExpression, declared: GoType?) throws {
+        if declared != nil, try type(of: expression) == .nilType { return }
+        try requireValue(expression)
+    }
+
+    /// `a, b := x, y`. A name the block already declares is assigned, as
+    /// long as one name is new; every value is read before any is stored.
+    mutating func checkParallelDeclaration(
+        _ names: [String],
+        values: [GoExpression],
+        position: GoSourcePosition
+    ) throws {
+        guard names.count == values.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: Self.mismatch(variables: names.count, values: values.count))
+        }
+        var seen: Set<String> = []
+        var added: [(name: String, type: GoType)] = []
+        for (name, value) in zip(names, values) {
+            if name == GoValueList.blank {
+                try requireValue(value)
+                continue
+            }
+            guard seen.insert(name).inserted else {
+                throw GoDiagnostic(
+                    position: position, message: "\(name) repeated on left side of :=")
+            }
+            try requireSingleValue(value, at: value.position)
+            let valueType = try type(of: value)
+            if let existing = scopes[scopes.count - 1][name] {
+                guard !existing.isConstant else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "cannot assign to \(name) (neither addressable nor a map index expression)")
+                }
+                guard try isAssignable(value, ofType: valueType, to: existing.type) else {
+                    throw GoDiagnostic(
+                        position: value.position,
+                        message: "cannot use \(valueType) as \(existing.type) value in assignment")
+                }
+            } else {
+                try requireValue(value)
+                added.append((name, valueType))
+            }
+        }
+        guard !added.isEmpty else {
+            throw GoDiagnostic(position: position, message: "no new variables on left side of :=")
+        }
+        for binding in added {
+            scopes[scopes.count - 1][binding.name] = Binding(type: binding.type, isConstant: false)
         }
     }
 

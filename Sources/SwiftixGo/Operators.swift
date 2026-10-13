@@ -279,3 +279,70 @@ extension GoStatement {
         return (initializer, body.statements[0])
     }
 }
+
+/// Several values where a frozen statement holds one expression.
+///
+/// `a, b := x, y` and `a, b = y, x` carry their right side as a call to
+/// `calleeName` with the values as arguments. `var a, b T = x, y` is a
+/// declaration of several names whose expression is a call to
+/// `variablesName`: the type first, when one is written, then the values,
+/// of which there may be none. No Go identifier starts with `$`, so neither
+/// meets a function of the program.
+enum GoValueList {
+    static let calleeName = "$list"
+    static let variablesName = "$var"
+    /// `const a, b = x, y`, written like `variablesName`.
+    static let constantsName = "$const"
+    /// The name of nothing: `_ = x` evaluates `x` and keeps no value.
+    static let blank = "_"
+}
+
+extension GoExpression {
+    static func valueList(_ values: [GoExpression], position: GoSourcePosition) -> GoExpression {
+        .call(
+            callee: .identifier(GoValueList.calleeName, position: position),
+            arguments: values, position: position)
+    }
+
+    /// The values of a parallel `:=` or `=`, when this is their list.
+    var valueList: [GoExpression]? {
+        guard case .call(.identifier(GoValueList.calleeName, _), let values, _) = self else {
+            return nil
+        }
+        return values
+    }
+
+    static func variables(
+        type: GoTypeExpression?,
+        values: [GoExpression],
+        isConstant: Bool = false,
+        position: GoSourcePosition
+    ) -> GoExpression {
+        .call(
+            callee: .identifier(
+                isConstant ? GoValueList.constantsName : GoValueList.variablesName,
+                position: position),
+            arguments: (type.map { [.typeExpression($0, position: $0.position)] } ?? []) + values,
+            position: position)
+    }
+
+    /// The type and the values of a `var` or `const` with several names,
+    /// when this is one. A value is never a type, so a leading type is the
+    /// declared one.
+    var variables: (type: GoTypeExpression?, values: [GoExpression], isConstant: Bool)? {
+        guard case .call(.identifier(let name, _), let arguments, _) = self,
+            name == GoValueList.variablesName || name == GoValueList.constantsName
+        else { return nil }
+        let isConstant = name == GoValueList.constantsName
+        if case .typeExpression(let type, _)? = arguments.first {
+            return (type, Array(arguments.dropFirst()), isConstant)
+        }
+        return (nil, arguments, isConstant)
+    }
+
+    /// Whether this is the blank identifier.
+    var isBlank: Bool {
+        if case .identifier(GoValueList.blank, _) = self { return true }
+        return false
+    }
+}

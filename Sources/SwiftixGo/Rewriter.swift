@@ -94,10 +94,10 @@ public enum GoSourceRewriter {
                     consider(expression)
                 }
             case .multiDeclaration(_, let expression, _):
-                consider(expression)
+                values(of: expression).forEach(consider)
             case .multiAssignment(let targets, let expression, _):
                 targets.forEach(consider)
-                consider(expression)
+                values(of: expression).forEach(consider)
             case .increment(let target, _, _):
                 consider(target)
             case .expression(let expression):
@@ -157,6 +157,13 @@ public enum GoSourceRewriter {
             return operation.operands[1]
         }
         return nil
+    }
+
+    /// The expressions the source holds on the right of a declaration or an
+    /// assignment of several names: a list of values is a node of the parser,
+    /// not text a rule could match.
+    private static func values(of expression: GoExpression) -> [GoExpression] {
+        expression.valueList ?? expression.variables?.values ?? [expression]
     }
 
     private static func visit(_ statement: GoStatement, consider: (GoExpression) -> Void) {

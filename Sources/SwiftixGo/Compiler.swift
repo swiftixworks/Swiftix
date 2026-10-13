@@ -1213,6 +1213,7 @@ private struct PackageDependencyAnalyzer {
             switch underlying(baseType) {
             case .array(_, let element), .slice(let element): return element
             case .string: return GoPredeclared.byte
+            case .map(_, let value): return value
             default: return nil
             }
         case .slicing(let base, _, _, _):
@@ -1405,10 +1406,52 @@ private struct IRLowerer {
                 type: variableType)
 
         case .assignment(let target, let expression, _):
+            if target.isBlank {
+                _ = try lower(expression)
+                return
+            }
             let value = try lowerConverted(expression, to: try? type(of: target))
             try store(value, to: target)
 
         case .multiDeclaration(let names, let expression, let position):
+            if let variables = expression.variables {
+                if variables.isConstant {
+                    for (name, value) in zip(names, variables.values) {
+                        try lower(
+                            .declaration(
+                                name: name, explicitType: variables.type, expression: value,
+                                isConstant: true, position: position))
+                    }
+                    return
+                }
+                try lowerVariables(
+                    names, type: variables.type, values: variables.values, position: position)
+                return
+            }
+            if let values = expression.valueList {
+                // Every value is read before a name is bound or assigned, so
+                // `a, b := b, a` sees the old values.
+                var temporaries: [(register: Int, type: GoType)] = []
+                for (name, value) in zip(names, values) {
+                    let existing = name == GoValueList.blank ? nil : scopes[scopes.count - 1][name]
+                    let temporary = allocateRegister()
+                    operations.append(
+                        .copy(
+                            destination: temporary,
+                            source: try lowerConverted(value, to: existing?.type)))
+                    temporaries.append((temporary, try existing?.type ?? type(of: value)))
+                }
+                for (name, temporary) in zip(names, temporaries) where name != GoValueList.blank {
+                    if let existing = scopes[scopes.count - 1][name] {
+                        operations.append(
+                            .copy(destination: existing.register, source: temporary.register))
+                    } else {
+                        scopes[scopes.count - 1][name] = LoweredBinding(
+                            register: temporary.register, type: temporary.type)
+                    }
+                }
+                return
+            }
             if let statements = GoStatement.redeclaration(
                 names: names, expression: expression, position: position,
                 declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
@@ -1505,6 +1548,25 @@ private struct IRLowerer {
             }
 
         case .multiAssignment(let targets, let expression, let position):
+            if let values = expression.valueList {
+                // Go reads the index and pointer operands on the left and
+                // every value on the right first, then assigns in order.
+                let pinnedTargets = try targets.map { try pinned($0) }
+                var temporaries: [Int] = []
+                for (target, value) in zip(targets, values) {
+                    let temporary = allocateRegister()
+                    operations.append(
+                        .copy(
+                            destination: temporary,
+                            source: try lowerConverted(
+                                value, to: target.isBlank ? nil : try? type(of: target))))
+                    temporaries.append(temporary)
+                }
+                for (target, temporary) in zip(pinnedTargets, temporaries) {
+                    try store(temporary, to: target)
+                }
+                return
+            }
             if case .unary(.receive, let channel, _) = expression,
                 case .channel(_, let elementType) = underlying(try type(of: channel))
             {
@@ -2961,6 +3023,15 @@ private struct IRLowerer {
                 operations.append(.unary(destination: destination, operator: .not, operand: source))
                 return destination
             case .address:
+                if case .compositeLiteral = operand {
+                    let destination = allocateRegister()
+                    operations.append(
+                        .call(
+                            function: GoPredeclared.newVariable,
+                            arguments: [try lower(operand)],
+                            destinations: [destination]))
+                    return destination
+                }
                 return try lowerAddress(of: operand)
             case .dereference:
                 let source = try lower(operand)
@@ -3060,7 +3131,9 @@ private struct IRLowerer {
             switch underlying(literalType) {
             case .structure(let fields):
                 var values: [Int] = []
-                if elements.contains(where: { $0.key != nil }) {
+                if elements.isEmpty || elements.contains(where: { $0.key != nil }) {
+                    // Fields a literal does not name, all of them in `T{}`,
+                    // have their zero values.
                     let keyed = Dictionary(
                         uniqueKeysWithValues: elements.compactMap { element in
                             element.key.map { ($0, element.value) }
@@ -3179,9 +3252,91 @@ private struct IRLowerer {
         }
     }
 
+    /// `var a, b T`, `var a, b = x, y`, and `var n, err = f()`. The values
+    /// are all read before a name is bound, so none sees another.
+    mutating func lowerVariables(
+        _ names: [String],
+        type: GoTypeExpression?,
+        values: [GoExpression],
+        position: GoSourcePosition
+    ) throws {
+        let declared = type.map(resolve)
+        if values.count == 1, names.count > 1 {
+            try lower(.multiDeclaration(names: names, expression: values[0], position: position))
+            return
+        }
+        var variables: [(register: Int, type: GoType)] = []
+        for index in names.indices {
+            let variable = allocateRegister()
+            if index < values.count {
+                operations.append(
+                    .copy(
+                        destination: variable,
+                        source: try lowerConverted(values[index], to: declared)))
+                variables.append((variable, try declared ?? self.type(of: values[index])))
+            } else if let declared {
+                operations.append(
+                    .copy(
+                        destination: variable,
+                        source: try zeroValue(for: declared, position: position)))
+                variables.append((variable, declared))
+            } else {
+                throw GoDiagnostic(
+                    position: position, message: "missing variable type or initialization")
+            }
+        }
+        for (name, variable) in zip(names, variables) where name != GoValueList.blank {
+            scopes[scopes.count - 1][name] = LoweredBinding(
+                register: variable.register, type: variable.type)
+        }
+    }
+
+    /// A target of a parallel assignment with its operands read: the index
+    /// of `x[i]`, a slice or map that is indexed, and a pointer that is
+    /// followed. What remains names a variable, so an assignment to another
+    /// target of the same statement cannot change where this one stores.
+    mutating func pinned(_ target: GoExpression) throws -> GoExpression {
+        switch target {
+        case .index(let base, let index, let position):
+            let pinnedBase: GoExpression
+            if case .array = underlying(try type(of: base)) {
+                pinnedBase = try pinned(base)
+            } else {
+                pinnedBase = try pin(base)
+            }
+            return .index(base: pinnedBase, index: try pin(index), position: position)
+        case .selector(let base, let name, let position):
+            if case .pointer = try type(of: base) {
+                return .selector(base: try pin(base), name: name, position: position)
+            }
+            return .selector(base: try pinned(base), name: name, position: position)
+        case .unary(.dereference, let operand, let position):
+            return .unary(operator: .dereference, operand: try pin(operand), position: position)
+        default:
+            return target
+        }
+    }
+
+    /// Reads `expression` now and returns a name for its value.
+    mutating func pin(_ expression: GoExpression) throws -> GoExpression {
+        switch expression {
+        case .integer, .string: return expression
+        default: break
+        }
+        let valueType = try type(of: expression)
+        let temporary = allocateRegister()
+        operations.append(.copy(destination: temporary, source: try lower(expression)))
+        // `$` cannot start a Go identifier, and the register is the name's own.
+        let name = "$pinned.\(temporary)"
+        scopes[scopes.count - 1][name] = LoweredBinding(register: temporary, type: valueType)
+        return .identifier(name, position: expression.position)
+    }
+
     mutating func store(_ value: Int, to target: GoExpression) throws {
         switch target {
         case .identifier(let name, let position):
+            // The blank identifier takes a value and keeps none.
+            if name == GoValueList.blank { return }
             if let variable = lookup(name)?.register {
                 operations.append(.copy(destination: variable, source: value))
                 return
@@ -3525,6 +3680,7 @@ private struct IRLowerer {
             switch underlying(try type(of: base)) {
             case .array(_, let element), .slice(let element): return element
             case .string: return GoPredeclared.byte
+            case .map(_, let value): return value
             default: return .void
             }
         case .slicing(let base, _, _, _):

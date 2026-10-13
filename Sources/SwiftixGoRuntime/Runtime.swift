@@ -3513,6 +3513,11 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 stack.append(try makeError(message))
+            case "$new":
+                // The address of a composite literal: a variable of its own
+                // each time, which lives as long as a pointer reaches it.
+                let cell = try heap.allocate(try pop(&stack))
+                stack.append(.pointer(GoPointer(cell: cell)))
             case "$strings.ToUpper", "$strings.ToLower":
                 guard case .string(let text) = try pop(&stack) else {
                     throw GoRuntimeError.typeMismatch

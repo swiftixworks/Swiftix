@@ -149,14 +149,14 @@ struct GoShortDeclarationTests: GoTestHarness {
                 a, b := pair(1, 2)
                 a, b := pair(3, 4)
                 fmt.Println(a, b)
-                """) == "a redeclared in this block")
+                """) == "no new variables on left side of :=")
         #expect(
             diagnostic(
                 """
                 value, err := parse("1")
                 _, err := parse("2")
                 fmt.Println(value, err)
-                """) == "err redeclared in this block")
+                """) == "no new variables on left side of :=")
         #expect(
             diagnostic(
                 """

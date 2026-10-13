@@ -39,6 +39,17 @@ format, behavior and platform changes are recorded here.
 - Interface methods with several results can be called in a multi-value
   context (`value, ok := store.Get(key)`, `return store.Get(key)`).
 - A function with results may end in a call to `panic` instead of a `return`.
+- The address of a composite literal, `&T{...}`: a pointer to a new variable
+  each time it is evaluated, for structs, arrays, slices, and maps. A
+  constructor can `return &Server{...}`, and a loop that appends `&node{...}`
+  appends distinct nodes.
+- The empty struct literal `T{}`, the zero value of `T`.
+- Several names on the left of `:=`, `=`, and `var` with a value for each:
+  `a, b := x, y`, `a, b = b, a`, `var a, b T`, `var a, b = x, y`,
+  `var n, err = f()`, `const a, b = 1, 2`, at package level and in
+  functions, and in the clauses of a `for`. Go's order holds: the operands on
+  the left and every value on the right are read before anything is stored.
+- The blank identifier in an assignment and a `var`: `_ = x`, `n, _ = f()`.
 - `if` and `switch` initializer statements (`if err := f(); err != nil { }`,
   `switch n := len(s); n { }`, `switch x := f(); { }`). The variables last
   for the statement and its `else` branches, and `gofmt` keeps the header on
@@ -85,6 +96,12 @@ format, behavior and platform changes are recorded here.
   never).
 - A type assertion to an interface type used to compile and always fail; it
   now tests the method set.
+- Diagnostics reworded to Go's: a multi-value `:=` without a new name is
+  `no new variables on left side of :=` (was `x redeclared in this block`),
+  a count that does not match is `assignment mismatch: 2 variables but 1
+  value` (was `multiple-value context requires function call`), and struct
+  literal errors name the type (`too few values in struct literal of type
+  point`, `unknown field Z in struct literal of type point`).
 - A Swiftix Go program that ends on a run-time error fails with
   `GoRuntimeError.panicError("runtime error: ...")`, the text Go prints,
   instead of `.divisionByZero`, `.indexOutOfRange`, `.invalidSliceBounds`, or
@@ -109,6 +126,16 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- A value read from a map had no static type in the compiler, so
+  `p := m[k]` followed by `p.field` failed with `bytecode operand type
+  mismatch` when the map held pointers, and a map value stored in an
+  interface lost its type.
+- `gofmt` printed a pointer element type in an expression as a
+  multiplication (`[] * node{}`, `make([] * node, 0)`), a pointer field of a
+  struct as `next * node`, a slice field as `lines[]string`, `map [K]V` in a
+  declaration, an interface with methods on one line, `if(x)` and
+  `return[]T{}` without their space, and `var x = a *b`. Each now matches
+  Go's `gofmt`.
 - `nil` could not be passed or assigned to a named interface type
   (`cannot use nil as namer value`); only `error` and literal interface types
   took it.

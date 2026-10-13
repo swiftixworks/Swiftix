@@ -218,6 +218,15 @@ private struct FormatPrinter {
     var previousWasUnaryOperator = false
     var previousTopLevelDeclaration: String?
     var pendingTopLevelComments = false
+    /// Brace depths of `struct` and `interface` bodies, where every line
+    /// declares a name and its type.
+    var typeBodyDepths: Set<Int> = []
+    /// Whether each open `[` belongs to a type (`[]T`, `[3]T`, `map[K]V`)
+    /// rather than to an index expression.
+    var typeBrackets: [Bool] = []
+    /// Whether the previous token was the `]` of such a bracket, after which
+    /// a `*` is a pointer type and a `[` is another type.
+    var afterTypeBracket = false
 
     mutating func render() -> String {
         for (index, token) in tokens.enumerated() {
@@ -270,11 +279,14 @@ private struct FormatPrinter {
             beginTopLevelDeclaration(token.text)
         }
 
+        let followsTypeBracket = afterTypeBracket
+        afterTypeBracket = false
         let tokenIsUnaryOperator =
             token.text == "!"
             || ((token.text == "&" || token.text == "^") && isUnaryOperator)
             || (token.text == "<-" && previous?.text != "chan" && isUnaryOperator)
-            || (token.text == "*" && (isUnaryOperator || isPointerTypeContext))
+            || (token.text == "*"
+                && (isUnaryOperator || isPointerTypeContext || followsTypeBracket))
             || ((token.text == "+" || token.text == "-") && isUnaryOperator)
         switch token.text {
         case "func":
@@ -298,9 +310,18 @@ private struct FormatPrinter {
             ensureSpace()
             append("else")
         case "(":
-            if previous?.text == "func" { ensureSpace() }
+            // After a keyword a parenthesis opens an operand, not a call.
+            if let previous, previous.kind == .word,
+                ["func", "if", "for", "switch", "return", "case", "range"].contains(previous.text)
+            {
+                ensureSpace()
+            }
             // The result list of a function signature: `func f() (int, error)`.
-            if previous?.text == ")", pendingFunction, parenthesisDepth == 0 { ensureSpace() }
+            if previous?.text == ")", pendingFunction || typeBodyDepths.contains(braceDepth),
+                parenthesisDepth == 0
+            {
+                ensureSpace()
+            }
             append("(")
             parenthesisDepth += 1
         case ")":
@@ -308,15 +329,29 @@ private struct FormatPrinter {
             append(")")
             parenthesisDepth -= 1
         case "[":
-            if isPointerTypeContext, previous?.kind == .word || previous?.text == ")" {
+            // `[]` is always a slice type, and so is a bracket where an
+            // operand begins or that follows `map` or another type bracket.
+            let opensSliceType = next?.text == "]"
+            typeBrackets.append(
+                opensSliceType || followsTypeBracket || previous?.text == "map"
+                    || isPointerTypeContext || !endsOperand(previous))
+            if previous?.text == "map" {
+                // `map[K]V`: the key follows the keyword directly.
+            } else if isPointerTypeContext, previous?.kind == .word || previous?.text == ")" {
+                ensureSpace()
+            } else if opensSliceType, previous?.kind == .word {
+                // A slice type after a name declares it: `lines []string`.
                 ensureSpace()
             }
             append("[")
         case "]":
             trimTrailingWhitespace()
             append("]")
+            afterTypeBracket = typeBrackets.popLast() ?? false
         case "{":
-            if isCompositeLiteralBrace {
+            // `interface{}` stays on its line; an interface with methods is
+            // a block like a struct.
+            if isCompositeLiteralBrace, !(previous?.text == "interface" && next?.text != "}") {
                 append("{")
                 braceDepth += 1
                 compositeDepths.insert(braceDepth)
@@ -326,6 +361,9 @@ private struct FormatPrinter {
                 finishLine()
                 braceDepth += 1
                 indent += 1
+                if previous?.text == "struct" || previous?.text == "interface" {
+                    typeBodyDepths.insert(braceDepth)
+                }
                 if pendingSwitch { switchDepths.insert(braceDepth) }
                 pendingSwitch = false
                 pendingIf = false
@@ -399,8 +437,11 @@ private struct FormatPrinter {
             ensureSpace()
             append("<-")
             append(" ")
+        case "*" where followsTypeBracket:
+            // The element of `[]*T`, `[3]*T`, and `map[K]*V`.
+            append("*")
         case "*" where isPointerTypeContext:
-            if previous?.text != GoSpread.spelling { ensureSpace() }
+            if previous?.text != GoSpread.spelling, previous?.text != "(" { ensureSpace() }
             append("*")
         case "*" where isUnaryOperator:
             if needsSpaceBeforeUnary() { ensureSpace() }
@@ -418,6 +459,8 @@ private struct FormatPrinter {
         default:
             appendWord(token.text, kind: token.kind)
         }
+        // What follows the `=` of a `var` is a value, not its type.
+        if token.text == "=" { pendingVariableDeclaration = false }
         previous = token
         previousWasUnaryOperator = tokenIsUnaryOperator
     }
@@ -464,6 +507,7 @@ private struct FormatPrinter {
         if !current.isEmpty { finishLine() }
         activeCaseDepths.remove(braceDepth)
         switchDepths.remove(braceDepth)
+        typeBodyDepths.remove(braceDepth)
         indent -= 1
         braceDepth -= 1
         append("}")
@@ -495,6 +539,26 @@ private struct FormatPrinter {
         }
     }
 
+    /// Whether an expression can end at `token`, so that a `[` after it
+    /// indexes what came before.
+    func endsOperand(_ token: FormatToken?) -> Bool {
+        guard let token else { return false }
+        switch token.kind {
+        case .literal:
+            return true
+        case .word:
+            return ![
+                "return", "case", "if", "for", "switch", "select", "range", "map", "chan",
+                "func", "var", "const", "type", "else", "go", "defer", "struct", "interface",
+                "package", "import", "break", "continue", "default",
+            ].contains(token.text)
+        case .symbol:
+            return [")", "]", "}"].contains(token.text)
+        case .lineComment, .blockComment:
+            return false
+        }
+    }
+
     var isCompositeLiteralBrace: Bool {
         guard let previous, previous.kind == .word else { return false }
         guard !forHeader, !pendingSwitch, !pendingIf, !pendingFunction else { return false }
@@ -503,14 +567,14 @@ private struct FormatPrinter {
     }
 
     var isPointerTypeContext: Bool {
-        pendingFunction || pendingVariableDeclaration
+        pendingFunction || pendingVariableDeclaration || typeBodyDepths.contains(braceDepth)
     }
 
     var isUnaryOperator: Bool {
         if current.isEmpty { return true }
         guard let previous else { return true }
         if previous.kind == .word {
-            return ["return", "case", "if", "for", "switch", "select", "range"]
+            return ["return", "case", "if", "for", "switch", "select", "range", "chan"]
                 .contains(previous.text)
         }
         return [
@@ -523,7 +587,7 @@ private struct FormatPrinter {
     func needsSpaceBeforeUnary() -> Bool {
         guard let previous else { return false }
         return previous.kind == .word
-            && ["return", "case", "if", "for", "switch", "select", "range"]
+            && ["return", "case", "if", "for", "switch", "select", "range", "chan"]
                 .contains(previous.text)
     }
 

@@ -38,7 +38,7 @@ private struct Parser {
             if check(.typeKeyword) {
                 typeDeclarations.append(try parseTypeDeclaration())
             } else if check(.variable) || check(.constant) {
-                globalDeclarations.append(try parseGlobalDeclaration())
+                globalDeclarations.append(contentsOf: try parseGlobalDeclarations())
             } else {
                 functions.append(try parseFunction())
             }
@@ -53,11 +53,58 @@ private struct Parser {
             functions: functions)
     }
 
-    mutating func parseGlobalDeclaration() throws -> GoGlobalDeclaration {
+    /// A package-level `var` or `const`, which may name several variables:
+    /// `var a, b int` and `var a, b = 1, 2` are a declaration each.
+    mutating func parseGlobalDeclarations() throws -> [GoGlobalDeclaration] {
         let position = current.position
         let isConstant = check(.constant)
         advance()
-        let name = try expectIdentifier(message: "expected name in declaration")
+        var names = [try expectIdentifier(message: "expected name in declaration")]
+        while check(.comma) {
+            advance()
+            names.append(try expectIdentifier(message: "expected name in declaration"))
+        }
+        guard names.count > 1 else {
+            return [try parseGlobalDeclaration(named: names[0], isConstant: isConstant, at: position)]
+        }
+        var explicitType: GoTypeExpression?
+        if !check(.assign) { explicitType = try parseTypeExpression() }
+        var values: [GoExpression] = []
+        if check(.assign) {
+            advance()
+            values.append(try parseExpression())
+            while check(.comma) {
+                advance()
+                values.append(try parseExpression())
+            }
+        }
+        if isConstant, values.isEmpty {
+            throw GoDiagnostic(position: position, message: "missing value in const declaration")
+        }
+        guard values.isEmpty || values.count == names.count else {
+            // One call for several package-level variables has no single
+            // declaration to stand for it.
+            throw GoDiagnostic(
+                position: position,
+                message:
+                    "assignment mismatch: \(names.count) variables but \(values.count) value\(values.count == 1 ? "" : "s")"
+            )
+        }
+        return names.enumerated().map { index, name in
+            GoGlobalDeclaration(
+                name: name,
+                explicitType: explicitType,
+                expression: values.isEmpty ? nil : values[index],
+                isConstant: isConstant,
+                position: position)
+        }
+    }
+
+    mutating func parseGlobalDeclaration(
+        named name: String,
+        isConstant: Bool,
+        at position: GoSourcePosition
+    ) throws -> GoGlobalDeclaration {
         var explicitType: GoTypeExpression?
         if case .identifier = current.kind {
             explicitType = try parseTypeExpression()
@@ -419,6 +466,34 @@ private struct Parser {
         let isConstant = check(.constant)
         advance()
         let name = try expectIdentifier(message: "expected name in declaration")
+        if check(.comma) {
+            // `var a, b T`, `var a, b = x, y`, `var n, err = f()`.
+            var names = [name]
+            while check(.comma) {
+                advance()
+                names.append(try expectIdentifier(message: "expected name in declaration"))
+            }
+            var listType: GoTypeExpression?
+            if !check(.assign) { listType = try parseTypeExpression() }
+            var values: [GoExpression] = []
+            if check(.assign) {
+                advance()
+                values.append(try parseExpression())
+                while check(.comma) {
+                    advance()
+                    values.append(try parseExpression())
+                }
+            }
+            if isConstant, values.isEmpty {
+                throw GoDiagnostic(
+                    position: position, message: "missing value in const declaration")
+            }
+            return .multiDeclaration(
+                names: names,
+                expression: .variables(
+                    type: listType, values: values, isConstant: isConstant, position: position),
+                position: position)
+        }
         var explicitType: GoTypeExpression?
         if case .identifier = current.kind {
             explicitType = try parseTypeExpression()
@@ -720,6 +795,30 @@ private struct Parser {
         return .selectStatement(cases: cases, position: position)
     }
 
+    /// The right side of a `:=` or `=` with several names on its left: one
+    /// expression that yields them all, or a value for each.
+    mutating func parseValues(allowCompositeLiteral: Bool) throws -> GoExpression {
+        let position = current.position
+        var values = [try parseExpression(allowCompositeLiteral: allowCompositeLiteral)]
+        while check(.comma) {
+            advance()
+            values.append(try parseExpression(allowCompositeLiteral: allowCompositeLiteral))
+        }
+        return values.count == 1 ? values[0] : .valueList(values, position: position)
+    }
+
+    /// The right side of a `:=` or `=` with one name on its left.
+    mutating func parseSingleValue(allowCompositeLiteral: Bool) throws -> GoExpression {
+        let position = current.position
+        let value = try parseValues(allowCompositeLiteral: allowCompositeLiteral)
+        if let values = value.valueList {
+            throw GoDiagnostic(
+                position: position,
+                message: "assignment mismatch: 1 variable but \(values.count) values")
+        }
+        return value
+    }
+
     /// `allowCompositeLiteral` is false in a `for` header, where `x {` opens
     /// the loop body rather than a composite literal.
     mutating func parseSimpleStatement(
@@ -752,14 +851,14 @@ private struct Parser {
                 }
                 return .multiDeclaration(
                     names: names,
-                    expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
+                    expression: try parseValues(allowCompositeLiteral: allowCompositeLiteral),
                     position: position)
             }
             if check(.assign) {
                 advance()
                 return .multiAssignment(
                     targets: targets,
-                    expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
+                    expression: try parseValues(allowCompositeLiteral: allowCompositeLiteral),
                     position: position)
             }
             throw GoDiagnostic(
@@ -779,7 +878,7 @@ private struct Parser {
             return .declaration(
                 name: name,
                 explicitType: nil,
-                expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
+                expression: try parseSingleValue(allowCompositeLiteral: allowCompositeLiteral),
                 isConstant: false,
                 position: position)
         }
@@ -787,7 +886,7 @@ private struct Parser {
             advance()
             return .assignment(
                 target: target,
-                expression: try parseExpression(allowCompositeLiteral: allowCompositeLiteral),
+                expression: try parseSingleValue(allowCompositeLiteral: allowCompositeLiteral),
                 position: position)
         }
         if case .identifier(let spelling) = current.kind,

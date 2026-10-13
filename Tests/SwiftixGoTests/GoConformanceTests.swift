@@ -93,6 +93,14 @@ struct GoConformanceTests {
     @Test func runTimeErrorsAreRecoverablePanics() throws {
         try expectSameOutput(runTimeErrorsAreRecoverablePanicsSource, runTimeErrorsAreRecoverablePanicsExpected)
     }
+
+    @Test func compositeLiteralsAndTheirAddresses() throws {
+        try expectSameOutput(compositeLiteralsAndTheirAddressesSource, compositeLiteralsAndTheirAddressesExpected)
+    }
+
+    @Test func parallelAssignmentAndSeveralNames() throws {
+        try expectSameOutput(parallelAssignmentAndSeveralNamesSource, parallelAssignmentAndSeveralNamesExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -2089,5 +2097,316 @@ compare -> runtime error: index out of range [4] with length 3 | runtime error: 
 %!v(PANIC=String method: runtime error: index out of range [5] with length 3)
 %!v(PANIC=String method: runtime error: index out of range [5] with length 0)|%!s(PANIC=String method: runtime error: index out of range [5] with length 3)|3
 still running
+
+"""#
+
+private let compositeLiteralsAndTheirAddressesSource = #"""
+package main
+
+import "errors"
+import "fmt"
+
+type point struct {
+	X int
+	Y int
+}
+
+type node struct {
+	name string
+	next *node
+	tags []string
+	meta map[string]int
+	at   point
+	ok   bool
+	err  error
+}
+
+func (n *node) rename(name string) *node {
+	n.name = name
+	return n
+}
+
+func (n node) label() string {
+	return "<" + n.name + ">"
+}
+
+type server struct {
+	name    string
+	clients map[string]*client
+	limit   int
+}
+
+type client struct {
+	id     int
+	server *server
+}
+
+func newServer(name string) *server {
+	return &server{name: name, clients: map[string]*client{}, limit: 2}
+}
+
+func (s *server) connect(key string) *client {
+	c := &client{id: len(s.clients) + 1, server: s}
+	s.clients[key] = c
+	return c
+}
+
+type failure struct {
+	code int
+}
+
+func (f *failure) Error() string {
+	return "failure " + fmt.Sprint(f.code)
+}
+
+func check(code int) error {
+	if code > 0 {
+		return &failure{code: code}
+	}
+	return nil
+}
+
+func chain(names []string) *node {
+	var head *node
+	for i := len(names) - 1; i >= 0; i-- {
+		head = &node{name: names[i], next: head}
+	}
+	return head
+}
+
+func main() {
+	zero := point{}
+	var empty node = node{}
+	fmt.Println(zero, zero == point{}, empty.name == "", empty.next == nil, empty.tags == nil, empty.meta == nil, empty.at, empty.ok, empty.err)
+	fmt.Printf("%v %+v %#v\n", point{}, point{X: 1}, point{Y: 2})
+
+	p := &point{X: 1, Y: 2}
+	q := &point{X: 1, Y: 2}
+	fmt.Println(p, *p, p.X+p.Y, p == q, *p == *q, p == p)
+	p.X = 10
+	q.Y++
+	fmt.Println(*p, *q, (&point{X: 3, Y: 4}).X, *(&point{}))
+	fmt.Printf("%v %+v %T %T\n", p, q, p, &node{})
+
+	n := &node{name: "a", tags: []string{"x"}, meta: map[string]int{"k": 1}, at: point{X: 5}}
+	n.next = &node{name: "b"}
+	n.next.next = &node{}
+	fmt.Println(n.name, n.next.name, n.next.next.name == "", n.next.next.next == nil, n.tags, n.meta, n.at)
+	fmt.Println(n.rename("c").label(), (&node{name: "d"}).label(), (&node{}).rename("e").name)
+
+	var list []*point
+	for i := 0; i < 3; i++ {
+		list = append(list, &point{X: i, Y: i * i})
+	}
+	list[0].X = 100
+	fmt.Println(*list[0], *list[1], *list[2], list[0] == list[1], len(list))
+
+	table := []*point{&point{X: 1}, &point{Y: 2}, &point{}}
+	lookup := map[string]*point{"a": &point{X: 7}, "b": &point{}}
+	lookup["a"].Y = 8
+	fmt.Println(*table[0], *table[1], *table[2], *lookup["a"], *lookup["b"], len(lookup))
+
+	numbers := &[]int{1, 2, 3}
+	counts := &map[string]int{"a": 1}
+	array := &[3]int{4, 5}
+	*numbers = append(*numbers, 4)
+	(*counts)["b"] = 2
+	(*array)[2] = 6
+	fmt.Println(*numbers, len(*numbers), *counts, *array, len(*array))
+
+	head := chain([]string{"x", "y", "z"})
+	for cursor := head; cursor != nil; cursor = cursor.next {
+		fmt.Print(cursor.name, " ")
+	}
+	fmt.Println()
+
+	s := newServer("main")
+	first := s.connect("a")
+	second := s.connect("b")
+	fmt.Println(s.name, len(s.clients), first.id, second.id, first.server == second.server, s.clients["a"] == first, s.limit)
+
+	err := check(3)
+	var target *failure
+	fmt.Println(err, check(0) == nil, errors.As(err, &target), target.code, err == check(3))
+
+	var holder interface{} = &point{X: 9}
+	held, isPointer := holder.(*point)
+	_, isValue := holder.(point)
+	fmt.Println(held.X, isPointer, isValue)
+	fmt.Println([]point{point{}, point{X: 1}}, map[string]point{"z": point{}}, [2]point{})
+}
+"""#
+
+private let compositeLiteralsAndTheirAddressesExpected = #"""
+{0 0} true true true true true {0 0} false <nil>
+{0 0} {X:1 Y:0} main.point{X:0, Y:2}
+&{1 2} {1 2} 3 false true true
+{10 2} {1 3} 3 {0 0}
+&{10 2} &{X:1 Y:3} *main.point *main.node
+a b true true [x] map[k:1] {5 0}
+<c> <d> e
+{100 0} {1 1} {2 4} false 3
+{1 0} {0 2} {0 0} {7 8} {0 0} 2
+[1 2 3 4] 4 map[a:1 b:2] [4 5 6] 3
+x y z\#u{20}
+main 2 1 2 true true 2
+failure 3 true true 3 false
+9 true false
+[{0 0} {1 0}] map[z:{0 0}] [{0 0} {0 0}]
+
+"""#
+
+private let parallelAssignmentAndSeveralNamesSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "strconv"
+
+type pair struct {
+	left  int
+	right int
+}
+
+type holder struct {
+	values []int
+	names  map[string]int
+	next   *holder
+}
+
+var first, second int
+var alpha, beta = 10, "b"
+var typed, also int = 3, 4
+
+const big, small = 100, 1
+
+func two() (int, error) {
+	return 2, errors.New("e")
+}
+
+func divmod(a int, b int) (int, int) {
+	return a / b, a % b
+}
+
+func fib(n int) int {
+	a, b := 0, 1
+	for i := 0; i < n; i++ {
+		a, b = b, a+b
+	}
+	return a
+}
+
+func reverse(values []int) {
+	for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+		values[i], values[j] = values[j], values[i]
+	}
+}
+
+func gcd(a int, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+func main() {
+	fmt.Println(first, second, alpha, beta, typed, also, big, small)
+	first, second = 1, 2
+	first, second = second, first
+	fmt.Println(first, second)
+
+	a, b := 1, "x"
+	a, b = a+1, b+"y"
+	c, d, e := a*2, len(b), b == "xy"
+	fmt.Println(a, b, c, d, e)
+
+	x, y := 3, 4
+	x, y = y, x
+	x, y, z := y, x, x+y
+	fmt.Println(x, y, z)
+
+	var m, n int
+	var s, t = "s", 5
+	var u, v byte = 1, 2
+	var q, err = two()
+	var w, ok = map[string]int{"k": 9}["k"]
+	fmt.Println(m, n, s, t, u, v, q, err, w, ok)
+	fmt.Printf("%T %T %T %T\n", u, t, s, err)
+
+	_ = x
+	_, _ = y, z
+	n, _ = two()
+	_, err = strconv.Atoi("12")
+	fmt.Println(n, err)
+
+	list := []int{1, 2, 3, 4, 5}
+	reverse(list)
+	list[0], list[4] = list[4], list[0]
+	fmt.Println(list, fib(10), gcd(84, 36))
+
+	i := 0
+	i, list[i] = 2, 99
+	fmt.Println(i, list)
+	list, list[0] = []int{7, 8}, 55
+	fmt.Println(list)
+
+	p := pair{left: 1, right: 2}
+	p.left, p.right = p.right, p.left
+	h := &holder{values: []int{1, 2}, names: map[string]int{"a": 1}}
+	h.values[0], h.values[1] = h.values[1], h.values[0]
+	h.names["a"], h.names["b"] = 5, h.names["a"]
+	h.next, h.values = &holder{values: []int{9}}, h.values[:1]
+	fmt.Println(p, h.values, h.names, h.next.values)
+
+	pointer := &p
+	other := &pair{left: 7, right: 8}
+	pointer, pointer.left = other, 100
+	fmt.Println(p, *pointer, *other)
+
+	array := [3]int{1, 2, 3}
+	array[0], array[2] = array[2], array[0]
+	k := 1
+	k, array[k] = 2, 50
+	fmt.Println(array, k)
+
+	quotient, rest := divmod(17, 5)
+	quotient, extra := quotient+1, rest*2
+	var iface interface{}
+	var problem error
+	iface, problem = 5, errors.New("typed")
+	text, number := "v", 1
+	iface, text = text, strconv.Itoa(number)
+	fmt.Println(quotient, rest, extra, iface, problem, text)
+	fmt.Printf("%T %v\n", iface, problem == nil)
+
+	if lo, hi := 1, 9; lo < hi {
+		lo, hi = hi, lo
+		fmt.Println(lo, hi)
+	}
+	switch lo, hi := divmod(9, 2); {
+	case lo > hi:
+		fmt.Println("more", lo, hi)
+	}
+}
+"""#
+
+private let parallelAssignmentAndSeveralNamesExpected = #"""
+0 0 10 b 3 4 100 1
+2 1
+2 xy 4 2 true
+3 4 7
+0 0 s 5 1 2 2 e 9 true
+uint8 int string *errors.errorString
+2 <nil>
+[1 4 3 2 5] 55 12
+2 [99 4 3 2 5]
+[7 8]
+{2 1} [2] map[a:5 b:1] [9]
+{100 1} {7 8} {7 8}
+[3 50 1] 2
+4 2 4 v typed 1
+string false
+9 1
+more 4 1
 
 """#
