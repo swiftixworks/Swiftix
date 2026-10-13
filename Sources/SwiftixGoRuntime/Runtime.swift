@@ -2145,6 +2145,12 @@ public struct GoVirtualMachine: Sendable {
                 typeName = GoTypeDescriptor.name(of: descriptor.type)
                 if case .named(let symbol) = descriptor.type {
                     switch descriptor.definitions[symbol] {
+                    case .number(let number)?:
+                        if case .int(let bits) = held,
+                            let text = GoFormat.number(bits, number, GoFormat.Directive(verb: "v"))
+                        {
+                            return "\(typeName)(\(text))"
+                        }
                     case .integer?, .byte?, .boolean?:
                         if let text = plain(held) { return "\(typeName)(\(text))" }
                     case .string?:
@@ -2154,6 +2160,10 @@ public struct GoVirtualMachine: Sendable {
                     default:
                         break
                     }
+                } else if case .number(let number) = descriptor.type, case .int(let bits) = held,
+                    let text = GoFormat.number(bits, number, GoFormat.Directive(verb: "v"))
+                {
+                    return text
                 } else if let text = plain(held) {
                     return text
                 }
@@ -2481,6 +2491,9 @@ public struct GoVirtualMachine: Sendable {
 
             switch value {
             case .int(let integer):
+                if case .number(let number)? = kind {
+                    return try GoFormat.number(integer, number, directive) ?? bad()
+                }
                 return try GoFormat.integer(integer, directive, unsigned: kind == .byte) ?? bad()
             case .string(let text):
                 return try GoFormat.string(text, directive) ?? bad()
@@ -2537,8 +2550,12 @@ public struct GoVirtualMachine: Sendable {
                     (keyType, valueType) = (declaredKey, declaredValue)
                 }
                 // Go prints a map sorted by key.
+                let unsignedKeys = GoNumeric.ordersUnsigned(keyType.map(scope.underlying))
                 let entries = storage.entries.enumerated().sorted { lhs, rhs in
-                    let order = GoFormat.keyOrder(lhs.element.key, rhs.element.key)
+                    let order =
+                        unsignedKeys
+                        ? GoNumeric.unsignedOrder(lhs.element.key, rhs.element.key)
+                        : GoFormat.keyOrder(lhs.element.key, rhs.element.key)
                     return order == 0 ? lhs.offset < rhs.offset : order < 0
                 }.map(\.element)
                 return try aggregate(
@@ -3106,6 +3123,128 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 try writeDescriptor(file.descriptor, text, opened: opened, results: results)
+            }
+            return true
+        }
+
+        /// Run a native of the numeric types: an operation the lowerer chose
+        /// for a sized integer, or a function of `strconv`, `unicode`,
+        /// `unicode/utf8`, or `strings` that takes or gives one. Returns
+        /// `false` when `name` is not such a function.
+        func executeNumericNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoNumeric.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            let integers = operands.compactMap { operand -> Int64? in
+                if case .int(let integer) = operand { return integer }
+                return nil
+            }
+            if integers.count == operands.count, let result = try GoNumeric.integer(name, integers) {
+                stack.append(result)
+                return true
+            }
+            func text(_ index: Int) throws -> String {
+                guard case .string(let text) = operands[index] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return text
+            }
+            func integer(_ index: Int) throws -> Int64 {
+                guard case .int(let integer) = operands[index] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return integer
+            }
+            switch name {
+            case "$num.runes":
+                let elements = try text(0).unicodeScalars.map { GoValue.int(Int64($0.value)) }
+                try requireCollectionCount(elements.count, resource: "slice elements")
+                let cell = try heap.allocate(.array(elements))
+                stack.append(
+                    .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell), start: 0, length: elements.count,
+                            capacity: elements.count, zeroValue: .int(0))))
+            case "$num.string":
+                var scalars = String.UnicodeScalarView()
+                for element in try sliceElements(operands[0]) {
+                    guard case .int(let rune) = element else { throw GoRuntimeError.typeMismatch }
+                    scalars.append(GoNumeric.scalar(rune))
+                }
+                let result = String(scalars)
+                guard result.utf8.count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                stack.append(.string(result))
+            case "$strconv.ParseInt":
+                let parsed = GoNumeric.parseSigned(
+                    try text(0), base: try integer(1), bitSize: try integer(2))
+                stack.append(.int(parsed.value))
+                stack.append(
+                    try parsed.failure.map {
+                        try makeError($0.message(function: "ParseInt", text: try text(0)))
+                    } ?? .nilValue)
+            case "$strconv.ParseUint":
+                let parsed = GoNumeric.parseUnsigned(
+                    try text(0), base: try integer(1), bitSize: try integer(2))
+                stack.append(.int(Int64(bitPattern: parsed.value)))
+                stack.append(
+                    try parsed.failure.map {
+                        try makeError($0.message(function: "ParseUint", text: try text(0)))
+                    } ?? .nilValue)
+            case "$strconv.FormatInt", "$strconv.FormatUint":
+                let base = try integer(1)
+                guard (2...36).contains(base) else {
+                    throw GoRuntimePanic(text: "strconv: illegal AppendInt/FormatInt base")
+                }
+                stack.append(
+                    .string(
+                        name == "$strconv.FormatInt"
+                            ? String(try integer(0), radix: Int(base))
+                            : String(UInt64(bitPattern: try integer(0)), radix: Int(base))))
+            case "$utf8.RuneCountInString":
+                stack.append(.int(Int64(try text(0).unicodeScalars.count)))
+            case "$utf8.ValidString":
+                // A string of the VM is valid UTF-8 by construction.
+                _ = try text(0)
+                stack.append(.bool(true))
+            case "$utf8.DecodeRuneInString":
+                if let first = try text(0).unicodeScalars.first {
+                    stack.append(.int(Int64(first.value)))
+                    stack.append(.int(Int64(UTF8.width(first))))
+                } else {
+                    stack.append(.int(0xFFFD))
+                    stack.append(.int(0))
+                }
+            case "$utf8.EncodeRune":
+                guard case .slice(let destination) = operands[0] else {
+                    // A nil slice has no room for the first byte.
+                    guard operands[0] == .nilValue else { throw GoRuntimeError.typeMismatch }
+                    throw GoRuntimePanic.index(0, length: 0)
+                }
+                let encoded = Array(String(Character(GoNumeric.scalar(try integer(1)))).utf8)
+                guard encoded.count <= destination.length else {
+                    // Go writes the last byte first, to check the bound once.
+                    throw GoRuntimePanic.index(encoded.count - 1, length: destination.length)
+                }
+                try storeElements(encoded.map { GoValue.int(Int64($0)) }, into: destination)
+                stack.append(.int(Int64(encoded.count)))
+            case "$strings.ContainsRune":
+                stack.append(.bool(GoNumeric.index(of: try integer(1), in: try text(0)) >= 0))
+            case "$strings.IndexRune":
+                stack.append(.int(Int64(GoNumeric.index(of: try integer(1), in: try text(0)))))
+            case "$strings.IndexByte":
+                let wanted = UInt8(truncatingIfNeeded: try integer(1))
+                let index = Array(try text(0).utf8).firstIndex(of: wanted)
+                stack.append(.int(Int64(index ?? -1)))
+            default:
+                throw GoRuntimeError.typeMismatch
             }
             return true
         }
@@ -4264,6 +4403,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeHostNative(name, argumentCount: argumentCount)
                                 || executeFileNative(name, argumentCount: argumentCount)
                                 || executeTimeNative(name, argumentCount: argumentCount)
+                                || executeNumericNative(name, argumentCount: argumentCount)
                                 || executeFormatNative(name, argumentCount: argumentCount)
                                 || executeErrorNative(name, argumentCount: argumentCount)
                                 || executeSliceNative(name, argumentCount: argumentCount)

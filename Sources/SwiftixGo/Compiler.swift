@@ -179,6 +179,7 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: [:],
+                numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
             let lowered = try lowerer.lower(function, compiledName: name)
             nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
@@ -210,6 +211,7 @@ public enum GoCompiler {
                     typeDefinitions: package.typeDefinitions,
                     globalInfos: globalInfos,
                     functionSymbolNames: [:],
+                    numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
                 globalInitializers.append(
                     try lowerer.lowerGlobals(
@@ -395,6 +397,7 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: [:],
+                numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
             let lowered = try lowerer.lower(function, compiledName: name)
             nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
@@ -412,6 +415,7 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: [:],
+                numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
             loweredFunctions.insert(
                 try lowerer.lowerGlobals(
@@ -582,6 +586,7 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: functionSymbolNames,
+                numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
             lowerer.wrapperNamespace = pkgName
             let lowered = try lowerer.lower(function, compiledName: name)
@@ -601,6 +606,7 @@ public enum GoCompiler {
                 typeDefinitions: package.typeDefinitions,
                 globalInfos: globalInfos,
                 functionSymbolNames: functionSymbolNames,
+                numbers: package.numberFacts,
                 literalCaptures: package.literalCaptures)
             let initName = "$\(pkgName).init"
             loweredFunctions.insert(
@@ -651,7 +657,7 @@ public enum GoCompiler {
     }
 }
 
-private struct MethodInfo {
+struct MethodInfo {
     let functionName: String
     let receiverType: GoType
     let resultTypes: [GoType]
@@ -665,18 +671,18 @@ private struct MethodInfo {
 
 /// A function literal whose body is yet to be lowered: the function it
 /// becomes, and the variables it captures with their types.
-private struct PendingLiteral {
+struct PendingLiteral {
     let declaration: GoFunctionDeclaration
     let symbol: String
     let captures: [(name: String, type: GoType)]
 }
 
-private struct LoweredBinding {
+struct LoweredBinding {
     let register: Int
     let type: GoType
 }
 
-private struct GlobalInfo {
+struct GlobalInfo {
     let index: Int
     let type: GoType
 }
@@ -1428,7 +1434,7 @@ private struct PackageDependencyAnalyzer {
     }
 }
 
-private struct IRLowerer {
+struct IRLowerer {
     let functionReturnCounts: [String: Int]
     let functionResultTypes: [String: [GoType]]
     let functionParameterTypes: [String: [GoType]]
@@ -1436,6 +1442,8 @@ private struct IRLowerer {
     let typeDefinitions: [String: GoTypeDefinition]
     let globalInfos: [String: GlobalInfo]
     let functionSymbolNames: [String: String]
+    /// What the checker found out about the numbers of the program.
+    var numbers = GoNumberFacts()
     var operations: [GoIROperation] = []
     var scopes: [[String: LoweredBinding]] = [[:]]
     var nextRegister = 0
@@ -1923,7 +1931,9 @@ private struct IRLowerer {
                 continue
             }
             let value: Int
-            if let expression = declaration.expression {
+            if let noted = notedConstant(declaration) {
+                value = noted
+            } else if let expression = declaration.expression {
                 value = try lowerConverted(expression, to: global.type)
             } else {
                 value = try zeroValue(for: global.type, position: declaration.position)
@@ -1987,6 +1997,7 @@ private struct IRLowerer {
 
     mutating func lowerDeclaration(_ statement: GoStatement) throws {
         guard case .declaration(let name, let explicitType, let expression, _, let position) = statement else { return }
+        if lowerNotedConstant(statement) { return }
         let variable = allocateRegister()
         let value: Int
         if let expression {
@@ -2254,6 +2265,7 @@ private struct IRLowerer {
 
     mutating func lowerIncrement(_ statement: GoStatement) throws {
         guard case .increment(let target, let incrementOperator, _) = statement else { return }
+        if try lowerNumericIncrement(statement) { return }
         let current = try lower(target)
         let one = constant(.int(1))
         let result = allocateRegister()
@@ -2645,7 +2657,7 @@ private struct IRLowerer {
             switch collectionType {
             case .array(_, let element), .slice(let element): elementType = element
             case .map(_, let value): elementType = value
-            case .string: elementType = .int
+            case .string: elementType = GoPredeclared.rune
             default: elementType = .void
             }
             let zero = try zeroValue(for: elementType, position: collection.position)
@@ -3940,6 +3952,7 @@ private struct IRLowerer {
         // One function for each kind of expression, like the statements:
         // an expression inside an expression then costs the frame of its
         // own kind, not of all of them.
+        if let number = try lowerNumeric(expression) { return number }
         switch expression {
         case .integer(let value, _):
             return constant(.int(value))
@@ -4857,6 +4870,7 @@ private struct IRLowerer {
     }
 
     func type(of expression: GoExpression) throws -> GoType {
+        if let noted = notedType(of: expression) { return noted }
         switch expression {
         case .integer: return .int
         case .string: return .string
@@ -5117,6 +5131,7 @@ private struct IRLowerer {
             case "int", "string", "bool", "byte", "uint8", "any", "error":
                 return resolve(.named(name, position: position))
             default:
+                if let numeric = GoPredeclared.numericType(name) { return numeric }
                 return typeDefinitions[name] == nil ? nil : .named(name)
             }
         case .unary(.dereference, let operand, _):
@@ -5134,6 +5149,9 @@ private struct IRLowerer {
     mutating func lowerConversion(to target: GoType, argument: GoExpression) throws -> Int {
         // To an interface type: the value with its type, as when assigned.
         if isInterfaceType(target) { return try lowerConverted(argument, to: target) }
+        if let number = try lowerNumericConversion(to: target, argument: argument) {
+            return number
+        }
         let value = try lower(argument)
         if underlying(target) == .int {
             // Narrowing to a byte truncates; a byte source is already in range.

@@ -5,6 +5,16 @@ public enum GoLexer {
         var scanner = Scanner(source: source)
         return try scanner.scan()
     }
+
+    /// The code point of the rune literal `spelling`, quotes included, or
+    /// nil when it is none. A rune literal is a token by its spelling.
+    static func runeValue(ofLiteral spelling: String) -> Int64? {
+        var scanner = Scanner(source: GoSourceFile(path: "", text: spelling))
+        guard (try? scanner.scanRune()) != nil, scanner.index == scanner.bytes.count else {
+            return nil
+        }
+        return scanner.lastRuneValue
+    }
 }
 
 private struct Scanner {
@@ -14,6 +24,8 @@ private struct Scanner {
     var line = 1
     var column = 1
     var tokens: [GoToken] = []
+    /// The code point of the rune literal scanned last.
+    var lastRuneValue: Int64?
 
     init(source: GoSourceFile) {
         self.source = source
@@ -45,8 +57,10 @@ private struct Scanner {
                 scanIdentifier()
                 continue
             }
-            if isDigit(byte) {
-                try scanInteger()
+            if isDigit(byte)
+                || (byte == 0x2E && GoNumericKind.floatsAreSupported && peek(1).map(isDigit) == true)
+            {
+                try scanNumber()
                 continue
             }
             if byte == 0x22 {
@@ -172,9 +186,126 @@ private struct Scanner {
             throw GoDiagnostic(position: start, message: "\(name) literal has no digits")
         }
         guard !overflowed, let signed = Int64(exactly: value) else {
-            throw GoDiagnostic(position: start, message: "integer literal overflows int64")
+            // More than the token holds: the literal as it is spelled, which
+            // the checker reads as the constant it is. See `GoLiteral`.
+            tokens.append(spelledLiteral(from: start))
+            return
         }
         tokens.append(GoToken(kind: .integer(signed), position: start))
+    }
+
+    /// The token of a literal the integer token cannot hold: an identifier
+    /// whose name is the source text from `start` to here.
+    func spelledLiteral(from start: GoSourcePosition) -> GoToken {
+        GoToken(
+            kind: .identifier(String(decoding: bytes[start.offset..<index], as: UTF8.self)),
+            position: start)
+    }
+
+    /// A numeric literal: an integer, or a floating-point literal in any of
+    /// Go's forms (`1.5`, `.5`, `1.`, `1e9`, `1_000.5`, `0x1p-2`), which is
+    /// a token by its spelling.
+    mutating func scanNumber() throws {
+        guard let end = floatLiteralEnd() else {
+            try scanInteger()
+            return
+        }
+        let start = position()
+        try validateFloat(bytes[index..<end], at: start)
+        while index < end { advance() }
+        tokens.append(spelledLiteral(from: start))
+    }
+
+    /// Where the numeric literal that starts here ends when it is a
+    /// floating-point one: it has a radix point or an exponent. Nil for an
+    /// integer. A binary or octal prefix makes an integer whatever follows.
+    func floatLiteralEnd() -> Int? {
+        guard GoNumericKind.floatsAreSupported else { return nil }
+        var cursor = index
+        func at(_ offset: Int) -> UInt8? { offset < bytes.count ? bytes[offset] : nil }
+        var isHexadecimal = false
+        if at(cursor) == 0x30, let prefix = at(cursor + 1) {
+            switch prefix | 0x20 {
+            case 0x78:
+                isHexadecimal = true
+                cursor += 2
+            case 0x62, 0x6F: return nil
+            default: break
+            }
+        }
+        func skipDigits(hexadecimal: Bool) {
+            while let byte = at(cursor),
+                byte == 0x5F || isDigit(byte) || (hexadecimal && escapeDigitValue(byte) != nil)
+            {
+                cursor += 1
+            }
+        }
+        var isFloat = false
+        skipDigits(hexadecimal: isHexadecimal)
+        if at(cursor) == 0x2E {
+            isFloat = true
+            cursor += 1
+            skipDigits(hexadecimal: isHexadecimal)
+        }
+        if let marker = at(cursor), (marker | 0x20) == (isHexadecimal ? 0x70 : 0x65) {
+            isFloat = true
+            cursor += 1
+            if let sign = at(cursor), sign == 0x2B || sign == 0x2D { cursor += 1 }
+            skipDigits(hexadecimal: false)
+        }
+        return isFloat ? cursor : nil
+    }
+
+    /// Go's scanner's errors for a floating-point literal, each where it
+    /// reports it: at the literal, or at the `_` that separates no digits.
+    func validateFloat(_ text: ArraySlice<UInt8>, at start: GoSourcePosition) throws {
+        let literal = Array(text)
+        let isHexadecimal = literal.count >= 2 && literal[0] == 0x30 && (literal[1] | 0x20) == 0x78
+        let exponentMarker: UInt8 = isHexadecimal ? 0x70 : 0x65
+        var cursor = isHexadecimal ? 2 : 0
+        var mantissaDigits = 0
+        while cursor < literal.count, (literal[cursor] | 0x20) != exponentMarker {
+            if literal[cursor] != 0x5F && literal[cursor] != 0x2E { mantissaDigits += 1 }
+            cursor += 1
+        }
+        guard mantissaDigits > 0 else {
+            throw GoDiagnostic(
+                position: start,
+                message: "\(isHexadecimal ? "hexadecimal" : "decimal") literal has no digits")
+        }
+        if cursor < literal.count {
+            let exponentDigits = literal[(cursor + 1)...].filter(isDigit).count
+            guard exponentDigits > 0 else {
+                throw GoDiagnostic(position: start, message: "exponent has no digits")
+            }
+        } else if isHexadecimal {
+            throw GoDiagnostic(
+                position: start, message: "hexadecimal mantissa requires a 'p' exponent")
+        }
+        // A `_` stands between two digits, where the prefix counts as one.
+        var previous: UInt8 = isHexadecimal ? 0x30 : 0x2E
+        var misplaced: Int?
+        for offset in (isHexadecimal ? 2 : 0)..<literal.count where misplaced == nil {
+            let byte = literal[offset]
+            let before = previous
+            if byte == 0x5F {
+                previous = 0x5F
+                if before != 0x30 { misplaced = offset }
+            } else if isDigit(byte) || (isHexadecimal && escapeDigitValue(byte) != nil) {
+                previous = 0x30
+            } else {
+                previous = 0x2E
+                if before == 0x5F { misplaced = offset - 1 }
+            }
+        }
+        if misplaced == nil, previous == 0x5F { misplaced = literal.count - 1 }
+        if let misplaced {
+            throw GoDiagnostic(
+                position: GoSourcePosition(
+                    path: start.path, offset: start.offset + misplaced, line: start.line,
+                    column: start.column + misplaced),
+                message: "'_' must separate successive digits")
+        }
     }
 
     mutating func scanString() throws {
@@ -236,9 +367,10 @@ private struct Scanner {
         throw GoDiagnostic(position: start, message: "string not terminated")
     }
 
-    /// A rune literal, `'a'` or `'\n'`: the code point it names, as the
-    /// integer constant it is. The token is an integer, so everything after
-    /// the lexer sees a number where the source has a character.
+    /// A rune literal, `'a'` or `'\n'`: the code point it names. The token
+    /// is the literal as it is spelled, like every literal the integer token
+    /// cannot stand for: a rune literal is a constant of its own kind, whose
+    /// default type is `rune`. See `GoLiteral`.
     ///
     /// The errors are those of Go's scanner, each where it reports it: one
     /// about what is between the quotes at the character it is about, one
@@ -277,7 +409,8 @@ private struct Scanner {
             throw GoDiagnostic(position: start, message: "more than one character in rune literal")
         }
         advance()
-        tokens.append(GoToken(kind: .integer(Int64(value)), position: start))
+        lastRuneValue = Int64(value)
+        tokens.append(spelledLiteral(from: start))
     }
 
     /// The code point the UTF-8 at `offset` encodes, or nil when it is none.

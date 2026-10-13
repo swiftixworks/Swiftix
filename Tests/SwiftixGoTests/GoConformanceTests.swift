@@ -165,6 +165,30 @@ struct GoConformanceTests {
     @Test func methodValuesOfInterfaces() throws {
         try expectSameOutput(methodValuesOfInterfacesSource, methodValuesOfInterfacesExpected)
     }
+
+    @Test func declarationsForwardedResultsAndDurations() throws {
+        try expectSameOutput(declarationsForwardedResultsAndDurationsSource, declarationsForwardedResultsAndDurationsExpected)
+    }
+
+    @Test func literalsTablesAndBuiltins() throws {
+        try expectSameOutput(literalsTablesAndBuiltinsSource, literalsTablesAndBuiltinsExpected)
+    }
+
+    @Test func typeSwitchesLabelsAndJumps() throws {
+        try expectSameOutput(typeSwitchesLabelsAndJumpsSource, typeSwitchesLabelsAndJumpsExpected)
+    }
+
+    @Test func sortingCallbacksAndLibraryValues() throws {
+        try expectSameOutput(sortingCallbacksAndLibraryValuesSource, sortingCallbacksAndLibraryValuesExpected)
+    }
+
+    @Test func embeddingInAMiddlewareShape() throws {
+        try expectSameOutput(embeddingInAMiddlewareShapeSource, embeddingInAMiddlewareShapeExpected)
+    }
+
+    @Test func sizedIntegersRunesAndConstants() throws {
+        try expectSameOutput(sizedIntegersRunesAndConstantsSource, sizedIntegersRunesAndConstantsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -4279,5 +4303,510 @@ func() int func(int) main.shape func(string, ...string) (string, int)
 > Go|> Go|go|
 broken wrapped: broken 6
 recovered: runtime error: invalid memory address or nil pointer dereference
+
+"""#
+
+private let declarationsForwardedResultsAndDurationsSource = #"""
+package main
+
+import (
+	"fmt"
+	"strconv"
+	"time"
+)
+
+type shape interface{ area() int }
+
+type square struct{ side int }
+
+func (s *square) area() int { return s.side * s.side }
+
+var _ shape = (*square)(nil)
+var _ = register("first")
+var _ = register("second")
+
+var total, label = pair()
+var n, err = strconv.Atoi("42")
+
+type node struct {
+	value int
+	next  link
+}
+
+type link *node
+
+func register(name string) int {
+	fmt.Println("register", name)
+	return len(name)
+}
+
+func pair() (int, string) { return 7, "seven" }
+
+func show(int, string) string { return "shown" }
+
+func (square) kind() string { return "square" }
+
+func wait(d time.Duration, _ int) (time.Duration, string) { return d * 2, d.String() }
+
+func main() {
+	fmt.Println(total, label, n, err)
+	fmt.Println(show(pair()), square{}.kind())
+	fmt.Println(wait(1500*time.Millisecond, 0))
+	var head link = &node{value: 1}
+	head.next = &node{value: 2}
+	fmt.Println(head.value, head.next.value, head.next.next == nil)
+	x := 1
+	x, y := 2, 3
+	fmt.Println(x, y)
+}
+"""#
+
+private let declarationsForwardedResultsAndDurationsExpected = #"""
+register first
+register second
+7 seven 42 <nil>
+shown square
+3s 1.5s
+1 2 true
+2 3
+
+"""#
+
+private let literalsTablesAndBuiltinsSource = #"""
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+type point struct{ x, y int }
+
+type route struct {
+	path    string
+	timeout time.Duration
+	hops    []point
+}
+
+var table = []struct {
+	name string
+	wait time.Duration
+}{
+	{"fast", 10 * time.Millisecond},
+	{"slow", 2 * time.Second},
+}
+
+var routes = map[string]route{
+	"/a": {"/a", time.Second, []point{{1, 2}, {3, 4}}},
+	"/b": {path: "/b", hops: []point{{5, 6}}},
+}
+
+const least = min(3, 1, 2)
+
+func bounds(ps []point) (point, point) {
+	lo, hi := ps[0], ps[0]
+	for _, p := range ps {
+		lo = point{min(lo.x, p.x), min(lo.y, p.y)}
+		hi = point{max(hi.x, p.x), max(hi.y, p.y)}
+	}
+	return lo, hi
+}
+
+func describe(lo, hi point) string { return fmt.Sprint(lo, "..", hi) }
+
+func main() {
+	for _, row := range table {
+		fmt.Println(row.name, row.wait, row.wait > time.Second)
+	}
+	fmt.Println(describe(bounds(routes["/a"].hops)), routes["/b"].timeout, least)
+	p := new(point)
+	p.x = 9
+	arr := [3]int{1, 2, 3}
+	q := &arr
+	q[1] = 20
+	set := map[string]struct{}{"k": {}}
+	_, ok := set["k"]
+	fmt.Println(*p, q[1], len(q), ok, any(5), (func())(nil) == nil)
+	grid := [][]int{{1}, {2, 3}}
+	clear(grid[1])
+	fmt.Println(grid)
+	fmt.Println(bounds([]point{{4, 1}, {0, 7}}))
+}
+"""#
+
+private let literalsTablesAndBuiltinsExpected = #"""
+fast 10ms false
+slow 2s true
+{1 2}..{3 4} 0s 1
+{9 0} 20 3 true 5 true
+[[1] [0 0]]
+{0 1} {4 7}
+
+"""#
+
+private let typeSwitchesLabelsAndJumpsSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+type shape interface{ area() int }
+
+type rect struct{ w, h int }
+
+func (r rect) area() int { return r.w * r.h }
+
+type token struct {
+	kind  string
+	value any
+}
+
+func classify(values ...any) (counts map[string]int, total time.Duration) {
+	counts = map[string]int{}
+	for _, v := range values {
+		switch x := v.(type) {
+		case nil:
+			counts["nil"]++
+		case int, byte:
+			counts["number"]++
+		case string:
+			counts["string:"+x]++
+		case time.Duration:
+			total += x
+		case shape:
+			counts[fmt.Sprint("shape", x.area())]++
+		case error:
+			counts[x.Error()]++
+		case []token:
+			counts["tokens"] += len(x)
+		case func() int:
+			counts["func"] += x()
+		default:
+			counts[fmt.Sprintf("%T", x)]++
+		}
+	}
+	return
+}
+
+func scan(text string) []token {
+	var out []token
+outer:
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case c == ' ':
+			continue outer
+		case c == '#':
+			break outer
+		case c >= '0' && c <= '9':
+			out = append(out, token{"digit", int(c - '0')})
+			fallthrough
+		case c == '+':
+			out = append(out, token{kind: "mark"})
+		default:
+			out = append(out, token{"other", string(c)})
+		}
+	}
+	return out
+}
+
+func main() {
+	counts, total := classify(nil, 1, byte(2), "a", time.Second, 500*time.Millisecond,
+		rect{2, 3}, errors.New("bad"), scan("1 +x#y"), func() int { return 4 }, [2]bool{})
+	keys := []string{"nil", "number", "string:a", "shape6", "bad", "tokens", "func", "[2]bool"}
+	for i := range len(keys) {
+		fmt.Print(keys[i], "=", counts[keys[i]], " ")
+	}
+	fmt.Println(total)
+	fmt.Println(scan("7+ a#zz"))
+	n := 0
+retry:
+	n++
+	if n < 3 {
+		goto retry
+	}
+	for range 2 {
+		n *= 2
+	}
+	fmt.Println(n, min(n, 5), max("a", "b"))
+}
+"""#
+
+private let typeSwitchesLabelsAndJumpsExpected = #"""
+nil=1 number=2 string:a=1 shape6=1 bad=1 tokens=4 func=4 [2]bool=1 1.5s
+[{digit 7} {mark <nil>} {mark <nil>} {other a}]
+12 5 b
+
+"""#
+
+private let sortingCallbacksAndLibraryValuesSource = #"""
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type entry struct {
+	name string
+	ttl  time.Duration
+}
+
+type byTTL []entry
+
+func (b byTTL) Len() int           { return len(b) }
+func (b byTTL) Less(i, j int) bool { return b[i].ttl < b[j].ttl }
+func (b byTTL) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+
+var once sync.Once
+
+func setup() { fmt.Println("setup") }
+
+func parse(s string) (int, error) { return strconv.Atoi(strings.TrimSpace(s)) }
+
+func main() {
+	entries := []entry{{"c", 3 * time.Second}, {"a", time.Millisecond}, {"b", 2 * time.Minute}, {"d", time.Millisecond}}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name > entries[j].name })
+	fmt.Println(entries)
+	sort.Stable(byTTL(entries))
+	fmt.Println(entries)
+	sort.Sort(sort.Reverse(byTTL(entries)))
+	fmt.Println(entries[0], sort.SearchInts([]int{1, 3, 5, 7}, 5))
+
+	transforms := map[string]func(string) string{"upper": strings.ToUpper, "trim": strings.TrimSpace}
+	names := []string{}
+	for name := range transforms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("%s=%q ", name, transforms[name](" go "))
+	}
+	fmt.Println()
+
+	var wg sync.WaitGroup
+	done := wg.Done
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer done()
+			once.Do(setup)
+		}()
+	}
+	wg.Wait()
+	show := fmt.Println
+	show(parse(" 42 "))
+	show(parse("x"))
+	sleep := time.Sleep
+	sleep(time.Millisecond)
+	fmt.Printf("%T %T\n", show, sleep)
+}
+"""#
+
+private let sortingCallbacksAndLibraryValuesExpected = #"""
+[{d 1000000} {c 3000000000} {b 120000000000} {a 1000000}]
+[{d 1000000} {a 1000000} {c 3000000000} {b 120000000000}]
+{b 120000000000} 2
+trim="go" upper=" GO "\#u{20}
+setup
+42 <nil>
+0 strconv.Atoi: parsing "x": invalid syntax
+func(...interface {}) (int, error) func(time.Duration)
+
+"""#
+
+private let embeddingInAMiddlewareShapeSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+)
+
+type Handler interface {
+	Serve(path string) (string, error)
+}
+
+type Named interface {
+	Handler
+	Name() string
+}
+
+type base struct {
+	name string `json:"name"`
+	hits int
+}
+
+func (b *base) hit() int    { b.hits++; return b.hits }
+func (b base) Name() string { return b.name }
+
+type cache struct {
+	sync.Mutex
+	base
+	ttl   time.Duration
+	items map[string]string
+}
+
+func (c *cache) Serve(path string) (string, error) {
+	c.Lock()
+	defer c.Unlock()
+	c.hit()
+	if v, ok := c.items[path]; ok {
+		return v, nil
+	}
+	return "", errors.New(`no "` + path + `"`)
+}
+
+type logging struct {
+	Named
+	lines []string
+}
+
+func (l *logging) Serve(path string) (string, error) {
+	v, err := l.Named.Serve(path)
+	l.lines = append(l.lines, fmt.Sprint(l.Name(), " ", path, " ", err == nil))
+	return v, err
+}
+
+var _ Named = (*cache)(nil)
+var _ Handler = (*logging)(nil)
+
+func main() {
+	c := &cache{base: base{name: "main"}, ttl: 90 * time.Second, items: map[string]string{"/a": "A", "/b": "B"}}
+	l := &logging{Named: c}
+	var h Handler = l
+	for _, path := range []string{"/b", "/x", "/a"} {
+		fmt.Println(h.Serve(path))
+	}
+	sort.Strings(l.lines)
+	fmt.Println(l.lines, c.hits, c.ttl, c.Name(), l.Name())
+	switch v := h.(type) {
+	case *cache:
+		fmt.Println("cache", v.hits)
+	case Named:
+		fmt.Printf("named %s %T\n", v.Name(), v)
+	}
+	fmt.Printf("%+v\n", struct {
+		base
+		n int
+	}{base{"x", 1}, 2})
+}
+"""#
+
+private let embeddingInAMiddlewareShapeExpected = #"""
+B <nil>
+ no "/x"
+A <nil>
+[main /a true main /b true main /x false] 3 1m30s main main
+named main *main.logging
+{base:{name:x hits:1} n:2}
+
+"""#
+
+private let sizedIntegersRunesAndConstantsSource = #"""
+package main
+
+import (
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+type Level uint8
+
+const (
+	Debug Level = iota
+	Info
+	Warn
+)
+
+func (l Level) String() string { return [...]string{"debug", "info", "warn"}[l] }
+
+type stats struct {
+	seen  map[rune]int
+	bytes uint64
+	limit time.Duration
+}
+
+func hash(s string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func classify(v any) string {
+	switch x := v.(type) {
+	case rune:
+		return "rune " + string(x)
+	case uint8:
+		return "byte " + strconv.Itoa(int(x))
+	case int64, uint64:
+		return fmt.Sprintf("wide %v", x)
+	case Level:
+		return "level " + x.String()
+	case time.Duration:
+		return "wait " + x.String()
+	}
+	return fmt.Sprintf("%T", v)
+}
+
+func main() {
+	text := "héllo, 世界!"
+	st := stats{seen: map[rune]int{}, limit: 1500 * time.Millisecond}
+	var letters []rune
+	for i, r := range text {
+		st.seen[r]++
+		st.bytes += uint64(utf8.RuneLen(r))
+		if unicode.IsLetter(r) {
+			letters = append(letters, unicode.ToUpper(r))
+		}
+		if r == ',' {
+			fmt.Println("comma at", i)
+		}
+	}
+	sort.Slice(letters, func(i, j int) bool { return letters[i] > letters[j] })
+	fmt.Println(string(letters), len(letters), st.bytes, utf8.RuneCountInString(text), strings.IndexRune(text, '世'))
+	low, high := int8(-128), uint8(250)
+	fmt.Println(hash("swiftix"), hash(text)%1000, uint64(math.MaxUint32)<<8, low-1, high+10)
+	var x int64 = math.MinInt64
+	var u uint64 = 1<<64 - 1
+	n, err := strconv.ParseInt("-9223372036854775808", 10, 64)
+	fmt.Println(x == n, err, u, u>>60, u/3, -x == x, 'a'+1, min(Warn, Info), max('a', 'b'))
+	for _, v := range []any{'x', byte(7), int64(-5), u, Warn, st.limit, uint16(1), 3} {
+		fmt.Print(classify(v), "; ")
+	}
+	fmt.Println()
+	fmt.Printf("%T %T %v %d %c %U %08b %x\n", 'a', text[0], Info, Warn, 0x4e16, '世', Level(5), u)
+	grid := [...]uint16{2: 500, 0: 65535}
+	grid[0]++
+	fmt.Println(grid, len(grid), [128]bool{'a': true}['a'])
+}
+"""#
+
+private let sizedIntegersRunesAndConstantsExpected = #"""
+comma at 6
+界世ÉOLLH 7 15 10 8
+4011875009 517 1099511627520 127 4
+true <nil> 18446744073709551615 15 6148914691236517205 true 98 info 98
+rune x; byte 7; wide -5; wide 18446744073709551615; level warn; wait 1.5s; uint16; int;\#u{20}
+int32 uint8 info 2 世 U+4E16 00000101 ffffffffffffffff
+[0 0 500] 3 true
 
 """#

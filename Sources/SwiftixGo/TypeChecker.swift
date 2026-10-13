@@ -123,6 +123,9 @@ public struct GoTypedPackage: Sendable, Equatable {
     /// The variables of the functions around it that each function literal
     /// reads or assigns, by the literal's name, in the order it meets them.
     var literalCaptures: [String: [String]] = [:]
+    /// What the checker found out about the numbers of the package, for
+    /// the lowerer: see `GoNumberFacts`.
+    var numberFacts = GoNumberFacts()
 
     public init(
         name: String,
@@ -185,7 +188,9 @@ public enum GoTypeChecker {
             try GoNames.resolve(program: GoNames.resolve(files))
         }
         return try GoNames.reporting(on: resolved) {
-            try check(resolved: resolved, availablePackages: availablePackages)
+            try GoNumberLedger.recording {
+                try check(resolved: resolved, availablePackages: availablePackages)
+            }
         }
     }
 
@@ -392,6 +397,10 @@ public enum GoTypeChecker {
                         isConstant: declaration.isConstant,
                         constantValue: declaration.isConstant
                             ? checker.untypedConstantValue(expression) : nil)
+                    if declaration.isConstant {
+                        globalBindings[declaration.name]?.constant = try checker.constant(
+                            of: expression)
+                    }
                     madeProgress = true
                 } catch let diagnostic as GoDiagnostic where undeclaredName(in: diagnostic) != nil {
                     next.append(declaration)
@@ -408,10 +417,22 @@ public enum GoTypeChecker {
             }
             unresolved = next
         }
+        try resolveConstants(globals, bindings: &globalBindings) { declaration, bindings in
+            FunctionChecker(
+                importedPaths: importedPathsByGlobal[declaration.name] ?? [],
+                functionSignatures: functionSignatures,
+                methodSignatures: methodSignatures,
+                typeDefinitions: typeDefinitions,
+                availableTypes: availableTypes,
+                globalBindings: bindings)
+        }
         for declaration in globals {
             guard let expression = declaration.expression,
                 let binding = globalBindings[declaration.name]
             else { continue }
+            // An untyped constant is an exact value, checked where it was
+            // given one; it need not be a value of its default type.
+            if declaration.explicitType == nil, binding.constant != nil { continue }
             var checker = FunctionChecker(
                 importedPaths: importedPathsByGlobal[declaration.name] ?? [],
                 functionSignatures: functionSignatures,
@@ -423,6 +444,7 @@ public enum GoTypeChecker {
             try checker.requireInitializer(
                 expression, assignableTo: binding.type, isConstant: declaration.isConstant)
         }
+        forgetConstantNodes(globals, bindings: globalBindings)
         try checkBranches(ofInitializersIn: files)
 
         if first.packageName == "main", functionSignatures["main"] == nil {
@@ -567,6 +589,7 @@ public enum GoTypeChecker {
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             default:
+                if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
                     throw GoDiagnostic(
                         position: position,
@@ -750,7 +773,7 @@ public enum GoTypeChecker {
     }
 }
 
-private struct FunctionSignature {
+struct FunctionSignature {
     let parameters: [GoType]
     let results: [GoType]
 }
@@ -761,9 +784,13 @@ private func builtinErrorType() -> GoType {
     ])
 }
 
-private struct Binding {
+struct Binding {
     let type: GoType
     let isConstant: Bool
+    /// The value of a numeric constant, typed or untyped, with which the
+    /// constant expressions that name it are folded. Behind a reference: a
+    /// binding is copied in many frames, and the value is seldom there.
+    var constantBox: GoConstantBox? = nil
     /// Value of a constant declared without a type from an untyped integer
     /// constant expression. Such a name stays usable with any integer type.
     var constantValue: Int64? = nil
@@ -774,12 +801,12 @@ private struct Binding {
     var isUsed = false
 }
 
-private enum SwitchCaseConstant: Hashable {
+enum SwitchCaseConstant: Hashable {
     case int(Int64)
     case string(String)
 }
 
-private struct FunctionChecker {
+struct FunctionChecker {
     let importedPaths: Set<String>
     let functionSignatures: [String: FunctionSignature]
     let methodSignatures: [String: FunctionSignature]
@@ -809,6 +836,10 @@ private struct FunctionChecker {
     /// The variables of the functions around it that each literal reads or
     /// assigns. The compiler passes the literal a pointer to each.
     var captures: [String: [String]] = [:]
+    /// The types of the operands of the binary operator being typed, when
+    /// the rule for numbers found them and left the operator to the rest.
+    var operandTypesInHand: (left: GoType, right: GoType)?
+
     init(
         importedPaths: Set<String>,
         functionSignatures: [String: FunctionSignature],
@@ -1550,6 +1581,9 @@ private struct FunctionChecker {
             isConstant: isConstant,
             constantValue: isConstant && declared == nil
                 ? expression.flatMap { untypedConstantValue($0) } : nil)
+        try noteDeclaration(
+            name, declared: declared, expression: expression, isConstant: isConstant,
+            position: position)
     }
 
     private mutating func checkAssignmentStatement(_ statement: GoStatement) throws {
@@ -1953,7 +1987,7 @@ private struct FunctionChecker {
         switch rangedType(collectionType) {
         case .array(_, let element): elementType = element
         case .slice(let element): elementType = element
-        case .string: elementType = .int
+        case .string: elementType = GoPredeclared.rune
         case .map(_, let value): elementType = value
         case .channel(let direction, let element):
             guard direction != .sendOnly else {
@@ -2285,7 +2319,7 @@ private struct FunctionChecker {
             return try callType(
                 of: expression, callee: callee, arguments: arguments, position: position)
         case .unary: return try typeOfUnary(expression)
-        case .binary: return try typeOfBinary(expression)
+        case .binary: return try numericBinaryType(expression) ?? typeOfBinary(expression)
         }
     }
 
@@ -2295,6 +2329,7 @@ private struct FunctionChecker {
         }
         if name == "true" || name == "false" { return .bool }
         if name == "nil" { return .nilType }
+        if let literal = try literalType(expression) { return literal }
         guard let binding = lookup(name) else {
             // A function of the program is a value of its type.
             if let signature = functionSignatures[name] {
@@ -2309,6 +2344,7 @@ private struct FunctionChecker {
                     ? GoImportName.misuse(ofPackage: name) : Self.undeclaredMessage(name))
         }
         use(name)
+        noteConstantUse(expression, binding)
         return binding.type
     }
 
@@ -2316,6 +2352,7 @@ private struct FunctionChecker {
         guard case .selector(let base, let name, let position) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
+        if let constant = try libraryConstantType(expression) { return constant }
         if case .identifier(let packageName, _) = base,
             importedPaths.contains(packageName),
             GoStandardLibrary.integerConstant(package: packageName, member: name) != nil
@@ -2470,6 +2507,9 @@ private struct FunctionChecker {
         switch unaryOperator {
         case .plus, .minus:
             let operandType = try type(of: operand)
+            if let numeric = try numericUnaryType(expression, operandType: operandType) {
+                return numeric
+            }
             guard isInteger(operandType) else {
                 throw GoDiagnostic(position: position, message: "operator requires integer operand")
             }
@@ -2513,8 +2553,7 @@ private struct FunctionChecker {
         guard case .binary(let left, let binaryOperator, let right, let position) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
-        var leftType = try type(of: left)
-        var rightType = try type(of: right)
+        var (leftType, rightType) = try operandTypes(left, right)
         if leftType != rightType,
             let common = try commonOperandType(
                 left: left, leftType: leftType, right: right, rightType: rightType)
@@ -3860,6 +3899,7 @@ private struct FunctionChecker {
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             default:
+                if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
                     if name.hasPrefix(GoTypeSwitch.guardName) {
                         throw GoDiagnostic(
@@ -3939,6 +3979,8 @@ private struct FunctionChecker {
         case .integer(let value, _):
             return value
         case .identifier(let name, _):
+            // A rune literal is carried as it is spelled.
+            if let rune = GoLiteral.runeValue(name) { return rune }
             return lookup(name)?.constantValue
         case .unary(.plus, let operand, _):
             return untypedConstantValue(operand)
@@ -3992,6 +4034,9 @@ private struct FunctionChecker {
         ofType actual: GoType,
         to expected: GoType
     ) throws -> Bool {
+        if let numeric = try numericAssignable(expression, ofType: actual, to: expected) {
+            return numeric
+        }
         if isAssignable(actual, to: expected) { return true }
         guard isInteger(expected), let value = untypedConstantValue(expression) else {
             return false
@@ -4030,6 +4075,13 @@ private struct FunctionChecker {
         operands: [GoExpression],
         position: GoSourcePosition
     ) throws -> GoType {
+        if let numeric = try numericBitwiseType(
+            bitwiseOperator, operands: operands,
+            of: .bitwise(bitwiseOperator, operands: operands, position: position),
+            position: position)
+        {
+            return numeric
+        }
         let leftType = try type(of: operands[0])
         if bitwiseOperator == .complement {
             guard isInteger(leftType) else {
@@ -4074,6 +4126,7 @@ private struct FunctionChecker {
             default:
                 guard availableTypes.contains(name)
                     || GoPredeclared.unsupportedNumericTypes.contains(name)
+                    || GoPredeclared.numericType(name) != nil
                 else { return nil }
             }
             return try declaredType(.named(name, position: position))
@@ -4104,6 +4157,9 @@ private struct FunctionChecker {
                 message: "conversion to \(target) requires exactly one argument")
         }
         let argument = arguments[0]
+        if let numeric = try numericConversionType(target, argument: argument, at: position) {
+            return numeric
+        }
         let source = try type(of: argument)
         let failure = GoDiagnostic(
             position: argument.position, message: "cannot convert \(source) to type \(target)")
@@ -4228,7 +4284,7 @@ private struct FunctionChecker {
         var parameters: ArraySlice<GoType>
         if case .identifier(let packageName, _) = base,
             lookup(packageName) == nil,
-            importedPaths.contains(packageName),
+            importedPaths.contains(packageName) || importedPackage(named: base) != nil,
             let native = GoStandardLibrary.nativeFunction(package: packageName, member: name)
         {
             function = native
@@ -4274,6 +4330,7 @@ private struct FunctionChecker {
         for argument in operands where try type(of: argument) == .void {
             throw GoDiagnostic(position: argument.position, message: "no value used as value")
         }
+        for argument in operands { try requireDefaultValue(argument) }
     }
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {

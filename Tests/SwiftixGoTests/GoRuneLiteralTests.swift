@@ -1,10 +1,10 @@
 /// Rune literals, `'a'`: the code point of one character, written as itself
 /// or as an escape.
 ///
-/// A rune literal is an untyped constant, and that is all of `rune` there is:
-/// the type `rune` is not one of this dialect, so a variable a literal
-/// initializes is an `int` where Go makes it an `int32`. Its value, and what
-/// it does as a `byte`, an index, or an operand, are Go's.
+/// A rune literal is an untyped constant whose default type is `rune`: a
+/// variable a literal initializes is an `int32`, as in Go (see
+/// `GoSizedIntegerTests`). Its value, and what it does as a `byte`, an
+/// index, or an operand, are Go's.
 ///
 /// What each program prints is what Go 1.24.5 prints for it, and each error
 /// pinned with its place is the first one its compiler reports, copied
@@ -40,13 +40,13 @@ struct GoRuneLiteralTests: GoTestHarness {
         }
     }
 
-    /// The lexer gives a rune literal as the integer it is: nothing after it
-    /// knows how the number was written.
+    /// The lexer gives a rune literal as it is spelled, which says that it
+    /// is one; its value is the code point.
     @Test func aRuneLiteralIsOneToken() throws {
         let tokens = try GoLexer.tokenize(
             GoSourceFile(path: "main.go", text: #"x := 'a' + '\n' - '\x41' * '世'"#))
         let integers = tokens.compactMap { token -> Int64? in
-            if case .integer(let value) = token.kind { return value }
+            if case .identifier(let spelling) = token.kind { return GoLiteral.runeValue(spelling) }
             return nil
         }
 

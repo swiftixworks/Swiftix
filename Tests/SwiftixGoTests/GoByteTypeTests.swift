@@ -167,10 +167,8 @@ struct GoByteTypeTests: GoTestHarness {
     }
 
     @Test func otherNumericTypesAreReportedAsUnsupported() {
-        for name in ["int8", "int16", "int32", "int64", "uint", "uint16", "uint32", "uint64",
-            "uintptr", "float32", "float64", "rune"]
-        {
-            let expected = "type \(name) is not supported; the integer types are int, byte, and uint8"
+        for name in ["float32", "float64", "complex64", "complex128"] {
+            let expected = "type \(name) is not supported; the numeric types are the integer types"
             #expect(goMainDiagnostic("var x \(name)\nfmt.Println(x)") == expected)
             #expect(goMainDiagnostic("fmt.Println(\(name)(1))") == expected)
             #expect(
@@ -179,8 +177,10 @@ struct GoByteTypeTests: GoTestHarness {
         #expect(
             goMainDiagnostic("fmt.Println(1)", declarations: "type byte int")
                 == "cannot redeclare predeclared type byte")
-        // A user declaration still takes the name.
-        #expect(goMainDiagnostic("var x int64 = 3\nfmt.Println(x)", declarations: "type int64 int") == nil)
+        // Every numeric type is predeclared now.
+        #expect(
+            goMainDiagnostic("var x int64 = 3\nfmt.Println(x)", declarations: "type int64 int")
+                == "cannot redeclare predeclared type int64")
     }
 
     @Test func namedIntegerTypesAcceptUntypedConstants() throws {

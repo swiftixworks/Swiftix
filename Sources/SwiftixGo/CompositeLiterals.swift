@@ -276,6 +276,8 @@ private struct LiteralResolver {
         case .integer(let value, _):
             return value
         case .identifier(let name, _):
+            // A rune literal is carried as it is spelled.
+            if let rune = GoLiteral.runeValue(name) { return rune }
             switch local(name) {
             case .constant(let value)?: return constant(value, depth: depth + 1)
             case .variable?: return nil

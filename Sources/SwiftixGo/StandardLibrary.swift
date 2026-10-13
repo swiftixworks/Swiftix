@@ -33,6 +33,7 @@ enum GoStandardLibrary {
         "fmt", "testing", "time", "sync", "runtime",
         "context", "errors", "io", "net", "net/http", "os", "sort", "strconv", "strings",
         "swiftix/userland",
+        "math", "unicode", "unicode/utf8",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -253,7 +254,7 @@ extension GoStandardLibrary {
                 symbol: "$time.Unix", goName: "time.Unix", parameters: [.int, .int],
                 results: [GoPredeclared.time])
         default:
-            return nil
+            return GoNumberLibrary.nativeFunction(package: package, member: member)
         }
     }
 
@@ -352,6 +353,7 @@ extension GoStandardLibrary {
             || name == GoPredeclared.requireValue
             || name.hasPrefix(GoPredeclared.liveResults)
             || GoLibraryTypes.nativeCallNames.contains(name)
+            || GoNumberLibrary.isCallName(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(
@@ -476,22 +478,26 @@ enum GoPredeclared {
 
     /// The type a predeclared name denotes when it is not a `GoType` case.
     static func namedType(_ name: String) -> GoType? {
-        name == "byte" || name == "uint8" ? byte : nil
+        numericType(name)
     }
 
     /// Underlying type of a predeclared named type.
     static func underlying(of name: String) -> GoType? {
-        name == "byte" ? .int : GoLibraryTypes.underlying(of: name)
+        // An integer of any size is held as an `int` is. A floating-point
+        // type is its own underlying type: it is no integer.
+        GoNumericKind(typeName: name).flatMap { $0.isInteger ? .int : nil }
+            ?? GoLibraryTypes.underlying(of: name)
     }
 
     /// Go numeric types this toolchain does not implement.
-    static let unsupportedNumericTypes: Set<String> = [
-        "int8", "int16", "int32", "int64", "uint", "uint16", "uint32", "uint64", "uintptr",
-        "float32", "float64", "complex64", "complex128", "rune",
-    ]
+    static let unsupportedNumericTypes: Set<String> =
+        GoNumericKind.floatsAreSupported
+        ? ["complex64", "complex128"] : ["float32", "float64", "complex64", "complex128"]
 
     static func unsupportedTypeMessage(_ name: String) -> String {
-        "type \(name) is not supported; the integer types are int, byte, and uint8"
+        GoNumericKind.floatsAreSupported
+            ? "type \(name) is not supported; the numeric types are the integer and floating-point types"
+            : "type \(name) is not supported; the numeric types are the integer types"
     }
 
     /// Whether `type` is `byte` or a named type defined in terms of it.

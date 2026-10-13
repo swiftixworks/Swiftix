@@ -16,6 +16,8 @@
 /// The encoding is prefix notation, one character per kind:
 ///
 ///     i int      b uint8     s string     t bool
+///     j k l m int8 int16 int32 int64      u v w x uint uint16 uint32 uint64
+///     p uintptr  f float32   d float64
 ///     e error    a interface {}           I<n>:<text> another interface
 ///     [T slice   A<n>;T array             MKV map       *T pointer
 ///     S<n>;(<n>:<field>T)... struct       N<n>:<name> named type
@@ -30,6 +32,8 @@
 indirect enum GoRuntimeType: Equatable, Sendable {
     case integer
     case byte
+    /// A numeric type besides `int` and `uint8`.
+    case number(GoNumberKind)
     case string
     case boolean
     /// The `error` interface.
@@ -115,6 +119,7 @@ struct GoTypeDescriptor: Equatable, Sendable {
         switch type {
         case .integer: return "int"
         case .byte: return byteName
+        case .number(let kind): return kind.name
         case .string: return "string"
         case .boolean: return "bool"
         case .error: return "error"
@@ -166,6 +171,9 @@ struct GoTypeDescriptor: Equatable, Sendable {
             case "byte": return "b"
             default: break
             }
+            if let kind = GoNumberKind(name: name) {
+                return String(Unicode.Scalar(kind.rawValue))
+            }
             if name.hasPrefix("*") { return "*" + encoded(name.dropFirst()) }
             return "N\(name.utf8.count):" + name
         }
@@ -211,6 +219,7 @@ struct GoTypeDescriptor: Equatable, Sendable {
         case "unknown", "": return nil
         default: break
         }
+        if let kind = GoNumberKind(name: typeName[...]) { return .number(kind) }
         if typeName.hasPrefix("*") {
             return dynamicType(named: String(typeName.dropFirst())).map { .pointer($0) }
         }
@@ -349,7 +358,7 @@ struct GoTypeDescriptor: Equatable, Sendable {
                 index += 1
                 return type().map { .channel(direction: direction, element: $0) }
             default:
-                return nil
+                return GoNumberKind(rawValue: kind).map { .number($0) }
             }
         }
     }

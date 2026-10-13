@@ -78,6 +78,7 @@ enum GoNative {
         case nil: return "zero"
         case .integer?: return "int"
         case .byte?: return "uint8"
+        case .number(let kind)?: return kind.name
         case .string?: return "string"
         case .boolean?: return "bool"
         case .error?, .interface?: return "interface"

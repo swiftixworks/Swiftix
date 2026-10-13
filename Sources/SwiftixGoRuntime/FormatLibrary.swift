@@ -347,6 +347,28 @@ enum GoFormat {
         }
     }
 
+    /// An unsigned integer too large for `integer`, under `directive`: one
+    /// of 64 bits with the high bit set. It names no code point.
+    static func wide(_ value: UInt64, _ directive: Directive) -> String? {
+        switch directive.verb {
+        case "v" where directive.goSyntax:
+            var hexadecimal = directive
+            hexadecimal.sharp = true
+            return digits(magnitude: value, negative: false, base: 16, hexadecimal)
+        case "v", "d": return digits(magnitude: value, negative: false, base: 10, directive)
+        case "b": return digits(magnitude: value, negative: false, base: 2, directive)
+        case "o", "O": return digits(magnitude: value, negative: false, base: 8, directive)
+        case "x", "X": return digits(magnitude: value, negative: false, base: 16, directive)
+        case "c": return pad("\u{FFFD}", directive)
+        case "q": return pad(quote("\u{FFFD}" as Unicode.Scalar, asciiOnly: directive.plus), directive)
+        case "U":
+            var spaces = directive
+            spaces.zero = false
+            return pad("U+" + String(value, radix: 16, uppercase: true), spaces)
+        default: return nil
+        }
+    }
+
     /// A string under `directive`, or nil when the verb does not apply.
     static func string(_ value: String, _ directive: Directive) -> String? {
         switch directive.verb {

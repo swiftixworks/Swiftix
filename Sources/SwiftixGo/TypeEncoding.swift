@@ -72,6 +72,7 @@ struct GoTypeEncoder {
         case .void, .nilType: return "a"
         case .named(let name):
             if name == "byte" { return "b" }
+            if let code = GoNumericKind(typeName: name)?.descriptorCode { return code }
             // A library type has no definition here and prints by name.
             guard underlying(of: name) != nil else { return "O" + counted(name) }
             if reached.insert(name).inserted { pending.append(name) }

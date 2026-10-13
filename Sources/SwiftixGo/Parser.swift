@@ -1616,7 +1616,8 @@ private struct Parser {
         var expression = try parsePrimary()
         while true {
             if allowCompositeLiteral, check(.leftBrace),
-                case .identifier(let typeName, let typePosition) = expression
+                case .identifier(let typeName, let typePosition) = expression,
+                !GoLiteral.isSpelling(typeName)
             {
                 expression = try parseCompositeLiteral(
                     type: .named(typeName, position: typePosition))
@@ -1932,7 +1933,7 @@ private struct Parser {
 
     mutating func expectIdentifier(message: String) throws -> String {
         guard case .identifier(let name) = current.kind,
-            !GoBitwiseOperator.isOperatorSpelling(name)
+            !GoBitwiseOperator.isOperatorSpelling(name), !GoLiteral.isSpelling(name)
         else { throw diagnostic(message) }
         advance()
         return name
