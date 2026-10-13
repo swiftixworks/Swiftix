@@ -86,7 +86,13 @@ enum GoNumericKind: String, CaseIterable, Sendable {
 
     /// Whether this is a type the dialect had before the sized types: what
     /// is compiled for it must stay what it was.
-    var isOriginal: Bool { self == .int || self == .uint8 }
+    ///
+    /// `int64` is one of them in all but name: it is held and computed
+    /// exactly as `int` is, like any type a program defined over `int`
+    /// before, so a constant of it is computed as one of `int` was. That
+    /// keeps `time.Duration`, which is defined over it, compiled as it was
+    /// when it was defined over `int`.
+    var isOriginal: Bool { self == .int || self == .uint8 || self == .int64 }
 
     /// The call that brings a 64-bit result back into the range of a type
     /// narrower than 64 bits, or nil when every 64-bit value is one of the

@@ -15,8 +15,7 @@
 /// runtime provides them (`GoLibraryMethods` in `SwiftixGoRuntime`). `fmt`
 /// prints it by the text of its `String` without calling a function.
 ///
-/// In Go the type is defined over `int64`. Here it is over `int`, which is
-/// 64 bits wide as well.
+/// The type is defined over `int64`, as in Go.
 enum GoLibraryTypes {
     static let durationName = "time.Duration"
     static let duration = GoType.named(durationName)
@@ -25,7 +24,7 @@ enum GoLibraryTypes {
     /// library type with an underlying type. `time.Time` and `os.File` are
     /// opaque and have none.
     static func underlying(of name: String) -> GoType? {
-        name == durationName ? .int : nil
+        name == durationName ? GoNumericKind.int64.type : nil
     }
 
     /// The library type `package.member` names when it is one a value
@@ -120,14 +119,15 @@ enum GoLibraryTypes {
     ]
 
     /// Native methods of `time.Duration`. The receiver is the first
-    /// parameter. Go gives `Nanoseconds`, `Microseconds`, and `Milliseconds`
-    /// as `int64`, which is `int` here.
+    /// parameter. `Nanoseconds`, `Microseconds`, and `Milliseconds` give an
+    /// `int64`, as in Go.
     static func durationMethod(_ member: String) -> GoNativeFunction? {
         let parameters: [GoType]
         let result: GoType
         switch member {
         case "String": (parameters, result) = ([duration], .string)
-        case "Nanoseconds", "Microseconds", "Milliseconds": (parameters, result) = ([duration], .int)
+        case "Nanoseconds", "Microseconds", "Milliseconds":
+            (parameters, result) = ([duration], GoNumericKind.int64.type)
         case "Round", "Truncate": (parameters, result) = ([duration, duration], duration)
         case "Abs": (parameters, result) = ([duration], duration)
         default: return nil

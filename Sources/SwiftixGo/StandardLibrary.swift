@@ -252,7 +252,8 @@ extension GoStandardLibrary {
                 parameters: [.string], results: [GoLibraryTypes.duration, failure])
         case ("time", "Unix"):
             return GoNativeFunction(
-                symbol: "$time.Unix", goName: "time.Unix", parameters: [.int, .int],
+                symbol: "$time.Unix", goName: "time.Unix",
+                parameters: [GoNumericKind.int64.type, GoNumericKind.int64.type],
                 results: [GoPredeclared.time])
         case ("http", _):
             return httpNativeFunction(member)
@@ -279,7 +280,8 @@ extension GoStandardLibrary {
         let parameters: [GoType]
         let result: GoType
         switch member {
-        case "Unix", "UnixMilli", "UnixNano": (parameters, result) = ([time], .int)
+        case "Unix", "UnixMilli", "UnixNano":
+            (parameters, result) = ([time], GoNumericKind.int64.type)
         case "Sub": (parameters, result) = ([time, time], duration)
         case "Add": (parameters, result) = ([time, duration], time)
         case "Before", "After", "Equal": (parameters, result) = ([time, time], .bool)

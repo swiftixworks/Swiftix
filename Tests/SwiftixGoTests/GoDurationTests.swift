@@ -1505,13 +1505,13 @@ struct GoDurationTests: GoTestHarness {
         #expect(executable.functions.map(\.name) == ["main"])
         #expect(
             boxes == [
-                "$TN13:time.Duration\n13:time.Durationi",
-                "$TN13:time.Duration\n13:time.Durationi",
-                "$T[N13:time.Duration\n13:time.Durationi",
+                "$TN13:time.Duration\n13:time.Durationm",
+                "$TN13:time.Duration\n13:time.Durationm",
+                "$T[N13:time.Duration\n13:time.Durationm",
             ])
         let descriptor = try #require(GoTypeDescriptor(typeName: boxes[0]))
         #expect(descriptor.type == .named("time.Duration"))
-        #expect(descriptor.underlying(descriptor.type) == .integer)
+        #expect(descriptor.underlying(descriptor.type) == .number(.int64))
         #expect(GoTypeDescriptor.name(of: descriptor.type) == "time.Duration")
         #expect(GoTypeDescriptor.methodOwner(ofTypeName: boxes[0]) == "time.Duration")
 

@@ -40,7 +40,7 @@ type Response struct {
 
 	// ContentLength is the length of the body, or -1 when the header
 	// does not say.
-	ContentLength int
+	ContentLength int64
 
 	// TransferEncoding is ["chunked"] for a body that came in chunks.
 	TransferEncoding []string
@@ -329,7 +329,7 @@ func outgoingLength(r *Request) int {
 		return 0
 	}
 	if r.ContentLength != 0 {
-		return r.ContentLength
+		return int(r.ContentLength)
 	}
 	return -1
 }
@@ -669,7 +669,7 @@ func readResponse(r *connReader, req *Request) (*Response, error) {
 	if err != nil {
 		return nil, transportError(err)
 	}
-	resp.ContentLength = t.contentLength
+	resp.ContentLength = int64(t.contentLength)
 	resp.Close = t.closing
 	noBodyExpected := t.requestMethod == "HEAD" || !bodyAllowedForStatus(resp.StatusCode)
 	switch {
@@ -957,7 +957,7 @@ type Request struct {
 
 	// ContentLength is the length of the body, -1 when it is not known,
 	// and 0 when there is none.
-	ContentLength int
+	ContentLength int64
 
 	// TransferEncoding is ["chunked"] for a body in chunks.
 	TransferEncoding []string
@@ -1186,7 +1186,7 @@ func NewRequest(method, target string, body io.Reader) (*Request, error) {
 		}
 		req.ContentLength = -1
 		if sr, ok := body.(*strings.Reader); ok {
-			req.ContentLength = sr.Len()
+			req.ContentLength = int64(sr.Len())
 			snapshot := *sr
 			req.GetBody = func() (io.ReadCloser, error) {
 				r := snapshot
@@ -2479,7 +2479,7 @@ func parseRequest(line string, r *connReader) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.ContentLength = t.contentLength
+	req.ContentLength = int64(t.contentLength)
 	req.Close = t.closing
 	switch {
 	case t.chunked:
@@ -2855,7 +2855,7 @@ func (w *response) sendHeader(p []byte) {
 	}
 
 	if !header.has("Date") {
-		date = nethttp.formatTime(time.Now().Unix(), 0)
+		date = nethttp.formatTime(int(time.Now().Unix()), 0)
 	}
 
 	if hasCL && hasTE && te != "identity" {
@@ -3235,7 +3235,7 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 // logf reports what the server cannot tell a client, on standard error
 // after the time, as Go's log package writes it.
 func (srv *Server) logf(format string, args ...any) {
-	fmt.Fprintln(os.Stderr, nethttp.formatTime(time.Now().Unix(), 1)+" "+fmt.Sprintf(format, args...))
+	fmt.Fprintln(os.Stderr, nethttp.formatTime(int(time.Now().Unix()), 1)+" "+fmt.Sprintf(format, args...))
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
