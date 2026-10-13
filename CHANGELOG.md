@@ -20,6 +20,11 @@ format, behavior and platform changes are recorded here.
   Go's verbs, flags, width, precision, and markers for a mistake. `%#v`, `%T`,
   `%p`, and argument indexes are not implemented and render as Go's bad-verb
   markers; see "Formatting" in `docs/go-toolchain.md`.
+- Swiftix Go `strings.ToUpper`, `strings.ToLower`, `strings.Fields`,
+  `strings.TrimPrefix`, and `strings.TrimSuffix`. Case mapping and the
+  printable test of `%q` use Go 1.24's Unicode 15.0.0 tables
+  (`Scripts/generate-go-unicode-tables.go`), so they do not vary with the
+  host's Unicode version.
 - `append(slice, values...)`: a slice, or a string for a `[]byte`, as the
   final argument of `append`, appended natively. `gofmt` and `gofmt -r` print
   and match the spread.

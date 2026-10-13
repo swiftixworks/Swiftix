@@ -27,6 +27,11 @@ enum GoNative {
         "$errors.New": 1,
         "$copy": 2,
         "$append": 3,
+        "$strings.ToUpper": 1,
+        "$strings.ToLower": 1,
+        "$strings.Fields": 1,
+        "$strings.TrimPrefix": 2,
+        "$strings.TrimSuffix": 2,
     ]
 
     /// Reserved call names of the `time` natives, with their operand counts.

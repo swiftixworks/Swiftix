@@ -144,6 +144,18 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$errors.New", goName: "errors.New", parameters: [.string],
                 results: [failure])
+        case ("strings", "ToUpper"), ("strings", "ToLower"):
+            return GoNativeFunction(
+                symbol: "$strings.\(member)", goName: "strings.\(member)",
+                parameters: [.string], results: [.string])
+        case ("strings", "Fields"):
+            return GoNativeFunction(
+                symbol: "$strings.Fields", goName: "strings.Fields",
+                parameters: [.string], results: [.slice(.string)])
+        case ("strings", "TrimPrefix"), ("strings", "TrimSuffix"):
+            return GoNativeFunction(
+                symbol: "$strings.\(member)", goName: "strings.\(member)",
+                parameters: [.string, .string], results: [.string])
         case ("fmt", "Fprint"):
             return GoNativeFunction(
                 symbol: "$fmt.Fprint", goName: "fmt.Fprint", parameters: [file],
@@ -309,6 +321,8 @@ extension GoStandardLibrary {
                 "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
                 "$fmt.Fprint", "$fmt.Fprintln",
                 "$fmt.Sprintf", "$fmt.Errorf", "$fmt.Printf", "$fmt.Fprintf",
+                "$strings.ToUpper", "$strings.ToLower", "$strings.Fields",
+                "$strings.TrimPrefix", "$strings.TrimSuffix",
                 "$os.File.Write", "$os.File.WriteString", "$os.File.Read",
                 "$os.ReadFile", "$os.WriteFile",
                 "$os.Open", "$os.Create", "$os.OpenFile", "$os.Remove", "$os.Rename", "$os.Mkdir",

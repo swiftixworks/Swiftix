@@ -225,7 +225,7 @@ enum GoFormat {
             if text.count < minimum { text = String(repeating: "0", count: minimum - text.count) + text }
             text = "U+" + text
             if directive.sharp, let narrowed = UInt32(exactly: value),
-                let character = Unicode.Scalar(narrowed), isPrintable(character)
+                let character = Unicode.Scalar(narrowed), GoUnicode.isPrint(character)
             {
                 text += " '" + String(Character(character)) + "'"
             }
@@ -295,23 +295,6 @@ enum GoFormat {
         "'" + escaped(scalar, quote: "'", asciiOnly: asciiOnly) + "'"
     }
 
-    /// Go's `unicode.IsPrint`: letters, marks, numbers, punctuation, symbols,
-    /// and the ASCII space.
-    static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
-        if scalar == " " { return true }
-        switch scalar.properties.generalCategory {
-        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
-            .nonspacingMark, .spacingMark, .enclosingMark,
-            .decimalNumber, .letterNumber, .otherNumber,
-            .connectorPunctuation, .dashPunctuation, .openPunctuation, .closePunctuation,
-            .initialPunctuation, .finalPunctuation, .otherPunctuation,
-            .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
-            return true
-        default:
-            return false
-        }
-    }
-
     // MARK: - Helpers
 
     /// The code point `value` names, or U+FFFD when it names none.
@@ -359,7 +342,7 @@ enum GoFormat {
         case "\u{0B}": return "\\v"
         default: break
         }
-        if scalar.isASCII ? isPrintable(scalar) : (!asciiOnly && isPrintable(scalar)) {
+        if scalar.isASCII ? GoUnicode.isPrint(scalar) : (!asciiOnly && GoUnicode.isPrint(scalar)) {
             return String(Character(scalar))
         }
         let hex = String(scalar.value, radix: 16)

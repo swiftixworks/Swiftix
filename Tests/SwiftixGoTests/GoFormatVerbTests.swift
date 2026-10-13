@@ -387,9 +387,9 @@ struct GoFormatVerbTests: GoTestHarness {
         #expect(GoFormat.quote("é😀", asciiOnly: true) == #""\u00e9\U0001f600""#)
         #expect(GoFormat.quote(Unicode.Scalar("'"), asciiOnly: false) == #"'\''"#)
         #expect(GoFormat.quote(Unicode.Scalar("\""), asciiOnly: false) == #"'"'"#)
-        #expect(GoFormat.isPrintable(" "))
-        #expect(!GoFormat.isPrintable("\u{A0}"))
-        #expect(!GoFormat.isPrintable("\t"))
+        #expect(GoUnicode.isPrint(" "))
+        #expect(!GoUnicode.isPrint("\u{A0}"))
+        #expect(!GoUnicode.isPrint("\t"))
     }
 
     @Test func paddingCountsCodePoints() {

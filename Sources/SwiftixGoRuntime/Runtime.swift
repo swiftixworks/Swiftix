@@ -2759,6 +2759,36 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 stack.append(errorValue(message))
+            case "$strings.ToUpper", "$strings.ToLower":
+                guard case .string(let text) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                // A mapped code point can be longer than the original.
+                let mapped = GoStrings.mapped(text, toUpper: name == "$strings.ToUpper")
+                guard mapped.utf8.count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                stack.append(.string(mapped))
+            case "$strings.Fields":
+                guard case .string(let text) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                let elements = GoStrings.fields(text).map { GoValue.string($0) }
+                try requireCollectionCount(elements.count, resource: "slice elements")
+                let cell = try heap.allocate(.array(elements))
+                stack.append(
+                    .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell), start: 0, length: elements.count,
+                            capacity: elements.count, zeroValue: .string(""))))
+            case "$strings.TrimPrefix", "$strings.TrimSuffix":
+                guard case .string(let affix) = try pop(&stack),
+                    case .string(let text) = try pop(&stack)
+                else { throw GoRuntimeError.typeMismatch }
+                stack.append(
+                    .string(
+                        name == "$strings.TrimPrefix"
+                            ? GoStrings.trimPrefix(text, affix) : GoStrings.trimSuffix(text, affix)))
             case "$append":
                 var zero = try pop(&stack)
                 let values = try sourceElements(try pop(&stack))

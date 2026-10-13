@@ -1,4 +1,5 @@
-/// Native implementations of the supported Go `strings` functions.
+/// Native implementations of the supported Go `strings` functions, and the Go
+/// `unicode` character functions they and `fmt` rest on.
 ///
 /// Guest byte loops cost several VM instructions per byte, so searching,
 /// splitting, and joining run natively on the UTF-8 bytes with Go semantics.
@@ -138,5 +139,95 @@ enum GoStrings {
             let last = scalars.lastIndex(where: { !isSpace($0) })
         else { return "" }
         return String(scalars[first...last])
+    }
+
+    /// Go's `strings.Fields`: the runs of characters between white space.
+    static func fields(_ s: String) -> [String] {
+        s.unicodeScalars.split(whereSeparator: isSpace).map { String($0) }
+    }
+
+    /// Go's `strings.ToUpper` or `strings.ToLower`: each code point mapped by
+    /// itself, so `ß` stays `ß` and the result can differ in byte length.
+    static func mapped(_ s: String, toUpper: Bool) -> String {
+        var result = String.UnicodeScalarView()
+        for scalar in s.unicodeScalars {
+            result.append(toUpper ? GoUnicode.toUpper(scalar) : GoUnicode.toLower(scalar))
+        }
+        return String(result)
+    }
+
+    /// Go's `strings.TrimPrefix`. Both strings are valid UTF-8, so a byte
+    /// prefix ends on a character boundary.
+    static func trimPrefix(_ s: String, _ prefix: String) -> String {
+        guard s.utf8.starts(with: prefix.utf8) else { return s }
+        return String(decoding: s.utf8.dropFirst(prefix.utf8.count), as: UTF8.self)
+    }
+
+    /// Go's `strings.TrimSuffix`.
+    static func trimSuffix(_ s: String, _ suffix: String) -> String {
+        guard s.utf8.reversed().starts(with: suffix.utf8.reversed()) else { return s }
+        return String(decoding: s.utf8.dropLast(suffix.utf8.count), as: UTF8.self)
+    }
+}
+
+/// Go's `unicode` and `strconv` character functions over `GoUnicodeTables`,
+/// which pins them to the reference Go release instead of the host's Unicode
+/// version.
+enum GoUnicode {
+    /// Go's `unicode.ToUpper`.
+    static func toUpper(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
+        mapped(scalar, lowerCase: false)
+    }
+
+    /// Go's `unicode.ToLower`.
+    static func toLower(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
+        mapped(scalar, lowerCase: true)
+    }
+
+    /// Go's `strconv.IsPrint`: letters, marks, numbers, punctuation, symbols,
+    /// and the ASCII space.
+    static func isPrint(_ scalar: Unicode.Scalar) -> Bool {
+        let ranges = GoUnicodeTables.printableRanges
+        var low = 0
+        var high = ranges.count / 2
+        while low < high {
+            let middle = (low + high) / 2
+            if scalar.value < ranges[middle * 2] {
+                high = middle
+            } else if scalar.value > ranges[middle * 2 + 1] {
+                low = middle + 1
+            } else {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Go's `unicode.to`: a binary search of the case ranges.
+    private static func mapped(_ scalar: Unicode.Scalar, lowerCase: Bool) -> Unicode.Scalar {
+        let ranges = GoUnicodeTables.caseRanges
+        var low = 0
+        var high = ranges.count
+        while low < high {
+            let middle = (low + high) / 2
+            let range = ranges[middle]
+            if scalar.value < range.first {
+                high = middle
+            } else if scalar.value > range.last {
+                low = middle + 1
+            } else {
+                let delta = lowerCase ? range.toLower : range.toUpper
+                let value: UInt32
+                if delta == GoUnicodeTables.alternating {
+                    // A run of upper/lower pairs that starts with an upper
+                    // case letter: even offsets are upper, odd ones lower.
+                    value = range.first + (((scalar.value - range.first) & ~1) | (lowerCase ? 1 : 0))
+                } else {
+                    value = UInt32(Int64(scalar.value) + Int64(delta))
+                }
+                return Unicode.Scalar(value) ?? scalar
+            }
+        }
+        return scalar
     }
 }
