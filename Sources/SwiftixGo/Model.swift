@@ -394,6 +394,46 @@ public indirect enum GoStatement: Sendable, Equatable {
     case selectStatement(cases: [GoSelectCase], position: GoSourcePosition)
 }
 
+extension GoStatement {
+    /// The statements a multi-value `:=` stands for when it reuses variables.
+    ///
+    /// Go lets `n, err := f()` name a variable the same block already
+    /// declares, as long as one name on the left is new: the old variable is
+    /// assigned, not shadowed. That is the declaration of a stand-in for each
+    /// reused name followed by a plain assignment from it. Returns nil when
+    /// no name in `declared` is reused, and when none is new, which stays the
+    /// redeclaration error of an ordinary declaration.
+    static func redeclaration(
+        names: [String],
+        expression: GoExpression,
+        position: GoSourcePosition,
+        declared: Set<String>
+    ) -> [GoStatement]? {
+        let named = names.filter { $0 != "_" }
+        let reused = Set(named.filter { declared.contains($0) })
+        guard !reused.isEmpty, Set(named).count == named.count,
+            named.contains(where: { !reused.contains($0) })
+        else { return nil }
+        // `$` cannot start a Go identifier, so a stand-in never meets a
+        // program name; the offset keeps two statements of one block apart.
+        func standIn(_ name: String) -> String { "$redeclared.\(position.offset).\(name)" }
+        var statements = [
+            GoStatement.multiDeclaration(
+                names: names.map { reused.contains($0) ? standIn($0) : $0 },
+                expression: expression,
+                position: position)
+        ]
+        for name in names where reused.contains(name) {
+            statements.append(
+                .assignment(
+                    target: .identifier(name, position: position),
+                    expression: .identifier(standIn(name), position: position),
+                    position: position))
+        }
+        return statements
+    }
+}
+
 public enum GoUnaryOperator: Sendable, Equatable {
     case plus
     case minus

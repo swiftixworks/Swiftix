@@ -1219,7 +1219,7 @@ private struct PackageDependencyAnalyzer {
         case .call(let callee, let arguments, _):
             if case .identifier(let name, _) = callee {
                 switch name {
-                case "len", "cap": return .int
+                case "len", "cap", "copy": return .int
                 case "append":
                     return arguments.first.flatMap { type(of: $0, localTypes: localTypes) }
                 case "make":
@@ -1400,6 +1400,13 @@ private struct IRLowerer {
             try store(value, to: target)
 
         case .multiDeclaration(let names, let expression, let position):
+            if let statements = GoStatement.redeclaration(
+                names: names, expression: expression, position: position,
+                declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
+            {
+                for statement in statements { try lower(statement) }
+                return
+            }
             if case .unary(.receive, let channel, _) = expression,
                 case .channel(_, let elementType) = underlying(try type(of: channel))
             {
@@ -2107,6 +2114,18 @@ private struct IRLowerer {
                 operations.append(.closeChannel(channel: try lower(arguments[0])))
                 return nil
             }
+            if functionName == "copy" {
+                guard arguments.count == 2 else { return nil }
+                let target = try lower(arguments[0])
+                let source = try lower(arguments[1])
+                let destination = allocateRegister()
+                operations.append(
+                    .call(
+                        function: GoPredeclared.copyElements,
+                        arguments: [target, source],
+                        destinations: [destination]))
+                return destination
+            }
             if functionName == "append" {
                 guard let first = arguments.first,
                     case .slice(let elementType) = underlying(try type(of: first))
@@ -2572,15 +2591,15 @@ private struct IRLowerer {
             case .contextWithTimeout:
                 return [.named("context.Context"), .named("context.CancelFunc")]
             case .netDial:
-                return [.named("net.Conn"), .interface([])]
+                return [.named("net.Conn"), GoPredeclared.errorType]
             case .netListen:
-                return [.named("net.Listener"), .interface([])]
+                return [.named("net.Listener"), GoPredeclared.errorType]
             case .netLookupHost:
-                return [.slice(.string), .interface([])]
+                return [.slice(.string), GoPredeclared.errorType]
             case .httpGet:
-                return [.named("http.Response"), .interface([])]
+                return [.named("http.Response"), GoPredeclared.errorType]
             case .strconvAtoi:
-                return [.int, .interface([])]
+                return [.int, GoPredeclared.errorType]
             case .userlandReadInput:
                 return [.string, .int]
             case .userlandReadStdin:
@@ -2597,9 +2616,9 @@ private struct IRLowerer {
         {
             switch (receiverName, member) {
             case ("net.Conn", "Read"), ("net.Conn", "Write"):
-                return [.int, .interface([])]
+                return [.int, GoPredeclared.errorType]
             case ("net.Listener", "Accept"):
-                return [.named("net.Conn"), .interface([])]
+                return [.named("net.Conn"), GoPredeclared.errorType]
             default:
                 break
             }
@@ -2878,6 +2897,15 @@ private struct IRLowerer {
                     package: packageName, member: name)
             {
                 return constant(.int(value))
+            }
+            if let message = standardErrorValue(base: base, member: name) {
+                let destination = allocateRegister()
+                operations.append(
+                    .makeInterface(
+                        destination: destination,
+                        source: constant(.string(message)),
+                        typeName: GoPredeclared.nativeErrorTypeName))
+                return destination
             }
             if let descriptor = standardFileDescriptor(base: base, member: name) {
                 return constant(.int(descriptor))
@@ -3317,6 +3345,9 @@ private struct IRLowerer {
             {
                 return .int
             }
+            if standardErrorValue(base: base, member: name) != nil {
+                return GoPredeclared.errorType
+            }
             if standardFileDescriptor(base: base, member: name) != nil {
                 return GoPredeclared.filePointer
             }
@@ -3383,7 +3414,7 @@ private struct IRLowerer {
                 return native.function.results.first ?? .void
             }
             if case .identifier(let name, _) = callee,
-                name == "len" || name == "cap"
+                name == "len" || name == "cap" || name == "copy"
             {
                 return .int
             }
@@ -3571,8 +3602,17 @@ private struct IRLowerer {
         return GoStandardLibrary.standardFileDescriptor(member: member)
     }
 
-    /// The native library function `callee` denotes, with the `*os.File`
-    /// receiver expression for file methods.
+    /// Message of the package-level `error` value `base.member`, such as
+    /// `io.EOF`, or nil when the selector is not one.
+    func standardErrorValue(base: GoExpression, member: String) -> String? {
+        guard case .identifier(let packageName, _) = base, lookup(packageName) == nil,
+            globalInfos[packageName] == nil
+        else { return nil }
+        return GoStandardLibrary.errorValue(package: packageName, member: member)
+    }
+
+    /// The native library function `callee` denotes, with the receiver
+    /// expression for `*os.File` and `time.Time` methods.
     func nativeFunction(
         for callee: GoExpression
     ) -> (function: GoNativeFunction, receiver: GoExpression?)? {
@@ -3584,8 +3624,8 @@ private struct IRLowerer {
         {
             return (function, nil)
         }
-        if (try? type(of: base)) == GoPredeclared.filePointer,
-            let function = GoStandardLibrary.fileMethod(member)
+        if let receiver = try? type(of: base),
+            let function = GoStandardLibrary.method(of: receiver, named: member)
         {
             return (function, base)
         }

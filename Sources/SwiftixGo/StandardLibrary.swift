@@ -31,7 +31,8 @@ enum GoBuiltinFunction: Sendable, Equatable {
 enum GoStandardLibrary {
     static let supportedPackages = [
         "fmt", "testing", "time", "sync", "runtime",
-        "context", "net", "net/http", "os", "sort", "strconv", "strings", "swiftix/userland",
+        "context", "errors", "io", "net", "net/http", "os", "sort", "strconv", "strings",
+        "swiftix/userland",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -73,6 +74,28 @@ enum GoStandardLibrary {
         case ("time", "Microsecond"): return 1_000
         case ("time", "Millisecond"): return 1_000_000
         case ("time", "Second"): return 1_000_000_000
+        // Linux values, as Go uses on linux. The VM decodes the same numbers
+        // in `GoFiles`.
+        case ("os", "O_RDONLY"): return 0
+        case ("os", "O_WRONLY"): return 1
+        case ("os", "O_RDWR"): return 2
+        case ("os", "O_CREATE"): return 0o100
+        case ("os", "O_EXCL"): return 0o200
+        case ("os", "O_TRUNC"): return 0o1000
+        case ("os", "O_APPEND"): return 0o2000
+        case ("io", "SeekStart"): return 0
+        case ("io", "SeekCurrent"): return 1
+        case ("io", "SeekEnd"): return 2
+        default: return nil
+        }
+    }
+
+    /// The message of a package-level `error` value such as `io.EOF`. Such a
+    /// value is a native error with that message, so it compares equal to the
+    /// error a library call returns for the same condition.
+    static func errorValue(package: String, member: String) -> String? {
+        switch (package, member) {
+        case ("io", "EOF"): return "EOF"
         default: return nil
         }
     }
@@ -111,6 +134,10 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$strconv.Itoa", goName: "strconv.Itoa", parameters: [.int],
                 results: [.string])
+        case ("errors", "New"):
+            return GoNativeFunction(
+                symbol: "$errors.New", goName: "errors.New", parameters: [.string],
+                results: [failure])
         case ("fmt", "Fprint"):
             return GoNativeFunction(
                 symbol: "$fmt.Fprint", goName: "fmt.Fprint", parameters: [file],
@@ -127,9 +154,70 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$os.WriteFile", goName: "os.WriteFile",
                 parameters: [.string, bytes, .int], results: [failure])
+        case ("os", "Open"):
+            return GoNativeFunction(
+                symbol: "$os.Open", goName: "os.Open", parameters: [.string],
+                results: [file, failure])
+        case ("os", "Create"):
+            return GoNativeFunction(
+                symbol: "$os.Create", goName: "os.Create", parameters: [.string],
+                results: [file, failure])
+        case ("os", "OpenFile"):
+            return GoNativeFunction(
+                symbol: "$os.OpenFile", goName: "os.OpenFile",
+                parameters: [.string, .int, .int], results: [file, failure])
+        case ("os", "Remove"):
+            return GoNativeFunction(
+                symbol: "$os.Remove", goName: "os.Remove", parameters: [.string],
+                results: [failure])
+        case ("os", "Rename"):
+            return GoNativeFunction(
+                symbol: "$os.Rename", goName: "os.Rename", parameters: [.string, .string],
+                results: [failure])
+        case ("os", "Mkdir"):
+            return GoNativeFunction(
+                symbol: "$os.Mkdir", goName: "os.Mkdir", parameters: [.string, .int],
+                results: [failure])
+        case ("time", "Now"):
+            return GoNativeFunction(
+                symbol: "$time.Now", goName: "time.Now", parameters: [],
+                results: [GoPredeclared.time])
+        case ("time", "Since"):
+            return GoNativeFunction(
+                symbol: "$time.Since", goName: "time.Since", parameters: [GoPredeclared.time],
+                results: [.int])
+        case ("time", "Unix"):
+            return GoNativeFunction(
+                symbol: "$time.Unix", goName: "time.Unix", parameters: [.int, .int],
+                results: [GoPredeclared.time])
         default:
             return nil
         }
+    }
+
+    /// Native methods of the library types `*os.File` and `time.Time`. The
+    /// receiver is the first parameter.
+    static func method(of receiver: GoType, named member: String) -> GoNativeFunction? {
+        if receiver == GoPredeclared.filePointer { return fileMethod(member) }
+        if receiver == GoPredeclared.time { return timeMethod(member) }
+        return nil
+    }
+
+    /// Native methods of `time.Time`. Durations are `int` nanoseconds.
+    static func timeMethod(_ member: String) -> GoNativeFunction? {
+        let time = GoPredeclared.time
+        let parameters: [GoType]
+        let result: GoType
+        switch member {
+        case "Unix", "UnixMilli", "UnixNano": (parameters, result) = ([time], .int)
+        case "Sub": (parameters, result) = ([time, time], .int)
+        case "Add": (parameters, result) = ([time, .int], time)
+        case "Before", "After", "Equal": (parameters, result) = ([time, time], .bool)
+        default: return nil
+        }
+        return GoNativeFunction(
+            symbol: "$time.Time.\(member)", goName: "time.Time.\(member)",
+            parameters: parameters, results: [result])
     }
 
     /// Native methods of `*os.File`. The receiver is the first parameter.
@@ -150,6 +238,26 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$os.File.Read", goName: "os.File.Read",
                 parameters: [file, bytes], results: results)
+        case "ReadAt":
+            return GoNativeFunction(
+                symbol: "$os.File.ReadAt", goName: "os.File.ReadAt",
+                parameters: [file, bytes, .int], results: results)
+        case "WriteAt":
+            return GoNativeFunction(
+                symbol: "$os.File.WriteAt", goName: "os.File.WriteAt",
+                parameters: [file, bytes, .int], results: results)
+        case "Seek":
+            return GoNativeFunction(
+                symbol: "$os.File.Seek", goName: "os.File.Seek",
+                parameters: [file, .int, .int], results: results)
+        case "Close":
+            return GoNativeFunction(
+                symbol: "$os.File.Close", goName: "os.File.Close",
+                parameters: [file], results: [GoPredeclared.errorType])
+        case "Sync":
+            return GoNativeFunction(
+                symbol: "$os.File.Sync", goName: "os.File.Sync",
+                parameters: [file], results: [GoPredeclared.errorType])
         default:
             return nil
         }
@@ -175,10 +283,18 @@ extension GoStandardLibrary {
         GoBitwiseOperator.allCases.map(\.nativeName)
             + GoPredeclared.conversionCallNames
             + [
-                "$sort.Strings", "$sort.Ints", "$strconv.Itoa",
+                GoPredeclared.copyElements,
+                "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
                 "$fmt.Fprint", "$fmt.Fprintln",
                 "$os.File.Write", "$os.File.WriteString", "$os.File.Read",
                 "$os.ReadFile", "$os.WriteFile",
+                "$os.Open", "$os.Create", "$os.OpenFile", "$os.Remove", "$os.Rename", "$os.Mkdir",
+                "$os.File.ReadAt", "$os.File.WriteAt", "$os.File.Seek", "$os.File.Close",
+                "$os.File.Sync",
+                "$time.Now", "$time.Since", "$time.Unix",
+                "$time.Time.Unix", "$time.Time.UnixMilli", "$time.Time.UnixNano",
+                "$time.Time.Sub", "$time.Time.Add",
+                "$time.Time.Before", "$time.Time.After", "$time.Time.Equal",
             ])
 }
 
@@ -187,7 +303,8 @@ extension GoStandardLibrary {
 /// `byte` (and its alias `uint8`) is the named type `byte` whose underlying
 /// type is `int`; its values stay within 0...255 because the compiler masks
 /// every operation that could leave that range. `time.Time` and `os.File` are
-/// opaque named types without an underlying type.
+/// opaque named types without an underlying type; a `time.Time` is its
+/// nanoseconds since the Unix epoch at run time.
 enum GoPredeclared {
     static let byte = GoType.named("byte")
     static let time = GoType.named("time.Time")
@@ -199,9 +316,15 @@ enum GoPredeclared {
     static let runeToString = "$conv.runeToString"
     static let conversionCallNames = [bytesToString, stringToBytes, runeToString]
 
+    /// Native call the builtin `copy` lowers to.
+    static let copyElements = "$copy"
+
     /// Method the compiler synthesizes so `err.Error()` works on the runtime's
     /// native error values, whose dynamic type name is `error`.
     static let nativeErrorMethod = "error.Error"
+
+    /// Dynamic type name of the runtime's native error values.
+    static let nativeErrorTypeName = "error"
 
     /// The type a predeclared name denotes when it is not a `GoType` case.
     static func namedType(_ name: String) -> GoType? {

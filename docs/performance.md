@@ -31,7 +31,7 @@ Apple M4 Release microbenchmarks from 2026-08-06:
 | Perform 100k shallow-path `stat` calls | About 93 ms |
 | Loop back 20k × 512 B UDP packets | About 115–118 MiB/s |
 | Run a normal 100k-iteration Go VM loop | About 0.17 s |
-| Insert or query 20k Go map keys | About 1.1 s each |
+| Insert or query 20k Go map keys | About 1.1 s each (linear map storage; see the 2026-10-13 note below) |
 | Clean all-product Release build | About 202 s, peak RSS about 2.34 GB |
 
 Release assessment from 2026-08-13:
@@ -52,6 +52,14 @@ tree are quadratic in depth, because every syscall re-resolves its path. A
 snapshot's legacy `root` projection stops at 256 levels; the inode table
 carries the rest.
 
+Go map storage, measured 2026-10-13 (Debug build, one program that inserts
+and then reads back N integer keys): 5,000 keys took about 5.5 s and 20,000
+keys about 89 s with the linear storage, which also copied and re-measured the
+whole map on every insert, and about 0.24 s and 0.88 s with the hash-indexed
+storage that updates the map in place. Cost is now linear in N; the remaining
+time is the VM's per-instruction cost. The Release row above predates the
+change and has not been re-measured.
+
 These numbers establish an order of magnitude only. The microbenchmarks are not yet fixed in CI, and there is no real-device, complex-loss, or long-running soak dataset, so they do not form a cross-machine SLA.
 
 ## Unresolved Risks
@@ -59,7 +67,8 @@ These numbers establish an order of magnitude only. The microbenchmarks are not 
 | Priority | Risk | Impact |
 | --- | --- | --- |
 | P1 | Ethernet/IPv4/TCP/checksum paths repeatedly create or concatenate `[UInt8]` values | More allocation and copying for large packets or high packet rates |
-| P1 | Go maps and some runtime collections remain linear structures | Larger map, goroutine, and channel workloads degrade |
+| P1 | Some runtime collections remain linear structures (maps no longer are) | Larger goroutine and channel workloads degrade |
+| P1 | A `[]byte` holds one tagged value per byte, and a slice store through a pointer path rebuilds its array | Byte-heavy programs pay about 32 accounted bytes per byte; `copy`, `ReadAt`, and `Read` into a whole backing array are the bulk paths |
 | P1 | No soak test lasting at least one hour | Long-term stability of RSS, timers, and object counts is unproven |
 | P2 | Deep-path resolution and full VFS snapshots scale with data size | Higher latency for deep trees and frequent snapshots |
 | P2 | Synchronous observation hooks or long callbacks block the executor | Higher tail latency and cross-node interference |
@@ -88,7 +97,7 @@ Recommended regression scenarios:
 ## Optimization Order
 
 1. Establish the soak test and a repeatable baseline.
-2. Replace Go maps and important queues with suitable data structures.
+2. Replace important runtime queues with suitable data structures (Go maps are done).
 3. Reduce network data-path copying.
 4. Use compiler timing reports to split Go runtime optimization hotspots.
 5. Add buffer pooling, scatter/gather, or parallel simulation domains only for demonstrated demand.

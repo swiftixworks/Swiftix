@@ -230,7 +230,7 @@ struct GoFileInterfaceTests: GoTestHarness {
         #expect(diagnostic("os.Stdout.WriteString([]byte(\"x\"))") == "cannot use []byte as string value")
         #expect(
             diagnostic("os.Stdin.Read()") == "wrong number of arguments in call to os.File.Read")
-        #expect(diagnostic("os.Stdout.Close()") == "*os.File has no field or method Close")
+        #expect(diagnostic("os.Stdout.Chmod(420)") == "*os.File has no field or method Chmod")
         #expect(diagnostic("os.Stdout = os.Stderr") == "undefined: os")
         #expect(diagnostic("var n int = os.Stdout\nfmt.Println(n)") == "cannot use *os.File as int value")
         #expect(diagnostic("fmt.Println(os.Stdout + 1)") == "mismatched types *os.File and int")
@@ -248,7 +248,7 @@ struct GoFileInterfaceTests: GoTestHarness {
         #expect(
             diagnostic("var n int = os.WriteFile(\"/x\", []byte(\"t\"), 420)\nfmt.Println(n)")
                 == "cannot use interface{...} as int value")
-        #expect(diagnostic("os.Open(\"/x\")") == "undefined: os.Open")
+        #expect(diagnostic("os.Getwd()") == "undefined: os.Getwd")
         #expect(
             goMainDiagnostic("fmt.Fprintln(os.Stdout, 1)") == "undefined: os")
     }

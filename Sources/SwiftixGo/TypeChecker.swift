@@ -711,6 +711,13 @@ private struct FunctionChecker {
             }
 
         case .multiDeclaration(let names, let expression, let position):
+            if let statements = GoStatement.redeclaration(
+                names: names, expression: expression, position: position,
+                declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
+            {
+                for statement in statements { try check(statement) }
+                return
+            }
             if case .unary(.receive, let channel, _) = expression,
                 case .channel(let direction, let elementType) = underlying(try type(of: channel))
             {
@@ -1149,6 +1156,13 @@ private struct FunctionChecker {
                 return .int
             }
             if case .identifier(let packageName, _) = base,
+                importedPaths.contains(packageName),
+                lookup(packageName) == nil,
+                GoStandardLibrary.errorValue(package: packageName, member: name) != nil
+            {
+                return GoPredeclared.errorType
+            }
+            if case .identifier(let packageName, _) = base,
                 packageName == "fmt",
                 importedPaths.contains("fmt"),
                 name == "Print" || name == "Println"
@@ -1443,6 +1457,34 @@ private struct FunctionChecker {
                     }
                     return .void
                 }
+                if name == "copy" {
+                    guard arguments.count == 2 else {
+                        throw GoDiagnostic(position: position, message: "copy takes exactly two arguments")
+                    }
+                    let destinationType = try type(of: arguments[0])
+                    guard case .slice(let element) = underlying(destinationType) else {
+                        throw GoDiagnostic(
+                            position: arguments[0].position,
+                            message: "first argument to copy must be slice")
+                    }
+                    // A string is a source of bytes; any other source is a
+                    // slice of the destination's element type.
+                    let sourceType = try type(of: arguments[1])
+                    let sourceMatches: Bool
+                    if isString(sourceType) {
+                        sourceMatches = isByte(element)
+                    } else if case .slice(let sourceElement) = underlying(sourceType) {
+                        sourceMatches = sourceElement == element
+                    } else {
+                        sourceMatches = false
+                    }
+                    guard sourceMatches else {
+                        throw GoDiagnostic(
+                            position: arguments[1].position,
+                            message: "cannot copy \(sourceType) into \(destinationType)")
+                    }
+                    return .int
+                }
                 if name == "close" {
                     guard arguments.count == 1 else {
                         throw GoDiagnostic(position: position, message: "close takes exactly one argument")
@@ -1683,7 +1725,7 @@ private struct FunctionChecker {
                             message: "wrong number of arguments in call to http.ListenAndServe")
                     }
                     try require(arguments[0], assignableTo: .string)
-                    return .interface([])
+                    return GoPredeclared.errorType
                 case "Get":
                     guard arguments.count == 1 else {
                         throw GoDiagnostic(
@@ -1776,7 +1818,7 @@ private struct FunctionChecker {
                                 position: position,
                                 message: "too many arguments in call to Err")
                         }
-                        return .interface([])
+                        return GoPredeclared.errorType
                     default:
                         break
                     }
@@ -1799,7 +1841,7 @@ private struct FunctionChecker {
                                 position: position,
                                 message: "too many arguments in call to Close")
                         }
-                        return .interface([])
+                        return GoPredeclared.errorType
                     default:
                         break
                     }
@@ -1819,7 +1861,7 @@ private struct FunctionChecker {
                                 position: position,
                                 message: "too many arguments in call to Close")
                         }
-                        return .interface([])
+                        return GoPredeclared.errorType
                     default:
                         break
                     }
@@ -2400,8 +2442,8 @@ private struct FunctionChecker {
         {
             function = native
             parameters = native.parameters[...]
-        } else if (try? type(of: base)) == GoPredeclared.filePointer,
-            let native = GoStandardLibrary.fileMethod(name)
+        } else if let receiver = try? type(of: base),
+            let native = GoStandardLibrary.method(of: receiver, named: name)
         {
             function = native
             parameters = native.parameters.dropFirst()
@@ -2713,7 +2755,7 @@ private struct FunctionChecker {
                         message: "wrong number of arguments in call to strconv.Atoi")
                 }
                 try require(arguments[0], assignableTo: .string)
-                return [.int, .interface([])]
+                return [.int, GoPredeclared.errorType]
             }
             if case .identifier("userland", _) = base,
                 importedPaths.contains("swiftix/userland"),
@@ -2779,7 +2821,7 @@ private struct FunctionChecker {
                     }
                     try require(arguments[0], assignableTo: .string)
                     try require(arguments[1], assignableTo: .string)
-                    return [.named("net.Conn"), .interface([])]
+                    return [.named("net.Conn"), GoPredeclared.errorType]
                 case "Listen":
                     guard arguments.count == 2 else {
                         throw GoDiagnostic(
@@ -2788,7 +2830,7 @@ private struct FunctionChecker {
                     }
                     try require(arguments[0], assignableTo: .string)
                     try require(arguments[1], assignableTo: .string)
-                    return [.named("net.Listener"), .interface([])]
+                    return [.named("net.Listener"), GoPredeclared.errorType]
                 case "LookupHost":
                     guard arguments.count == 1 else {
                         throw GoDiagnostic(
@@ -2796,7 +2838,7 @@ private struct FunctionChecker {
                             message: "wrong number of arguments in call to net.LookupHost")
                     }
                     try require(arguments[0], assignableTo: .string)
-                    return [.slice(.string), .interface([])]
+                    return [.slice(.string), GoPredeclared.errorType]
                 default:
                     break
                 }
@@ -2805,9 +2847,9 @@ private struct FunctionChecker {
             if let receiverType = try? type(of: base) {
                 switch (receiverType, name) {
                 case (.named("net.Conn"), "Read"), (.named("net.Conn"), "Write"):
-                    return [.int, .interface([])]
+                    return [.int, GoPredeclared.errorType]
                 case (.named("net.Listener"), "Accept"):
-                    return [.named("net.Conn"), .interface([])]
+                    return [.named("net.Conn"), GoPredeclared.errorType]
                 default:
                     break
                 }
@@ -2823,7 +2865,7 @@ private struct FunctionChecker {
                             message: "wrong number of arguments in call to http.Get")
                     }
                     try require(arguments[0], assignableTo: .string)
-                    return [.named("http.Response"), .interface([])]
+                    return [.named("http.Response"), GoPredeclared.errorType]
                 default:
                     break
                 }

@@ -204,7 +204,7 @@ public enum GoSourceRewriter {
     /// Identifiers a pattern matches literally. Every other identifier is a
     /// wildcard, so the predeclared type names used in conversions are listed.
     private static let literalIdentifiers: Set<String> = [
-        "true", "false", "nil", "len", "cap", "append", "make",
+        "true", "false", "nil", "len", "cap", "append", "copy", "make",
         "int", "byte", "uint8", "string", "bool",
     ]
 

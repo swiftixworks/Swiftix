@@ -1,6 +1,6 @@
 # Swiftix Go Toolchain Contract
 
-> Last verified: 2026-10-07<br>
+> Last verified: 2026-10-13<br>
 > Scope: `SwiftixGo`, `SwiftixGoRuntime`, `SwiftixGoTool`, and `SwiftixGoHost`
 
 Swiftix Go accepts Go source, compiles it to `swiftix/svm64` bytecode with a pure Swift compiler, and executes it in its own VM as a real Swiftix process. It neither embeds the host Go runtime nor presents itself as an official Go distribution.
@@ -40,27 +40,33 @@ go build -o hello .
 | `byte` | `s[i]` is a `byte`; byte arithmetic wraps modulo 256; `byte` and `int` do not mix without a conversion; untyped integer constants adopt `byte` or a named integer type when they fit; `[]byte` is an ordinary slice |
 | Conversions | `int(x)`; `byte(x)`/`uint8(x)` (truncating); `string(x)` for an integer code point; `string(b)` and `[]byte(s)`; a named type to and from its underlying non-struct type |
 | Functions | Multiple and named returns, `return f()` forwarding of a multi-result call, function literals in `go` and `defer`, panic/recover, and methods |
+| Short declarations | A multi-value `:=` may reuse variables the same block already declares when at least one name is new (`n, err := f()` after an earlier `err`): the old variable is assigned, not shadowed |
+| Builtins | `len`, `cap`, `append`, `make`, `delete`, `close`, `panic`, `recover`, and `copy`. `copy(dst, src)` takes a slice or, for a `[]byte` destination, a string; it handles overlapping ranges and costs one VM instruction whatever the length |
 | Concurrency | Goroutines, buffered/unbuffered channels, select, and minimal Mutex/WaitGroup |
 | Runtime | Independent call stacks, managed heap, precise roots, and synchronous mark-sweep GC |
+| Maps | Hash-indexed: lookup, insertion, and `delete` are O(1) amortized. `range` visits entries in insertion order, so output never depends on a hash seed; a key that is deleted and set again moves to the end |
 | Tools | version/env/help, mod init, fmt, run, test, build, install, and clean -cache |
-| Standard library | fmt/errors/io/os, strings/bytes/strconv/sort, basic collections, testing/sync/time/context, and parts of net/net/http |
+| Standard library | fmt/errors/io/os, strings/strconv/sort, basic collections, testing/sync/time/context, and parts of net/net/http |
+| Errors | `errors.New`; `io.EOF`; every library call that can fail returns an `error`, which a program can return, compare with `nil` or `io.EOF`, and read with `Error()`. A failed system call reads like Go's `*PathError`: `open /data/kv.aof: no such file or directory` |
 | `strings` | Native `Contains`, `Count`, `HasPrefix`, `HasSuffix`, `Index`, `Join`, `LastIndex`, `Repeat`, `Split`, and `TrimSpace` with Go semantics; each call costs a few VM instructions regardless of length |
 | `sort`, `strconv` | Native `sort.Strings` and `sort.Ints` (in place, byte order for strings, one VM instruction each) and `strconv.Itoa`/`Atoi` |
-| Files | `os.Stdin`, `os.Stdout`, and `os.Stderr` as `*os.File`; `fmt.Fprint`/`fmt.Fprintln` to a file (statement only); `f.Write`, `f.WriteString`, and `f.Read`; `os.ReadFile` and `os.WriteFile`. Errors are `error` values with `Error()` |
-| `time` | `time.Sleep`; `time.After` and `time.Tick` return `<-chan time.Time`; durations are `int` nanoseconds |
+| Files | `os.Stdin`, `os.Stdout`, and `os.Stderr` as `*os.File`; `os.Open`, `os.Create`, and `os.OpenFile` with `os.O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREATE`, `O_EXCL`, `O_TRUNC`, and `O_APPEND`; `fmt.Fprint`/`fmt.Fprintln` to a file (statement only); `f.Write`, `f.WriteString`, `f.Read`, `f.ReadAt`, `f.WriteAt`, `f.Seek` with `io.SeekStart`/`SeekCurrent`/`SeekEnd`, `f.Sync`, and `f.Close`; `os.ReadFile` and `os.WriteFile`; `os.Remove`, `os.Rename`, and `os.Mkdir`. See [Files](#files) |
+| `time` | `time.Sleep`; `time.After` and `time.Tick` return `<-chan time.Time`; `time.Now`, `time.Since`, and `time.Unix`; `t.Unix`, `t.UnixMilli`, `t.UnixNano`, `t.Sub`, `t.Add`, `t.Before`, `t.After`, and `t.Equal`; durations are `int` nanoseconds. See [Wall-Clock Time](#wall-clock-time) |
 | System | argv/env/cwd/exit, VFS, standard input/output/error with pipe backpressure, shell PATH, park/wake on logical time, and the minimal TCP path |
 
 ### Known Gaps
 
-- `context` lacks complete Deadline/Value support; `net` lacks complete DNS, UDP, deadline, and `net/http` semantics.
+- `context` lacks complete Deadline/Value support; `net` lacks complete DNS, UDP, deadline, and `net/http` semantics. `net.Dial` reports a refused connection and an abandoned handshake as errors; a write to a connection the peer reset still succeeds.
 - Language edges such as type switches and `fallthrough` are incomplete. Rune literals are rejected by name; floating-point literals are not accepted.
 - A compound assignment evaluates its target twice (`x op= y` is compiled as `x = x op y`), so a target that contains a call or a channel receive is rejected with a diagnostic rather than evaluated twice. `++`/`--` have the same double evaluation without the check.
+- A single-value `x := v` and a multi-value `:=` without a new name are redeclarations, reported as `x redeclared in this block`.
+- Errors compare by message: two `errors.New` values with the same text are equal, where Go compares their identity.
 - Function values are limited to literals invoked by `go` and `defer`: there is no function type syntax, a function or a function-valued variable cannot be called through a variable, and a literal does not capture the locals of its enclosing function (pass them as arguments). These limits are the same inside one package and across packages.
 - Call results cannot be spread into another call's arguments (`f(g())` with a multi-result `g`), variadic functions and `iota` are not implemented, the blank identifier is accepted only in `:=` and `range`, an empty struct literal (`T{}`) and the address of a composite literal (`&T{...}`) are rejected, an interface method lists parameter types without names, and imports are written one per line (no parenthesized group).
 - Unexported struct fields and methods of an imported package's type are not hidden from the importing package; only package-level names are checked for export. An unused import of a runtime package (`fmt`, `strings`, ...) is not diagnosed, although an unused import of a local package is.
 - Guest strings are always valid UTF-8, so `string(b)` for a `[]byte` repairs each invalid sequence to U+FFFD instead of keeping the bytes; `[]byte(s)` yields the exact UTF-8 bytes.
 - Constants are integers only. An untyped constant keeps adapting to `byte` and named integer types, but a constant shift such as `1 << n` has type `int`, and a `range` over a string yields `int` code points.
-- `time.Time` is opaque: it has no methods, arithmetic, or comparison, and cannot be used as an `int`. `*os.File` is likewise opaque and exists only as the three standard files.
+- `time.Time` is opaque apart from the methods listed above: it has no operators, no calendar fields, no `Format`, and no location, and cannot be used as an `int`. `*os.File` is likewise opaque: it cannot be dereferenced, and it has no `Stat`, `Truncate`, `Chmod`, or directory reads. `os.Open` refuses a directory.
 - A value stored in an interface variable outside a call argument keeps only its representation, so a `byte` stored that way asserts as `int`.
 - `gofmt -s` implements only its registered safe rules.
 - `sort.Slice`, `sort.Sort`, and `sort.Stable` are not provided (a native sort cannot call back into guest code); programs encode a byte-comparable key and use `sort.Strings` or `sort.Ints`.
@@ -71,7 +77,7 @@ go build -o hello .
 
 - Generics, reflect, cgo, assembler, plugins, the host C ABI, and native machine-code linking.
 - Numeric types other than `int`, `byte`, and `uint8`: `int8`...`int64`, `uint`, `uint16`...`uint64`, `uintptr`, `rune`, floating-point, and complex types are rejected by name.
-- The `(n, err)` results of `fmt.Fprint`/`fmt.Fprintln`, and opening, closing, or dereferencing an `os.File`.
+- The `(n, err)` results of `fmt.Fprint`/`fmt.Fprintln`, and dereferencing an `os.File`.
 - Benchmarking, coverage, profiling, `go vet`, `go work`, `go.sum`, and direct `GOPROXY` access.
 - `crypto/*`, `compress/*`, `archive/*`, and `math/big`.
 - Go binaries for other platforms or any path that bypasses Swiftix to access host files, processes, or networking.
@@ -192,7 +198,22 @@ SwiftixGoHost      host-file adapter and CLI
   restores cooked mode before its next prompt.
 - Exceeding a boundary must return a stable error rather than causing a host trap, infinite recursion, or unbounded allocation.
 
-The executable-image format and ABI have exact versions (format 10, ABI 10). Incompatible, corrupt, or incorrectly targeted images are rejected before launch. Module linking, compound assignment, and the integer literal forms are compile-time features: they add no opcode and change neither version.
+The executable-image format and ABI have exact versions (format 10, ABI 10). Incompatible, corrupt, or incorrectly targeted images are rejected before launch. Module linking, compound assignment, short-declaration reuse, and the integer literal forms are compile-time features: they add no opcode and change neither version. The file, wall-clock, `errors`, and `copy` natives are reserved call names, so they change neither version as well; an image that calls one needs a runtime that provides it.
+
+### Files
+
+A `*os.File` the program opens is a handle, not a descriptor number, and a handle is never reused. A file used after `Close` therefore fails with `file already closed` even when a later `os.Open` was given the same descriptor, and it never reaches the other file.
+
+- `os.OpenFile(name, flag, perm)` accepts the flags listed above with Go's Linux values; any other bit is `invalid argument`. A new file gets `perm` under the process umask, and a missing parent directory is an error rather than being created.
+- `f.ReadAt` and `f.WriteAt` use the kernel's `pread`/`pwrite`: they leave the file offset alone, `ReadAt` returns `io.EOF` with a short count at the end of the file, a write past the end leaves a zero-filled gap, and `WriteAt` on a file opened with `O_APPEND` is refused as in Go. `ReadAt` fills its slice in one accounting pass, which is what a page-sized read needs.
+- `f.Sync` succeeds for any open file: a VFS write is complete when it returns. The VFS itself is in memory; durability across a restart belongs to the host's snapshot of it.
+- `os.Rename` keeps the node, so a file that is open across the rename keeps writing to it; this is the write-temporary-then-rename pattern. `os.Remove` removes a file or an empty directory.
+- Files still open when a synchronous run (`go run`, `go test`, `runProgram`) ends are closed, in the order they were opened. A file-backed process leaves that to its exit.
+- A run without a process has no file system: every call returns an error ending in `no file system`.
+
+### Wall-Clock Time
+
+A `time.Time` is an instant on the hosting kernel's wall clock, which is the Unix epoch at logical time zero unless the host anchored it with `Kernel.setWallClock`. It follows logical time, so it advances only as the host advances the event loop, and a run without a process counts from zero. `time.After` and `time.Tick` deliver the same instants. The zero `time.Time` is the epoch, not year 1, and there is no monotonic reading: an interval measured across a host re-anchoring of the clock includes the jump.
 
 ## Distribution and Host Tools
 

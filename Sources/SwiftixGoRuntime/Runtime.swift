@@ -69,38 +69,6 @@ public struct GoInterfaceValue: Sendable, Equatable {
     }
 }
 
-public struct GoMapStorage: Sendable, Equatable {
-    public var entries: [(key: GoValue, value: GoValue)]
-
-    public init(entries: [(key: GoValue, value: GoValue)] = []) {
-        self.entries = entries
-    }
-
-    public func get(_ key: GoValue) -> GoValue? {
-        entries.first(where: { $0.key == key })?.value
-    }
-
-    public mutating func set(_ key: GoValue, _ value: GoValue) {
-        if let index = entries.firstIndex(where: { $0.key == key }) {
-            entries[index].value = value
-        } else {
-            entries.append((key: key, value: value))
-        }
-    }
-
-    public mutating func delete(_ key: GoValue) {
-        entries.removeAll(where: { $0.key == key })
-    }
-
-    public static func == (lhs: GoMapStorage, rhs: GoMapStorage) -> Bool {
-        guard lhs.entries.count == rhs.entries.count else { return false }
-        for (l, r) in zip(lhs.entries, rhs.entries) {
-            if l.key != r.key || l.value != r.value { return false }
-        }
-        return true
-    }
-}
-
 /// A Go map value is a handle to VM-managed storage. Copying the handle keeps
 /// Go's reference semantics without introducing shared host objects or locks.
 public struct GoMapValue: Sendable, Equatable {
@@ -902,6 +870,11 @@ public struct GoVirtualMachine: Sendable {
         var outputBytesWritten = 0
         var executionIsActive = true
         var httpHandlers: [String: String] = [:]
+        // Files the program opened, by `*os.File` handle. A handle is never
+        // reused, so a closed file stays closed after its descriptor number
+        // is handed to a later open.
+        var openFiles: [Int64: GoFiles.OpenFile] = [:]
+        var nextFileHandle = GoFiles.firstHandle
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -926,6 +899,12 @@ public struct GoVirtualMachine: Sendable {
             if !completedNormally, programEnabledRawMode {
                 processContext.setTerminalRawMode(0, false)
             }
+            // Go closes nothing at exit, but the hosting process can outlive
+            // the program. Handle order keeps the syscall trace deterministic.
+            for handle in openFiles.keys.sorted() {
+                processContext.close(openFiles[handle]!.descriptor)
+            }
+            openFiles.removeAll()
             _ = processContext.reportRuntimeMemory(
                 bytes: 0,
                 limitBytes: 0,
@@ -1081,25 +1060,32 @@ public struct GoVirtualMachine: Sendable {
         /// (the caller ends the instruction with `currentBlocked` set).
         /// Otherwise the write is immediate: fd 1 goes to the `write` sink, and
         /// so does any descriptor of a run without a process.
+        /// `opened` marks a file the program opened itself: it is never the
+        /// run's output sink, even when it was handed descriptor 1, and its
+        /// bytes are stored by the file system rather than spent from the
+        /// run's output budget.
         func writeDescriptor(
             _ fd: Int,
             _ text: String,
+            opened: Bool = false,
             results: ((Int, String?) -> [GoValue])? = nil
         ) throws {
-            try writeDescriptor(fd, bytes: Array(text.utf8), text: text, results: results)
+            try writeDescriptor(
+                fd, bytes: Array(text.utf8), text: text, opened: opened, results: results)
         }
 
         func writeDescriptor(
             _ fd: Int,
             bytes: [UInt8],
             text: String? = nil,
+            opened: Bool = false,
             results: ((Int, String?) -> [GoValue])? = nil
         ) throws {
             guard cooperative else {
-                try consumeOutputBytes(bytes.count)
+                if !opened { try consumeOutputBytes(bytes.count) }
                 var accepted = bytes.count
                 var failure: String?
-                if fd == 1 || processContext == nil {
+                if (fd == 1 && !opened) || processContext == nil {
                     try write(text ?? String(decoding: bytes, as: UTF8.self))
                 } else if let processContext {
                     accepted = 0
@@ -1220,12 +1206,20 @@ public struct GoVirtualMachine: Sendable {
             return identifier
         }
 
+        /// The current instant in nanoseconds: on the hosting kernel's wall
+        /// clock (the Unix epoch unless the host anchored it elsewhere), or
+        /// logical time for a run without a process.
         func runtimeTimestamp() -> Int64 {
-            let scaled = eventLoop.now * 1_000_000_000
-            if !scaled.isFinite { return scaled.sign == .minus ? Int64.min : Int64.max }
-            if scaled <= Double(Int64.min) { return Int64.min }
-            if scaled >= Double(Int64.max) { return Int64.max }
-            return Int64(scaled)
+            let seconds = processContext?.realtimeSeconds ?? eventLoop.now
+            guard seconds.isFinite else { return seconds.sign == .minus ? Int64.min : Int64.max }
+            // Whole seconds and the fraction convert separately: a product of
+            // epoch seconds and 10^9 has no nanosecond precision left.
+            let whole = seconds.rounded(.down)
+            let limit = Double(Int64.max / 1_000_000_000)
+            if whole >= limit { return Int64.max }
+            if whole <= -limit { return Int64.min }
+            return Int64(whole) * 1_000_000_000
+                + Int64(((seconds - whole) * 1_000_000_000).rounded())
         }
 
         func validatedSliceRange(_ slice: GoSliceValue) throws -> Range<Int> {
@@ -1785,6 +1779,40 @@ public struct GoVirtualMachine: Sendable {
             return .interface(GoInterfaceValue(typeName: "error", value: .string(message)))
         }
 
+        /// The file a `*os.File` value denotes, or nil for a nil file and for
+        /// one the program already closed.
+        func resolveFile(_ value: GoValue) throws -> GoFiles.OpenFile? {
+            if value == .nilValue { return nil }
+            guard case .int(let raw) = value else { throw GoRuntimeError.typeMismatch }
+            if raw >= GoFiles.firstHandle { return openFiles[raw] }
+            guard let descriptor = Int(exactly: raw) else { throw GoRuntimeError.typeMismatch }
+            return GoFiles.inherited(descriptor)
+        }
+
+        /// Store `values` in the leading elements of `destination`.
+        func storeElements(_ values: [GoValue], into destination: GoSliceValue) throws {
+            guard !values.isEmpty else { return }
+            let range = try validatedSliceRange(destination)
+            guard values.count <= range.count else { throw GoRuntimeError.invalidSliceBounds }
+            if destination.backing.path.isEmpty,
+                try heap.replaceArrayElements(
+                    destination.backing.cell, from: range.lowerBound, with: values)
+            {
+                return
+            }
+            for (offset, value) in values.enumerated() {
+                try writePointer(
+                    value,
+                    through: appending(index: range.lowerBound + offset, to: destination.backing),
+                    heap: &heap)
+            }
+        }
+
+        /// Copy `bytes` into the leading elements of `destination`.
+        func storeBytes(_ bytes: [UInt8], into destination: GoSliceValue) throws {
+            try storeElements(bytes.map { .int(Int64($0)) }, into: destination)
+        }
+
         /// Run a library function that reaches the hosting process: `*os.File`
         /// and `fmt.Fprint*` output, descriptor reads, and whole-file I/O.
         /// Arguments are the top `argumentCount` stack entries in call order.
@@ -1810,13 +1838,29 @@ public struct GoVirtualMachine: Sendable {
             stack.removeSubrange(start...)
 
             func descriptor(_ value: GoValue) throws -> Int {
-                guard case .int(let raw) = value, let fd = Int(exactly: raw) else {
-                    throw GoRuntimeError.typeMismatch
-                }
-                return fd
+                guard let file = try resolveFile(value) else { throw GoRuntimeError.typeMismatch }
+                return file.descriptor
+            }
+            /// Whether the receiver is a file the program opened.
+            var opened: Bool {
+                if case .int(let raw) = operands[0] { return raw >= GoFiles.firstHandle }
+                return false
             }
             let writeResults: (Int, String?) -> [GoValue] = { count, failure in
                 [.int(Int64(count)), errorValue(failure)]
+            }
+            // A file the program closed fails as it does in Go instead of
+            // reaching whatever now owns its descriptor number.
+            if case .int(let handle) = operands[0], handle >= GoFiles.firstHandle,
+                openFiles[handle] == nil
+            {
+                if name.hasPrefix("$os.File.") {
+                    let operation = name == "$os.File.Read" ? "read" : "write"
+                    stack.append(contentsOf: [
+                        .int(0), errorValue("\(operation): \(GoFiles.closedFile)"),
+                    ])
+                }
+                return true
             }
 
             switch name {
@@ -1827,17 +1871,20 @@ public struct GoVirtualMachine: Sendable {
                     try formatOutput(
                         Array(operands.dropFirst()),
                         separator: newline ? " " : "",
-                        suffix: newline ? "\n" : ""))
+                        suffix: newline ? "\n" : ""),
+                    opened: opened)
             case "$os.File.Write":
                 try writeDescriptor(
                     try descriptor(operands[0]),
                     bytes: try sliceBytes(operands[1]),
+                    opened: opened,
                     results: writeResults)
             case "$os.File.WriteString":
                 guard case .string(let text) = operands[1] else {
                     throw GoRuntimeError.typeMismatch
                 }
-                try writeDescriptor(try descriptor(operands[0]), text, results: writeResults)
+                try writeDescriptor(
+                    try descriptor(operands[0]), text, opened: opened, results: writeResults)
             case "$os.File.Read":
                 let fd = try descriptor(operands[0])
                 let capacity: Int
@@ -1870,7 +1917,7 @@ public struct GoVirtualMachine: Sendable {
                 }
                 // Bytes `ReadStdin` held back to keep a character whole are
                 // still unread input.
-                if fd == 0, !standardInputCarry.isEmpty {
+                if fd == 0, !opened, !standardInputCarry.isEmpty {
                     let count = min(capacity, standardInputCarry.count)
                     let bytes = Array(standardInputCarry[..<count])
                     standardInputCarry.removeFirst(count)
@@ -1968,6 +2015,319 @@ public struct GoVirtualMachine: Sendable {
                     failure = "open \(path): \(String(describing: error))"
                 }
                 stack.append(errorValue(failure))
+            }
+            return true
+        }
+
+        /// Run a `time` native. Operands and results are integers and bools.
+        /// Returns `false` when `name` is not such a function.
+        func executeTimeNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoNative.timeArgumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = try stack[start...].map { value -> Int64 in
+                guard case .int(let integer) = value else { throw GoRuntimeError.typeMismatch }
+                return integer
+            }
+            stack.removeSubrange(start...)
+            guard let result = GoNative.time(name, operands, now: runtimeTimestamp()) else {
+                return false
+            }
+            stack.append(result)
+            return true
+        }
+
+        /// Run an `os` file native: opening and closing files, positional I/O,
+        /// seeking, and directory entries. Arguments are the top
+        /// `argumentCount` stack entries in call order. A failed system call
+        /// is a Go `error` result, never a VM error. Returns `false` when
+        /// `name` is not such a function.
+        func executeFileNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoFiles.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+
+            func text(_ value: GoValue) throws -> String {
+                guard case .string(let text) = value else { throw GoRuntimeError.typeMismatch }
+                return text
+            }
+            func integer(_ value: GoValue) throws -> Int64 {
+                guard case .int(let integer) = value else { throw GoRuntimeError.typeMismatch }
+                return integer
+            }
+            /// `operation subject: reason`, the shape of Go's `*PathError`.
+            func failure(_ operation: String, _ subject: String, _ reason: String) -> GoValue {
+                errorValue("\(operation) \(subject): \(reason)")
+            }
+            func failure(_ operation: String, _ subject: String, _ error: Error) -> GoValue {
+                failure(operation, subject, GoFiles.message(for: error))
+            }
+            /// Missing parent directories are an error in Go; the VFS would
+            /// create them.
+            func requireParentDirectory(
+                of path: String, in processContext: ProcessContext
+            ) throws {
+                guard let slash = path.lastIndex(of: "/"), slash != path.startIndex else { return }
+                guard let parent = processContext.stat(String(path[..<slash])) else {
+                    throw SyscallError.noSuchFileOrDirectory
+                }
+                guard parent.isDirectory else { throw SyscallError.notADirectory }
+            }
+            func creationMode(_ permissions: Int64, in processContext: ProcessContext) -> FileMode {
+                FileMode(rawValue: UInt16(truncatingIfNeeded: permissions & 0o777))
+                    .subtracting(processContext.fileCreationMask)
+            }
+            func open(_ path: String, flag: Int64, permissions: Int64) -> [GoValue] {
+                guard let processContext else {
+                    return [.nilValue, failure("open", path, "no file system")]
+                }
+                guard let mode = GoFiles.openMode(flag) else {
+                    return [.nilValue, failure("open", path, SyscallError.invalidArgument)]
+                }
+                guard openFiles.count < resourceLimits.maximumRuntimeHandles else {
+                    return [.nilValue, failure("open", path, "too many open files")]
+                }
+                do {
+                    let creates = mode.flags.contains(.create) && processContext.stat(path) == nil
+                    if creates { try requireParentDirectory(of: path, in: processContext) }
+                    let descriptor = try processContext.openFile(
+                        path, flags: mode.flags, access: mode.access)
+                    if creates {
+                        _ = processContext.chmod(
+                            path, mode: creationMode(permissions, in: processContext))
+                    }
+                    let handle = nextFileHandle
+                    nextFileHandle += 1
+                    openFiles[handle] = GoFiles.OpenFile(
+                        name: path, descriptor: descriptor,
+                        appends: mode.flags.contains(.append))
+                    return [.int(handle), .nilValue]
+                } catch {
+                    return [.nilValue, failure("open", path, error)]
+                }
+            }
+            var methodFailure = GoValue.nilValue
+            /// The receiver of a file method and the process that owns it. Without
+            /// one, `methodFailure` is the error the method reports.
+            func receiver(
+                _ operation: String
+            ) throws -> (file: GoFiles.OpenFile, process: ProcessContext)? {
+                guard let file = try resolveFile(operands[0]) else {
+                    let reason = operands[0] == .nilValue ? GoFiles.invalidFile : GoFiles.closedFile
+                    methodFailure = errorValue("\(operation): \(reason)")
+                    return nil
+                }
+                guard let processContext else {
+                    methodFailure = failure(operation, file.name, "no file system")
+                    return nil
+                }
+                return (file, processContext)
+            }
+
+            switch name {
+            case "$os.Open":
+                stack.append(
+                    contentsOf: open(
+                        try text(operands[0]), flag: GoFiles.readOnly, permissions: 0))
+            case "$os.Create":
+                stack.append(
+                    contentsOf: open(
+                        try text(operands[0]),
+                        flag: GoFiles.readWrite | GoFiles.create | GoFiles.truncate,
+                        permissions: 0o666))
+            case "$os.OpenFile":
+                stack.append(
+                    contentsOf: open(
+                        try text(operands[0]),
+                        flag: try integer(operands[1]),
+                        permissions: try integer(operands[2])))
+            case "$os.Remove":
+                let path = try text(operands[0])
+                guard let processContext else {
+                    stack.append(failure("remove", path, "no file system"))
+                    break
+                }
+                do {
+                    guard
+                        let (parent, entry) = GoFiles.split(
+                            path, workingDirectory: processContext.currentDirectory)
+                    else { throw SyscallError.invalidArgument }
+                    if processContext.lstat(path)?.isDirectory == true,
+                        processContext.listDirectory(path)?.isEmpty == false
+                    {
+                        throw SyscallError.directoryNotEmpty
+                    }
+                    try processContext.remove(entry, in: FileSystemScope(rootPath: parent))
+                    stack.append(.nilValue)
+                } catch {
+                    stack.append(failure("remove", path, error))
+                }
+            case "$os.Rename":
+                let source = try text(operands[0])
+                let destination = try text(operands[1])
+                let subject = "\(source) \(destination)"
+                guard let processContext else {
+                    stack.append(failure("rename", subject, "no file system"))
+                    break
+                }
+                do {
+                    let workingDirectory = processContext.currentDirectory
+                    guard
+                        let (sourceParent, sourceEntry) = GoFiles.split(
+                            source, workingDirectory: workingDirectory),
+                        let (destinationParent, destinationEntry) = GoFiles.split(
+                            destination, workingDirectory: workingDirectory)
+                    else { throw SyscallError.invalidArgument }
+                    guard processContext.lstat(source) != nil,
+                        let parent = processContext.stat(destinationParent)
+                    else { throw SyscallError.noSuchFileOrDirectory }
+                    guard parent.isDirectory else { throw SyscallError.notADirectory }
+                    try processContext.rename(
+                        sourceEntry, in: FileSystemScope(rootPath: sourceParent),
+                        to: destinationEntry, in: FileSystemScope(rootPath: destinationParent))
+                    stack.append(.nilValue)
+                } catch {
+                    stack.append(failure("rename", subject, error))
+                }
+            case "$os.Mkdir":
+                let path = try text(operands[0])
+                let permissions = try integer(operands[1])
+                guard let processContext else {
+                    stack.append(failure("mkdir", path, "no file system"))
+                    break
+                }
+                do {
+                    guard
+                        let (parent, entry) = GoFiles.split(
+                            path, workingDirectory: processContext.currentDirectory)
+                    else { throw SyscallError.fileExists }
+                    guard let parentInfo = processContext.stat(parent) else {
+                        throw SyscallError.noSuchFileOrDirectory
+                    }
+                    guard parentInfo.isDirectory else { throw SyscallError.notADirectory }
+                    try processContext.mkdir(entry, in: FileSystemScope(rootPath: parent))
+                    _ = processContext.chmod(
+                        path, mode: creationMode(permissions, in: processContext))
+                    stack.append(.nilValue)
+                } catch {
+                    stack.append(failure("mkdir", path, error))
+                }
+            case "$os.File.Close":
+                guard let (file, processContext) = try receiver("close") else {
+                    stack.append(methodFailure)
+                    break
+                }
+                if case .int(let handle) = operands[0] { openFiles[handle] = nil }
+                do {
+                    try processContext.closeFile(file.descriptor)
+                    stack.append(.nilValue)
+                } catch {
+                    stack.append(failure("close", file.name, error))
+                }
+            case "$os.File.Sync":
+                guard let (file, processContext) = try receiver("sync") else {
+                    stack.append(methodFailure)
+                    break
+                }
+                // VFS writes are complete when they return; only the
+                // descriptor can be wrong.
+                stack.append(
+                    processContext.fileAccessMode(file.descriptor) == nil
+                        ? failure("sync", file.name, SyscallError.badFileDescriptor)
+                        : .nilValue)
+            case "$os.File.Seek":
+                let offset = try integer(operands[1])
+                let whence = try integer(operands[2])
+                guard let (file, processContext) = try receiver("seek") else {
+                    stack.append(contentsOf: [.int(0), methodFailure])
+                    break
+                }
+                guard (0...2).contains(whence), let target = Int(exactly: offset),
+                    let position = processContext.seek(
+                        file.descriptor, to: target, whence: Int(whence))
+                else {
+                    stack.append(contentsOf: [
+                        .int(0), failure("seek", file.name, SyscallError.invalidArgument),
+                    ])
+                    break
+                }
+                stack.append(contentsOf: [.int(Int64(position)), .nilValue])
+            case "$os.File.ReadAt":
+                let offset = try integer(operands[2])
+                let destination: GoSliceValue?
+                if case .slice(let slice) = operands[1] {
+                    _ = try validatedSliceRange(slice)
+                    destination = slice
+                } else if operands[1] == .nilValue {
+                    destination = nil
+                } else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                guard let (file, processContext) = try receiver("readat") else {
+                    stack.append(contentsOf: [.int(0), methodFailure])
+                    break
+                }
+                guard offset >= 0, let position = Int(exactly: offset) else {
+                    stack.append(contentsOf: [
+                        .int(0), failure("readat", file.name, "negative offset"),
+                    ])
+                    break
+                }
+                do {
+                    let wanted = destination?.length ?? 0
+                    let bytes = try processContext.pread(
+                        file.descriptor, max: wanted, offset: position)
+                    guard bytes.count <= wanted else { throw GoRuntimeError.invalidSliceBounds }
+                    if let destination { try storeBytes(bytes, into: destination) }
+                    stack.append(contentsOf: [
+                        .int(Int64(bytes.count)),
+                        bytes.count < wanted ? errorValue(GoFiles.endOfFile) : .nilValue,
+                    ])
+                } catch let error as GoRuntimeError {
+                    throw error
+                } catch {
+                    stack.append(contentsOf: [.int(0), failure("read", file.name, error)])
+                }
+            default:
+                let contents = try sliceBytes(operands[1])
+                let offset = try integer(operands[2])
+                guard let (file, processContext) = try receiver("writeat") else {
+                    stack.append(contentsOf: [.int(0), methodFailure])
+                    break
+                }
+                guard !file.appends else {
+                    stack.append(contentsOf: [
+                        .int(0),
+                        errorValue("os: invalid use of WriteAt on file opened with O_APPEND"),
+                    ])
+                    break
+                }
+                guard offset >= 0, let position = Int(exactly: offset) else {
+                    stack.append(contentsOf: [
+                        .int(0), failure("writeat", file.name, "negative offset"),
+                    ])
+                    break
+                }
+                do {
+                    let written = try processContext.pwrite(
+                        file.descriptor, contents, offset: position)
+                    stack.append(contentsOf: [
+                        .int(Int64(written)),
+                        written < contents.count ? errorValue("short write") : .nilValue,
+                    ])
+                } catch {
+                    stack.append(contentsOf: [.int(0), failure("write", file.name, error)])
+                }
             }
             return true
         }
@@ -2181,6 +2541,39 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 stack.append(.string(String(value)))
+            case "$errors.New":
+                guard case .string(let message) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(errorValue(message))
+            case "$copy":
+                let source = try pop(&stack)
+                let destination = try pop(&stack)
+                // Reading the source into its own array first makes an
+                // overlapping copy behave like Go's, in either direction.
+                var values: [GoValue]
+                switch source {
+                case .string(let text):
+                    values = text.utf8.map { .int(Int64($0)) }
+                case .nilValue:
+                    values = []
+                case .slice(let slice):
+                    let range = try validatedSliceRange(slice)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    values = Array(backing[range])
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
+                var copied = 0
+                if case .slice(let target) = destination {
+                    copied = min(values.count, try validatedSliceRange(target).count)
+                    values.removeSubrange(copied...)
+                    try storeElements(values, into: target)
+                } else if destination != .nilValue {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(.int(Int64(copied)))
             case "$sort.Strings", "$sort.Ints":
                 guard let elements = try sliceElements(try pop(&stack)) else { break }
                 var backing = elements.backing
@@ -2437,6 +2830,8 @@ public struct GoVirtualMachine: Sendable {
                             try executePureNative(
                                 name, argumentCount: argumentCount, stack: &stack)
                                 || executeHostNative(name, argumentCount: argumentCount)
+                                || executeFileNative(name, argumentCount: argumentCount)
+                                || executeTimeNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }
@@ -2744,7 +3139,7 @@ public struct GoVirtualMachine: Sendable {
                     case .map(let mapValue):
                         guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        stack.append(.int(Int64(storage.entries.count)))
+                        stack.append(.int(Int64(storage.count)))
                     case .channel(let channel):
                         guard case .channelStorage(let storage) = try read(
                             pointer: channel.storage, heap: heap)
@@ -2929,7 +3324,7 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimeError.stackUnderflow
                     }
                     var storage = GoMapStorage()
-                    storage.entries.reserveCapacity(entryCount)
+                    storage.reserveCapacity(entryCount)
                     let start = stack.count - stackEntryCount
                     for i in stride(from: start, to: stack.count, by: 2) {
                         storage.set(stack[i], stack[i + 1])
@@ -3364,7 +3759,26 @@ public struct GoVirtualMachine: Sendable {
                     processContext.tcpConnect(fd, to: ip, port: port) {
                         defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
+                        // The kernel resumes for a failed handshake as well;
+                        // the socket's readiness tells the outcomes apart.
+                        let readiness = processContext.readiness(fd) ?? []
+                        var failure: String?
+                        if readiness.contains(.error) {
+                            failure = "connection refused"
+                        } else if !readiness.contains(.writable) {
+                            failure = "connection timed out"
+                        }
                         do {
+                            if let failure {
+                                processContext.close(fd)
+                                try wakeGoroutine(
+                                    dialingID,
+                                    values: [
+                                        .nilValue,
+                                        errorValue("dial tcp \(address): connect: \(failure)"),
+                                    ])
+                                return
+                            }
                             try wakeGoroutine(
                                 dialingID,
                                 values: [
@@ -3971,15 +4385,16 @@ public struct GoVirtualMachine: Sendable {
                         if base == .nilValue { throw GoRuntimeError.panicError("assignment to entry in nil map") }
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    if storage.get(key) == nil,
-                        storage.entries.count >= resourceLimits.maximumMapEntries
-                    {
-                        throw GoRuntimeError.resourceLimitExceeded("map entries")
+                    guard heap.contains(mapValue.storage.cell) else {
+                        throw GoRuntimeError.invalidPointer
                     }
-                    storage.set(key, value)
-                    try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
+                    guard mapValue.storage.path.isEmpty,
+                        try heap.setMapEntry(
+                            mapValue.storage.cell,
+                            key: key,
+                            value: value,
+                            maximumEntries: resourceLimits.maximumMapEntries)
+                    else { throw GoRuntimeError.typeMismatch }
                     stack.append(.map(mapValue))
                 case .deleteMap:
                     let key = try pop(&stack)
@@ -3991,10 +4406,12 @@ public struct GoVirtualMachine: Sendable {
                     guard case .map(let mapValue) = base else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard case .mapStorage(var storage) = try read(pointer: mapValue.storage, heap: heap)
+                    guard heap.contains(mapValue.storage.cell) else {
+                        throw GoRuntimeError.invalidPointer
+                    }
+                    guard mapValue.storage.path.isEmpty,
+                        try heap.removeMapEntry(mapValue.storage.cell, key: key)
                     else { throw GoRuntimeError.typeMismatch }
-                    storage.delete(key)
-                    try writePointer(.mapStorage(storage), through: mapValue.storage, heap: &heap)
                     stack.append(.map(mapValue))
                 case .callInterface(let methodName, let argumentCount):
                     // Stack: [receiver, arg0, arg1, ..., argN-1] (receiver pushed first)
@@ -4096,7 +4513,7 @@ public struct GoVirtualMachine: Sendable {
                     case .map(let mapValue):
                         guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        keys = storage.entries.map(\.key)
+                        keys = storage.keys
                     case .nilValue:
                         keys = []
                     default:
@@ -4681,7 +5098,7 @@ public struct GoVirtualMachine: Sendable {
             guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
             else { throw GoRuntimeError.typeMismatch }
             var parts: [String] = []
-            parts.reserveCapacity(storage.entries.count * 4 + 2)
+            parts.reserveCapacity(storage.count * 4 + 2)
             var byteCount = 0
             func append(_ part: String) throws {
                 let count = part.utf8.count
@@ -4867,6 +5284,130 @@ private struct ManagedHeap {
         return true
     }
 
+    /// Replace `values.count` elements of the array stored in cell `index`,
+    /// starting at element `start`, in place: one accounting pass over the
+    /// replaced range instead of one cell rebuild per element. Returns
+    /// `false` when the cell does not hold an array covering that range.
+    mutating func replaceArrayElements(
+        _ index: Int,
+        from start: Int,
+        with values: [GoValue]
+    ) throws -> Bool {
+        guard contains(index), case .array(var elements) = cells[index]!.value,
+            start >= 0, values.count <= elements.count, start <= elements.count - values.count
+        else { return false }
+        let range = start..<(start + values.count)
+        var oldBytes = 0
+        var newBytes = 0
+        for element in elements[range] {
+            oldBytes += try Self.estimatedBytes(of: element, maximum: maximumBytes)
+        }
+        for value in values {
+            let bytes = try Self.estimatedBytes(of: value, maximum: maximumBytes)
+            guard bytes <= maximumBytes - newBytes else {
+                throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+            }
+            newBytes += bytes
+        }
+        let (layout, cellBytes, marked) = (
+            cells[index]!.layout, cells[index]!.estimatedBytes, cells[index]!.marked)
+        let bytesWithoutOldElements = liveBytes - oldBytes
+        guard bytesWithoutOldElements <= maximumBytes,
+            newBytes <= maximumBytes - bytesWithoutOldElements
+        else {
+            throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+        }
+        // As in `replaceArrayElement`: without the cell's reference the
+        // store below mutates the buffer in place.
+        cells[index] = nil
+        elements.replaceSubrange(range, with: values)
+        cells[index] = Cell(
+            value: .array(elements),
+            layout: layout,
+            estimatedBytes: cellBytes - oldBytes + newBytes,
+            marked: marked)
+        liveBytes = bytesWithoutOldElements + newBytes
+        return true
+    }
+
+    /// Bytes charged for one map entry besides its key and value.
+    private static let mapEntryOverheadBytes = 16
+
+    /// Set `key` in the map stored in cell `index` without copying the storage
+    /// or re-measuring its other entries, so an insert or update costs O(1)
+    /// instead of O(entries). A new key beyond `maximumEntries` is refused.
+    /// Returns `false` when the cell does not hold map storage.
+    mutating func setMapEntry(
+        _ index: Int,
+        key: GoValue,
+        value: GoValue,
+        maximumEntries: Int
+    ) throws -> Bool {
+        guard contains(index), case .mapStorage(var storage) = cells[index]!.value else {
+            return false
+        }
+        let removedBytes: Int
+        var addedBytes = try Self.estimatedBytes(of: value, maximum: maximumBytes)
+        if let existing = storage.entry(for: key) {
+            removedBytes = try Self.estimatedBytes(of: existing.value, maximum: maximumBytes)
+        } else {
+            guard storage.count < maximumEntries else {
+                throw GoRuntimeError.resourceLimitExceeded("map entries")
+            }
+            removedBytes = 0
+            let keyBytes = try Self.estimatedBytes(of: key, maximum: maximumBytes)
+            guard keyBytes <= maximumBytes - Self.mapEntryOverheadBytes,
+                addedBytes <= maximumBytes - Self.mapEntryOverheadBytes - keyBytes
+            else { throw GoRuntimeError.resourceLimitExceeded("heap bytes") }
+            addedBytes += Self.mapEntryOverheadBytes + keyBytes
+        }
+        let (layout, cellBytes, marked) = (
+            cells[index]!.layout, cells[index]!.estimatedBytes, cells[index]!.marked)
+        let bytesWithoutOldValue = liveBytes - removedBytes
+        guard bytesWithoutOldValue <= maximumBytes,
+            addedBytes <= maximumBytes - bytesWithoutOldValue
+        else {
+            throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+        }
+        // Drop the cell's reference first so `storage` is uniquely referenced
+        // and the update below mutates its buffers in place.
+        cells[index] = nil
+        storage.set(key, value)
+        cells[index] = Cell(
+            value: .mapStorage(storage),
+            layout: layout,
+            estimatedBytes: cellBytes - removedBytes + addedBytes,
+            marked: marked)
+        liveBytes = bytesWithoutOldValue + addedBytes
+        return true
+    }
+
+    /// Delete `key` from the map stored in cell `index` in place and release
+    /// the bytes of its entry. Returns `false` when the cell does not hold
+    /// map storage; deleting an absent key succeeds.
+    mutating func removeMapEntry(_ index: Int, key: GoValue) throws -> Bool {
+        guard contains(index), case .mapStorage(var storage) = cells[index]!.value else {
+            return false
+        }
+        // Measure the stored key: an equal key can have another representation.
+        guard let existing = storage.entry(for: key) else { return true }
+        let removedBytes =
+            Self.mapEntryOverheadBytes
+            + (try Self.estimatedBytes(of: existing.key, maximum: maximumBytes))
+            + (try Self.estimatedBytes(of: existing.value, maximum: maximumBytes))
+        let (layout, cellBytes, marked) = (
+            cells[index]!.layout, cells[index]!.estimatedBytes, cells[index]!.marked)
+        cells[index] = nil
+        storage.delete(key)
+        cells[index] = Cell(
+            value: .mapStorage(storage),
+            layout: layout,
+            estimatedBytes: cellBytes - removedBytes,
+            marked: marked)
+        liveBytes -= removedBytes
+        return true
+    }
+
     mutating func allocate(_ value: GoValue) throws -> Int {
         let estimatedBytes = try Self.estimatedBytes(of: value, maximum: maximumBytes)
         guard liveBytes <= maximumBytes,
@@ -4982,10 +5523,10 @@ private struct ManagedHeap {
             case .map(let map):
                 try addPointer(map.storage)
             case .mapStorage(let storage):
-                try addProduct(storage.entries.count, 16)
-                for entry in storage.entries {
-                    worklist.append(entry.key)
-                    worklist.append(entry.value)
+                try addProduct(storage.count, Self.mapEntryOverheadBytes)
+                storage.forEachEntry { key, value in
+                    worklist.append(key)
+                    worklist.append(value)
                 }
             case .channel(let channel):
                 try addPointer(channel.storage)
@@ -5094,9 +5635,9 @@ private enum GoHeapLayout {
         case (.mapHandle, .map(let map)):
             worklist.append(map.storage.cell)
         case (.mapStorage, .mapStorage(let storage)):
-            for entry in storage.entries {
-                GoHeapLayout(entry.key).appendReferences(in: entry.key, to: &worklist)
-                GoHeapLayout(entry.value).appendReferences(in: entry.value, to: &worklist)
+            storage.forEachEntry { key, value in
+                GoHeapLayout(key).appendReferences(in: key, to: &worklist)
+                GoHeapLayout(value).appendReferences(in: value, to: &worklist)
             }
         case (.channelHandle, .channel(let channel)):
             worklist.append(channel.storage.cell)

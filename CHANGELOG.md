@@ -5,6 +5,43 @@ format, behavior and platform changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Swiftix Go files: `os.Open`, `os.Create`, and `os.OpenFile` with the
+  `os.O_*` flags; `(*os.File).Close`, `Seek`, `ReadAt`, `WriteAt`, and `Sync`;
+  `os.Remove`, `os.Rename`, and `os.Mkdir`; `io.EOF` and the `io.Seek*`
+  constants. A program can keep an append-only log, replay it, and address a
+  file in fixed-size pages.
+- Swiftix Go wall-clock time: `time.Now`, `time.Since`, `time.Unix`, and the
+  `time.Time` methods `Unix`, `UnixMilli`, `UnixNano`, `Sub`, `Add`, `Before`,
+  `After`, and `Equal`.
+- Swiftix Go `errors.New`, and the builtin `copy`, which runs natively.
+- A multi-value `:=` may reuse variables of the same block when one name is
+  new (`n, err := f()` after an earlier `err`).
+- `GoMapStorage.count`.
+
+### Changed
+
+- Swiftix Go maps are hash-indexed and updated in place: lookup, insertion,
+  and `delete` are O(1) amortized instead of O(entries). Iteration order is
+  unchanged (insertion order). `GoMapStorage.entries` is now computed, and
+  `GoMapStorage(entries:)` keeps the last value of a repeated key.
+- The errors returned by `strconv.Atoi`, `net.Dial`, `net.Listen`,
+  `net.LookupHost`, `http.Get`, `http.ListenAndServe`, `conn.Read`,
+  `conn.Write`, `conn.Close`, `listener.Accept`, `listener.Close`, and
+  `ctx.Err` have the type `error` instead of `interface{}`, so they can be
+  returned as an `error`, compared with `io.EOF`, and read with `Error()`.
+- `time.After` and `time.Tick` deliver instants on the kernel wall clock
+  instead of logical nanoseconds. The two agree unless the host anchored the
+  clock with `Kernel.setWallClock`.
+
+### Fixed
+
+- `net.Dial` returned a connection and a nil error when the peer refused the
+  connection or the handshake was abandoned. It now returns
+  `dial tcp <address>: connect: connection refused` or `connection timed out`
+  and closes the socket.
+
 ## 0.13.1 — 2026-10-08
 
 ### Added
