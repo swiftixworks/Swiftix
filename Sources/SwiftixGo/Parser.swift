@@ -5,12 +5,53 @@ public enum GoParser {
         var parser = Parser(tokens: try GoLexer.tokenize(source), path: source.path)
         return try parser.parseFile()
     }
+
+    /// Parses `source` and also reports where it has parentheses around an
+    /// expression. The tree keeps no node for a pair; `gofmt` needs to know
+    /// where they are.
+    static func parseRecordingParentheses(
+        _ source: GoSourceFile
+    ) throws -> (file: GoFile, parentheses: GoParentheses) {
+        var parser = Parser(tokens: try GoLexer.tokenize(source), path: source.path)
+        let file = try parser.parseFile()
+        return (file, parser.parentheses)
+    }
+}
+
+/// The parentheses of a source file that wrap an expression, as distinct
+/// from those of a call, a conversion, or a type assertion.
+struct GoParentheses: Equatable, Sendable {
+    /// The innermost pair around an expression, by the offset of the
+    /// expression's position: the offsets of its `(` and `)`.
+    private(set) var pairs: [Int: (open: Int, close: Int)] = [:]
+    /// The `(` and `)` of every further pair around an expression that
+    /// already has one, as in `((x))`.
+    private(set) var redundant: Set<Int> = []
+
+    mutating func record(around expression: GoExpression, open: Int, close: Int) {
+        let offset = expression.position.offset
+        if pairs[offset] == nil {
+            pairs[offset] = (open, close)
+        } else {
+            redundant.insert(open)
+            redundant.insert(close)
+        }
+    }
+
+    static func == (lhs: GoParentheses, rhs: GoParentheses) -> Bool {
+        lhs.redundant == rhs.redundant && lhs.pairs.count == rhs.pairs.count
+            && lhs.pairs.allSatisfy { key, value in
+                rhs.pairs[key].map { $0.open == value.open && $0.close == value.close } ?? false
+            }
+    }
 }
 
 private struct Parser {
     let tokens: [GoToken]
     let path: String
     var index = 0
+    /// The parentheses around expressions, which the tree does not keep.
+    var parentheses = GoParentheses()
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -1129,7 +1170,9 @@ private struct Parser {
         case .leftParen:
             advance()
             let expression = try parseExpression()
+            let close = current.position.offset
             try expect(.rightParen, message: "expected ')'")
+            parentheses.record(around: expression, open: token.position.offset, close: close)
             return expression
         case .leftBracket:
             let type = try parseTypeExpression()

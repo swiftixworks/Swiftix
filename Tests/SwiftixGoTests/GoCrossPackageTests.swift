@@ -861,7 +861,7 @@ struct GoCrossPackageTests: GoTestHarness {
         let formatted = try GoFormatter.format(source)
         #expect(
             formatted
-                == "package main\n\nimport \"example/m/geo\"\n\nfunc build(x int) (geo.Point, error) {\n\tp := geo.Point{X: x, Y: geo.Limit}\n\treturn p, nil\n}\n\nfunc main() {\n\tps := []geo.Point{geo.Point{X: 1}}\n\tgeo.Counter += len(ps)\n}\n")
+                == "package main\n\nimport \"example/m/geo\"\n\nfunc build(x int) (geo.Point, error) {\n\tp := geo.Point{X: x, Y: geo.Limit}\n\treturn p, nil\n}\nfunc main() {\n\tps := []geo.Point{geo.Point{X: 1}}\n\tgeo.Counter += len(ps)\n}\n")
         #expect(try GoFormatter.format(GoSourceFile(path: "main.go", text: formatted)) == formatted)
         let rewritten = try GoSourceRewriter.rewrite(
             GoSourceFile(path: "main.go", text: formatted), rule: "len(a) -> cap(a)")

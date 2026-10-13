@@ -102,6 +102,15 @@ format, behavior and platform changes are recorded here.
   value` (was `multiple-value context requires function call`), and struct
   literal errors name the type (`too few values in struct literal of type
   point`, `unknown field Z in struct literal of type point`).
+- `gofmt` spaces binary operators as Go's printer does, by precedence and
+  nesting, instead of putting blanks around every one: `x*2 + y`,
+  `f(a+1, b)`, `s[i+1]`, `a, b = b+1, a*2`, `s[lo : hi+1]`, `a - -b`. It
+  drops parentheses that say nothing (`((x))`, `if (a > b) {`), and no longer
+  adds an empty line between two top-level declarations of one kind
+  (`func`/`func`, `type`/`type`) where the source has none. Source formatted
+  by Go's `gofmt` now comes back unchanged apart from the cases listed under
+  "Known Gaps" in `docs/go-toolchain.md`; formatting existing Swiftix Go
+  source again will change its operator spacing once.
 - A Swiftix Go program that ends on a run-time error fails with
   `GoRuntimeError.panicError("runtime error: ...")`, the text Go prints,
   instead of `.divisionByZero`, `.indexOutOfRange`, `.invalidSliceBounds`, or
@@ -140,6 +149,12 @@ format, behavior and platform changes are recorded here.
   `p := m[k]` followed by `p.field` failed with `bytecode operand type
   mismatch` when the map held pointers, and a map value stored in an
   interface lost its type.
+- `gofmt` broke `interface{}` and `struct{}` in a function signature over
+  two lines (`func f(v interface {` / `}) int{...}`), which no longer read as
+  the declaration it was. It also printed `[]interface{}{x}` as a block,
+  `type grid[2]point` and `type link * node` without their spacing, a
+  function literal as `func () {`, and the `:` of a slice inside a composite
+  literal as a key's (`[]string{s[1: 2]}`).
 - `gofmt` printed a pointer element type in an expression as a
   multiplication (`[] * node{}`, `make([] * node, 0)`), a pointer field of a
   struct as `next * node`, a slice field as `lines[]string`, `map [K]V` in a

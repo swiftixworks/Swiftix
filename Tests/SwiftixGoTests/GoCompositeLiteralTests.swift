@@ -205,6 +205,62 @@ struct GoCompositeLiteralTests: GoTestHarness {
                 """)
     }
 
+    /// Each output below is what the `gofmt` of Go 1.24.5 prints.
+    @Test func gofmtPrintsTypesWhereTheyAreDeclared() throws {
+        let source = GoSourceFile(
+            path: "main.go",
+            text: """
+                package main
+                type grid [2]point
+                type row []int
+                type link *node
+                type table map[string][]*node
+                type any2 interface{}
+                type unit struct{}
+                func (n *node) name() string {
+                return ""
+                }
+                func assertInt(value interface{}, extra struct{}) interface{} {
+                defer func() {
+                recover()
+                }()
+                go func(x int) {
+                use(x)
+                }(1)
+                m := map[string]interface{}{"a": 1, "b": []interface{}{2}}
+                return value.(int)
+                }
+
+                """)
+
+        #expect(
+            try GoFormatter.format(source) == """
+                package main
+
+                type grid [2]point
+                type row []int
+                type link *node
+                type table map[string][]*node
+                type any2 interface{}
+                type unit struct{}
+
+                func (n *node) name() string {
+                \treturn ""
+                }
+                func assertInt(value interface{}, extra struct{}) interface{} {
+                \tdefer func() {
+                \t\trecover()
+                \t}()
+                \tgo func(x int) {
+                \t\tuse(x)
+                \t}(1)
+                \tm := map[string]interface{}{"a": 1, "b": []interface{}{2}}
+                \treturn value.(int)
+                }
+
+                """)
+    }
+
     @Test func gofmtPrintsPointerElementTypes() throws {
         let source = GoSourceFile(
             path: "main.go",

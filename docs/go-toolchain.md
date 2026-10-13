@@ -73,7 +73,7 @@ go build -o hello .
 - Guest strings are always valid UTF-8, so `string(b)` for a `[]byte` repairs each invalid sequence to U+FFFD instead of keeping the bytes; `[]byte(s)` yields the exact UTF-8 bytes.
 - Constants are integers only. An untyped constant keeps adapting to `byte` and named integer types, but a constant shift such as `1 << n` has type `int`, and a `range` over a string yields `int` code points.
 - `time.Time` is opaque apart from the methods listed above: it has no operators, no calendar fields, no `Format`, and no location, and cannot be used as an `int`. `*os.File` is likewise opaque: it cannot be dereferenced, and it has no `Stat`, `Truncate`, `Chmod`, or directory reads. `os.Open` refuses a directory.
-- `gofmt -s` implements only its registered safe rules. `gofmt` does not vary the spaces around binary operators with their precedence and nesting (Go prints `x*2 + y` and `f(a+1, b)`; Swiftix prints `x * 2 + y` and `f(a + 1, b)`), does not align struct fields in columns, and adds a blank line between top-level functions that have none.
+- `gofmt -s` implements only its registered safe rules. `gofmt` does not align struct fields in columns, always puts the body of a function, struct, or interface on lines of its own (Go keeps `func main() {}` and `interface{ Area() int }` as written), and joins an expression that the source breaks over several lines.
 - `sort.Slice`, `sort.Sort`, and `sort.Stable` are not provided (a native sort cannot call back into guest code); programs encode a byte-comparable key and use `sort.Strings` or `sort.Ints`.
 - A file-backed process has no CPU quota: yielding keeps the system responsive, and the host or user ends a runaway program with a signal.
 - The compiler frontend still needs tighter budgets for source, AST, imports, and constants.
@@ -105,6 +105,8 @@ go clean -cache
 ```
 
 `gofmt` supports files, directories, stdin, `-l`, `-w`, `-d`, the AST-pattern `-r` option, and limited `-s`. Output must be deterministic and idempotent; batch writes begin only after every file parses successfully.
+
+The blanks around binary operators follow Go's printer rule for rule, so source that Go's `gofmt` formatted comes back unchanged: precedence shows at the top of an expression (`x*2 + y`), and an operator inside the arguments of a call that has several, inside an index, among several values of an assignment, or under an operator of another precedence is joined to its operands (`f(a+1, b)`, `s[i+1]`, `a, b = b+1, a*2`, `n-1 < len(s)`). Parentheses take one level back (`(a + b) * c`), an operator stays clear of a unary one after it (`a - -b`), and the `:` of a slice has blanks beside a binary bound (`s[lo : hi+1]`). Parentheses that say nothing are dropped: the second pair of `((x))` and the pair around a whole `if`, `for`, `switch`, or `range` expression. An empty line separates top-level declarations of different kinds; between two of one kind the source decides.
 
 `go build`, `go run`, and `go install` take one package directory below the current one (`.`, `./cmd/tool`; `go run` needs the `./` form) or a list of `.go` files; a file list is compiled as a single package without local imports. `go test` takes `.` or `./...`, and a package's test files may import local packages that its other files do not.
 
