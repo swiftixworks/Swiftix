@@ -831,6 +831,10 @@ public struct GoVirtualMachine: Sendable {
         for function in executable.functions {
             functions[function.name] = function
         }
+        // The methods of the library's defined types, which no image has.
+        for (name, function) in GoLibraryMethods.functions where functions[name] == nil {
+            functions[name] = function
+        }
         guard functions[executable.entryPoint] != nil else {
             throw GoRuntimeError.missingEntryPoint(executable.entryPoint)
         }
@@ -2844,6 +2848,7 @@ public struct GoVirtualMachine: Sendable {
             guard let first = target.methods.first else { return nil }
             guard let owner = methodTarget(value)?.owner else { return first.name }
             if target.implementers.contains(owner) { return nil }
+            if GoLibraryMethods.implements(owner, target) { return nil }
             // Which method is missing, for the message: one the type lacks,
             // or else one it has with other parameter or result types.
             var owners = [owner]
@@ -3098,9 +3103,24 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
-        /// Run a `time` native. Operands and results are integers and bools.
+        /// Run a `time` native. Operands are integers, and results integers,
+        /// bools, and the text of a duration; `time.ParseDuration` alone
+        /// takes a string and gives an error.
         /// Returns `false` when `name` is not such a function.
         func executeTimeNative(_ name: String, argumentCount: Int) throws -> Bool {
+            if name == GoNative.parseDuration {
+                guard argumentCount == 1 else {
+                    throw GoRuntimeError.argumentCountMismatch(
+                        function: name, expected: 1, actual: argumentCount)
+                }
+                guard case .string(let text) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                let parsed = GoDuration.parse(text)
+                stack.append(.int(parsed.duration))
+                stack.append(errorValue(parsed.error))
+                return true
+            }
             guard let expectedCount = GoNative.timeArgumentCounts[name] else { return false }
             guard argumentCount == expectedCount else {
                 throw GoRuntimeError.argumentCountMismatch(

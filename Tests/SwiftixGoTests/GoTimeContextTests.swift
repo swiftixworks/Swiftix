@@ -100,7 +100,7 @@ struct GoTimeContextTests: GoTestHarness {
                 == "operator requires integer operands")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\ntime.Sleep(t)")
-                == "cannot use time.Time as int value")
+                == "cannot use time.Time as time.Duration value in argument to time.Sleep")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\nfmt.Println(int(t))")
                 == "cannot convert time.Time to type int")

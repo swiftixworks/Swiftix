@@ -475,6 +475,7 @@ public enum GoTypeChecker {
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
                 return .named(name)
+            case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             default:
                 guard availableTypes.contains(name) else {
                     throw GoDiagnostic(
@@ -833,6 +834,9 @@ private struct FunctionChecker {
     /// What the method `name` of a value of `type` takes and gives, without
     /// its receiver.
     func methodSignature(of type: GoType, named name: String) -> FunctionSignature? {
+        if let library = GoLibraryTypes.method(of: type, named: name) {
+            return FunctionSignature(parameters: library.parameters, results: library.results)
+        }
         let candidates: [String]
         switch type {
         case .named(let baseName):
@@ -1869,7 +1873,12 @@ private struct FunctionChecker {
             importedPaths.contains(packageName),
             GoStandardLibrary.integerConstant(package: packageName, member: name) != nil
         {
-            return .int
+            return GoLibraryTypes.constantType(package: packageName, member: name)
+        }
+        if let typeName = libraryTypeName(base: base, member: name) {
+            // Go reports a type where a value is wanted at its first name.
+            throw GoDiagnostic(
+                position: base.position, message: "\(typeName) (type) is not an expression")
         }
         if case .identifier(let packageName, _) = base,
             importedPaths.contains(packageName),
@@ -2491,7 +2500,8 @@ private struct FunctionChecker {
                     position: position,
                     message: "wrong number of arguments in call to time.After")
             }
-            try require(arguments[0], assignableTo: .int)
+            try requireArgument(
+                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.After")
             return .channel(direction: .receiveOnly, element: GoPredeclared.time)
         }
         if case .identifier(let packageName, _) = base,
@@ -2504,7 +2514,8 @@ private struct FunctionChecker {
                     position: position,
                     message: "wrong number of arguments in call to time.Sleep")
             }
-            try require(arguments[0], assignableTo: .int)
+            try requireArgument(
+                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.Sleep")
             return .void
         }
         if case .identifier(let packageName, _) = base,
@@ -2517,7 +2528,8 @@ private struct FunctionChecker {
                     position: position,
                     message: "wrong number of arguments in call to time.Tick")
             }
-            try require(arguments[0], assignableTo: .int)
+            try requireArgument(
+                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.Tick")
             return .channel(direction: .receiveOnly, element: GoPredeclared.time)
         }
         if case .identifier(let packageName, _) = base,
@@ -2556,7 +2568,8 @@ private struct FunctionChecker {
                     message: "wrong number of arguments in call to context.WithTimeout")
             }
             try require(arguments[0], assignableTo: .named("context.Context"))
-            try require(arguments[1], assignableTo: .int)
+            try requireArgument(
+                arguments[1], assignableTo: GoLibraryTypes.duration, of: "context.WithTimeout")
             return .named("context.Context")
         }
         if case .identifier(let packageName, _) = base,
@@ -3160,6 +3173,7 @@ private struct FunctionChecker {
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
                 return .named(name)
+            case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             default:
                 guard availableTypes.contains(name) else {
                     throw GoDiagnostic(
@@ -3373,6 +3387,8 @@ private struct FunctionChecker {
             // `(*T)(x)`: the parentheses are gone, and `*T` is a type
             // where `T` is one.
             return try conversionTarget(operand).map { .pointer($0) }
+        case .selector:
+            return libraryConversionTarget(callee)
         default:
             return nil
         }
@@ -3435,6 +3451,70 @@ private struct FunctionChecker {
             message: "os.File is opaque; a *os.File cannot be dereferenced")
     }
 
+    // MARK: Library types
+
+    /// The type `callee` names when it is a type of the library that a
+    /// value converts to, as in `time.Duration(n)`; nil for anything else.
+    func libraryConversionTarget(_ callee: GoExpression) -> GoType? {
+        guard case .selector(let base, let name, _) = callee,
+            let packageName = importedPackage(named: base)
+        else { return nil }
+        return GoLibraryTypes.convertible(package: packageName, member: name)
+    }
+
+    /// `package.member` when it names a type of the library, which is no
+    /// value: `x := time.Duration`.
+    func libraryTypeName(base: GoExpression, member: String) -> String? {
+        guard let packageName = importedPackage(named: base) else { return nil }
+        let name = packageName + "." + member
+        let named = GoTypeExpression.named(name, position: base.position)
+        return (try? declaredType(named)) == nil ? nil : name
+    }
+
+    /// Requires `argument` to be assignable to a parameter of type
+    /// `expected` of the library function `function`, and names the
+    /// function when it is not, as the report for a function of the program
+    /// does.
+    mutating func requireArgument(
+        _ argument: GoExpression, assignableTo expected: GoType, of function: String
+    ) throws {
+        let actual = try type(of: argument)
+        guard try isAssignable(argument, ofType: actual, to: expected) else {
+            throw GoDiagnostic(
+                position: argument.position,
+                message: "cannot use \(actual) as \(expected) value in argument to \(function)")
+        }
+    }
+
+    /// The same for a native call written as `callee`. Only a duration
+    /// that is refused names the call: an `int` where one is wanted is the
+    /// mistake a program written for durations as integers makes, and the
+    /// call is what tells the reader which value to convert.
+    mutating func requireArgument(
+        _ argument: GoExpression, assignableTo expected: GoType, ofCall callee: GoExpression
+    ) throws {
+        guard expected == GoLibraryTypes.duration, let name = spelling(callee) else {
+            return try require(argument, assignableTo: expected)
+        }
+        try requireArgument(argument, assignableTo: expected, of: name)
+    }
+
+    /// How the source writes `expression` when it is a name, a selection
+    /// from one, or a call of one without arguments (`time.Now().Add`);
+    /// nil for anything longer.
+    func spelling(_ expression: GoExpression) -> String? {
+        switch expression {
+        case .identifier(let name, _):
+            return name
+        case .selector(let base, let name, _):
+            return spelling(base).map { $0 + "." + name }
+        case .call(let callee, let arguments, _) where arguments.isEmpty:
+            return spelling(callee).map { $0 + "()" }
+        default:
+            return nil
+        }
+    }
+
     /// Checks a call to a native library function or `*os.File` method and
     /// returns it, or nil when `callee` is not one.
     mutating func nativeCall(
@@ -3453,7 +3533,8 @@ private struct FunctionChecker {
             function = native
             parameters = native.parameters[...]
         } else if let receiver = try? type(of: base),
-            let native = GoStandardLibrary.method(of: receiver, named: name)
+            let native = GoStandardLibrary.method(
+                of: GoLibraryTypes.methodOwner(receiver) ?? receiver, named: name)
         {
             function = native
             parameters = native.parameters.dropFirst()
@@ -3469,7 +3550,7 @@ private struct FunctionChecker {
                 message: "wrong number of arguments in call to \(function.goName)")
         }
         for (argument, parameter) in zip(arguments, parameters) {
-            try require(argument, assignableTo: parameter)
+            try requireArgument(argument, assignableTo: parameter, ofCall: callee)
         }
         try checkAnyOperands(arguments.dropFirst(parameters.count))
         return function
@@ -3616,6 +3697,12 @@ private struct FunctionChecker {
 
     func satisfies(_ type: GoType, interface methods: [GoInterfaceMethod]) -> Bool {
         for method in methods {
+            if let library = GoLibraryTypes.method(of: type, named: method.name) {
+                // A method of a library type, which the VM provides.
+                guard library.parameters == method.parameters, library.results == method.results
+                else { return false }
+                continue
+            }
             let candidates: [String]
             switch type {
             case .named(let name):
@@ -3875,7 +3962,9 @@ private struct FunctionChecker {
                             message: "wrong number of arguments in call to context.WithTimeout")
                     }
                     try require(arguments[0], assignableTo: .named("context.Context"))
-                    try require(arguments[1], assignableTo: .int)
+                    try requireArgument(
+                        arguments[1], assignableTo: GoLibraryTypes.duration,
+                        of: "context.WithTimeout")
                     return [.named("context.Context"), .named("context.CancelFunc")]
                 default:
                     break

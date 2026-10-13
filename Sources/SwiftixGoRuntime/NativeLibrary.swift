@@ -37,7 +37,8 @@ enum GoNative {
 
     /// Reserved call names of the `time` natives, with their operand counts.
     /// An instant is its nanoseconds since the Unix epoch and a duration is
-    /// nanoseconds, so every operand and result is an integer or a bool.
+    /// nanoseconds, so every operand is an integer, and every result an
+    /// integer, a bool, or the text of a duration.
     static let timeArgumentCounts: [String: Int] = [
         "$time.Now": 0,
         "$time.Since": 1,
@@ -50,6 +51,14 @@ enum GoNative {
         "$time.Time.Before": 2,
         "$time.Time.After": 2,
         "$time.Time.Equal": 2,
+        "$time.Until": 1,
+        "$time.Duration.String": 1,
+        "$time.Duration.Nanoseconds": 1,
+        "$time.Duration.Microseconds": 1,
+        "$time.Duration.Milliseconds": 1,
+        "$time.Duration.Round": 2,
+        "$time.Duration.Truncate": 2,
+        "$time.Duration.Abs": 1,
     ]
 
     /// Result of the `time` native `name` when the current instant is `now`,
@@ -73,7 +82,7 @@ enum GoNative {
         case "$time.Time.Before": return .bool(operands[0] < operands[1])
         case "$time.Time.After": return .bool(operands[0] > operands[1])
         case "$time.Time.Equal": return .bool(operands[0] == operands[1])
-        default: return nil
+        default: return duration(name, operands, now: now)
         }
     }
 

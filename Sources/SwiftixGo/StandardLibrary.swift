@@ -74,6 +74,8 @@ enum GoStandardLibrary {
         case ("time", "Microsecond"): return 1_000
         case ("time", "Millisecond"): return 1_000_000
         case ("time", "Second"): return 1_000_000_000
+        case ("time", "Minute"): return 60_000_000_000
+        case ("time", "Hour"): return 3_600_000_000_000
         // Linux values, as Go uses on linux. The VM decodes the same numbers
         // in `GoFiles`.
         case ("os", "O_RDONLY"): return 0
@@ -235,7 +237,15 @@ extension GoStandardLibrary {
         case ("time", "Since"):
             return GoNativeFunction(
                 symbol: "$time.Since", goName: "time.Since", parameters: [GoPredeclared.time],
-                results: [.int])
+                results: [GoLibraryTypes.duration])
+        case ("time", "Until"):
+            return GoNativeFunction(
+                symbol: "$time.Until", goName: "time.Until", parameters: [GoPredeclared.time],
+                results: [GoLibraryTypes.duration])
+        case ("time", "ParseDuration"):
+            return GoNativeFunction(
+                symbol: "$time.ParseDuration", goName: "time.ParseDuration",
+                parameters: [.string], results: [GoLibraryTypes.duration, failure])
         case ("time", "Unix"):
             return GoNativeFunction(
                 symbol: "$time.Unix", goName: "time.Unix", parameters: [.int, .int],
@@ -245,23 +255,25 @@ extension GoStandardLibrary {
         }
     }
 
-    /// Native methods of the library types `*os.File` and `time.Time`. The
-    /// receiver is the first parameter.
+    /// Native methods of the library types `*os.File`, `time.Time`, and
+    /// `time.Duration`. The receiver is the first parameter.
     static func method(of receiver: GoType, named member: String) -> GoNativeFunction? {
         if receiver == GoPredeclared.filePointer { return fileMethod(member) }
         if receiver == GoPredeclared.time { return timeMethod(member) }
+        if receiver == GoLibraryTypes.duration { return GoLibraryTypes.durationMethod(member) }
         return nil
     }
 
-    /// Native methods of `time.Time`. Durations are `int` nanoseconds.
+    /// Native methods of `time.Time`.
     static func timeMethod(_ member: String) -> GoNativeFunction? {
         let time = GoPredeclared.time
+        let duration = GoLibraryTypes.duration
         let parameters: [GoType]
         let result: GoType
         switch member {
         case "Unix", "UnixMilli", "UnixNano": (parameters, result) = ([time], .int)
-        case "Sub": (parameters, result) = ([time, time], .int)
-        case "Add": (parameters, result) = ([time, .int], time)
+        case "Sub": (parameters, result) = ([time, time], duration)
+        case "Add": (parameters, result) = ([time, duration], time)
         case "Before", "After", "Equal": (parameters, result) = ([time, time], .bool)
         default: return nil
         }
@@ -337,6 +349,7 @@ extension GoStandardLibrary {
             || name == GoPredeclared.callFunctionValue
             || name == GoPredeclared.requireValue
             || name.hasPrefix(GoPredeclared.liveResults)
+            || GoLibraryTypes.nativeCallNames.contains(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(
@@ -461,7 +474,7 @@ enum GoPredeclared {
 
     /// Underlying type of a predeclared named type.
     static func underlying(of name: String) -> GoType? {
-        name == "byte" ? .int : nil
+        name == "byte" ? .int : GoLibraryTypes.underlying(of: name)
     }
 
     /// Go numeric types this toolchain does not implement.

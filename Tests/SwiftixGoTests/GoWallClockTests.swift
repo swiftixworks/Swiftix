@@ -32,7 +32,7 @@ struct GoWallClockTests: GoTestHarness {
             output == """
                 0 0 0
                 1 1500 1500000000
-                1500000000 1500000000 -1500000000
+                1.5s 1.5s -1.5s
                 true false false true
 
                 """)
@@ -77,7 +77,7 @@ struct GoWallClockTests: GoTestHarness {
             """,
             imports: ["fmt", "time"])
 
-        #expect(output == "250000000 true 250\n")
+        #expect(output == "250ms true 250\n")
     }
 
     @Test func instantsConvertToAndFromUnixTime() throws {
@@ -146,7 +146,7 @@ struct GoWallClockTests: GoTestHarness {
             diagnostic(
                 """
                 var deadline time.Time = time.Now().Add(time.Second)
-                var left int = deadline.Sub(time.Now())
+                var left time.Duration = deadline.Sub(time.Now())
                 fmt.Println(left, deadline.After(time.Now()))
                 """) == nil)
     }

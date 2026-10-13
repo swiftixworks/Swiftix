@@ -96,7 +96,7 @@ struct GoKeyValueServerTests {
                 if !ok {
                     return ":0"
                 }
-                db.expires[key] = time.Now().Add(milliseconds * time.Millisecond)
+                db.expires[key] = time.Now().Add(time.Duration(milliseconds) * time.Millisecond)
                 return ":1"
             }
             return "-ERR unknown command '" + command + "'"

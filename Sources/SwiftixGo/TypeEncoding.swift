@@ -30,8 +30,8 @@ struct GoTypeEncoder {
         while next < pending.count {
             let name = pending[next]
             next += 1
-            guard let definition = definitions[name] else { continue }
-            text += "\n" + counted(name) + encode(definition.underlying)
+            guard let definition = underlying(of: name) else { continue }
+            text += "\n" + counted(name) + encode(definition)
         }
         return text
     }
@@ -53,6 +53,13 @@ struct GoTypeEncoder {
         return (path.split(separator: "/").last.map(String.init) ?? String(path)) + "." + member
     }
 
+    /// What the named type `name` is defined as: by the program, or, for a
+    /// type of the library that is defined over another, by the library.
+    /// Such a type travels as a defined type does, with its definition.
+    private func underlying(of name: String) -> GoType? {
+        definitions[name]?.underlying ?? GoLibraryTypes.underlying(of: name)
+    }
+
     private func counted(_ text: String) -> String {
         "\(text.utf8.count):" + text
     }
@@ -66,7 +73,7 @@ struct GoTypeEncoder {
         case .named(let name):
             if name == "byte" { return "b" }
             // A library type has no definition here and prints by name.
-            guard definitions[name] != nil else { return "O" + counted(name) }
+            guard underlying(of: name) != nil else { return "O" + counted(name) }
             if reached.insert(name).inserted { pending.append(name) }
             return "N" + counted(name)
         case .pointer(let pointee): return "*" + encode(pointee)

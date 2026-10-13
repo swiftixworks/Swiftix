@@ -128,8 +128,11 @@ private struct Resolver: GoScopedRewriter {
         guard !scopes.contains(where: { $0.contains(name) }), let target = try target(of: name)
         else { return .identifier(name, position: position) }
         // In a conversion or as the argument of `make` a type is written
-        // where a value is.
-        if case .named(let targetName, _) = target {
+        // where a value is. A type of the library has no name a value
+        // could be written with, and stays a type.
+        if case .named(let targetName, _) = target,
+            GoLibraryTypes.underlying(of: targetName) == nil
+        {
             return .identifier(targetName, position: position)
         }
         return .typeExpression(target.moved(to: position), position: position)

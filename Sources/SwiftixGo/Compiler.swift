@@ -4097,7 +4097,7 @@ private struct IRLowerer {
             if methods.allSatisfy({ has($0, throughPointer: false) }) { owners.append(base) }
             if methods.allSatisfy({ has($0, throughPointer: true) }) { owners.append("*" + base) }
         }
-        return owners
+        return owners + GoLibraryTypes.refusals(of: methods)
     }
 
     func concreteTypeName(_ type: GoType) -> String? {
@@ -4224,7 +4224,7 @@ private struct IRLowerer {
             if case .identifier(let packageName, _) = base,
                 GoStandardLibrary.integerConstant(package: packageName, member: name) != nil
             {
-                return .int
+                return GoLibraryTypes.constantType(package: packageName, member: name)
             }
             if standardErrorValue(base: base, member: name) != nil {
                 return GoPredeclared.errorType
@@ -4461,6 +4461,10 @@ private struct IRLowerer {
         case .unary(.dereference, let operand, _):
             // `(*T)(x)`.
             return conversionTarget(operand).map { .pointer($0) }
+        case .selector(.identifier(let packageName, _), let member, _):
+            // `time.Duration(x)`, where nothing hides the package.
+            guard lookup(packageName) == nil, globalInfos[packageName] == nil else { return nil }
+            return GoLibraryTypes.convertible(package: packageName, member: member)
         default:
             return nil
         }
@@ -4526,9 +4530,10 @@ private struct IRLowerer {
             return (function, nil)
         }
         if let receiver = try? type(of: base),
-            let function = GoStandardLibrary.method(of: receiver, named: member)
+            let function = GoStandardLibrary.method(
+                of: GoLibraryTypes.methodOwner(receiver) ?? receiver, named: member)
         {
-            return (function, base)
+            return (function, GoLibraryTypes.receiver(base, of: receiver))
         }
         return nil
     }
@@ -4776,6 +4781,15 @@ private struct IRLowerer {
 
     func methodInfo(base: GoExpression, name: String) throws -> MethodInfo? {
         let baseType = try type(of: base)
+        if let library = GoLibraryTypes.method(of: baseType, named: name) {
+            // A method of a library type: a function the VM provides
+            // under the name a method of the program would have. A call
+            // the lowerer sees is the native call, made before this is
+            // asked; what is left is the method as a value.
+            return MethodInfo(
+                functionName: library.symbol, receiverType: library.receiver,
+                resultTypes: library.results, parameterTypes: library.parameters)
+        }
         let candidates: [String]
         switch baseType {
         case .named(let baseName):
