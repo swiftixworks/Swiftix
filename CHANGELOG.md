@@ -152,6 +152,19 @@ format, behavior and platform changes are recorded here.
   `copy`, and `delete`; in `go`, `defer`, declarations, `return`, and nested.
   The inner call runs once, in Go's order. `g(f())` was refused with `not
   enough arguments in call to g`.
+- A package may declare any number of blank variables, functions, methods,
+  and types (`var _ I = (*T)(nil)`, `var _ = register()`, `func _() {}`), in
+  several files and packages; each is checked and each initializer runs in
+  its place. A second one was `_ redeclared in this block`.
+- Several package-level variables from one expression: `var a, b = f()`,
+  `var v, ok = m[k]`, `x.(T)`, `<-ch`. Was `assignment mismatch: 2 variables
+  but 1 value`.
+- Receivers, parameters, and results without names: `func (T) m()`,
+  `func f(int, string)`, `func(_ int, ...string)`, `(_ int, _ error)`. Was
+  `expected type`.
+- Pointer types with a name, `type ptr *T`: field selection and assignment,
+  `*p`, nil comparison, conversion to and from `*T`. Was `ptr has no field or
+  method n`.
 
 
 ### Changed
@@ -313,6 +326,16 @@ format, behavior and platform changes are recorded here.
 - Results that do not fit the parameters of the call they are passed to are
   reported at the inner call, where Go reports them. `g(f())` with `func g(n
   int)` and a `f` of two results compiled and printed with the first.
+- Package-level variables are initialized in Go's order: each time the first
+  that reads no variable still to be initialized. A variable that waited for
+  a later one was initialized before the independent ones between them
+  (`init 40`, `init 1` where Go prints `init 1`, `init 40`). Such a program
+  compiles to a different `$package.init`.
+- The value of a constant must be constant. `var v = 3; const c = v` printed
+  `3`; it is now `v (variable of type int) is not constant`.
+- An unexported field or method of another package's type cannot be selected,
+  called, or given in a struct literal; `v.secret`, `v.hidden()`, and
+  `lib.T{secret: 7}` compiled.
 
 
 ### Fixed
@@ -400,6 +423,20 @@ format, behavior and platform changes are recorded here.
 - A library type named where a value is wanted says `time.Time (type) is not
   an expression`, as Go does, instead of calling it a function of the run-time
   library.
+- `x := v` that declares nothing is `no new variables on left side of :=` at
+  the `:=`. Was `x redeclared in this block` at the name.
+- A name of the program called `iota` hides the constant generator:
+  `iota := 5; const c = iota` gave `c` the value `0`.
+- A name declared twice at package level is reported at the second name;
+  `var _ = undefined` is `undefined: undefined` (was `initialization cycle
+  for package variable`); `var init = 1` is `cannot declare init - must be
+  func`; a method named like a field of its type is `field and method with
+  the same name`; a method on a pointer or interface type is `invalid
+  receiver type`. The last three were accepted.
+- A type alias in a package-level value (`type Num = int; var h = func(n Num)
+  Num {...}`) is resolved. Was `unsupported zero value type`.
+- `gofmt`: a variadic type that begins a list has no blank before it,
+  `func(...int)` (was `func( ...int)`).
 
 
 ## 0.13.1 — 2026-10-08
