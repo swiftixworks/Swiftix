@@ -132,6 +132,79 @@ struct GoCompositeLiteralTests: GoTestHarness {
         #expect(diagnostic("var p *point = &point{}\nfmt.Println(p, point{}, &node{})") == nil)
     }
 
+    /// A literal type before `{` is a literal in the header of a statement
+    /// as well; a type name there would be the operand before the block, as
+    /// in Go. The output is what Go 1.24.5 prints.
+    @Test func aLiteralTypeIsALiteralInAStatementHeader() throws {
+        let output = try runGoMain(
+            """
+            for index, value := range []int{4, 5} {
+                fmt.Println(index, value)
+            }
+            for _, p := range []point{point{X: 1}, point{X: 2}} {
+                fmt.Print(p.X)
+            }
+            for _, word := range [2]string{"x", "y"} {
+                fmt.Print(word)
+            }
+            fmt.Println()
+            if list := []int{1, 2, 3}; len(list) > 2 {
+                fmt.Println(list)
+            }
+            switch names := map[string]int{"a": 1}; len(names) {
+            case 1:
+                fmt.Println(names)
+            }
+            """,
+            declarations: Self.declarations)
+
+        #expect(output == "0 4\n1 5\n12xy\n[1 2 3]\nmap[a:1]\n")
+
+        let source = GoSourceFile(
+            path: "main.go",
+            text: """
+                package main
+
+                func main() {
+                for i,v:=range []int{4,5}{
+                f(i,v)
+                }
+                for _,p:=range []point{point{X:1}}{
+                f(p)
+                }
+                if list:=[]int{1};len(list)>0{
+                f(list)
+                }
+                switch m:=map[string]int{"a":1};len(m){
+                case 1:
+                f(m)
+                }
+                }
+
+                """)
+        #expect(
+            try GoFormatter.format(source) == """
+                package main
+
+                func main() {
+                \tfor i, v := range []int{4, 5} {
+                \t\tf(i, v)
+                \t}
+                \tfor _, p := range []point{point{X: 1}} {
+                \t\tf(p)
+                \t}
+                \tif list := []int{1}; len(list) > 0 {
+                \t\tf(list)
+                \t}
+                \tswitch m := map[string]int{"a": 1}; len(m) {
+                \tcase 1:
+                \t\tf(m)
+                \t}
+                }
+
+                """)
+    }
+
     @Test func gofmtPrintsPointerElementTypes() throws {
         let source = GoSourceFile(
             path: "main.go",

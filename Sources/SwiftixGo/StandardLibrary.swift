@@ -332,7 +332,7 @@ extension GoStandardLibrary {
 
     /// Whether the linker may leave `name` for the VM to resolve natively.
     static func isNativeCallName(_ name: String) -> Bool {
-        nativeCallNames.contains(name)
+        nativeCallNames.contains(name) || name.hasPrefix(GoPredeclared.freshVariable)
     }
 
     private static let nativeCallNames: Set<String> = Set(
@@ -400,6 +400,12 @@ enum GoPredeclared {
 
     /// Native call the builtin `copy` lowers to.
     static let copyElements = "$copy"
+
+    /// Prefix of the native call that starts a new variable in a local of
+    /// the executing function, whose index follows: what a declaration does
+    /// each time a loop reaches it, when a pointer could outlive the
+    /// iteration. See `GoAddressedVariables`.
+    static let freshVariable = "$fresh."
 
     /// Native call that puts its operand in a variable of its own and
     /// returns a pointer to it: `&T{...}`, where every evaluation makes a

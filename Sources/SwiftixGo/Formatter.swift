@@ -227,6 +227,10 @@ private struct FormatPrinter {
     /// Whether the previous token was the `]` of such a bracket, after which
     /// a `*` is a pointer type and a `[` is another type.
     var afterTypeBracket = false
+    /// Whether the tokens so far spell a literal type (`[]T`, `[3]*T`,
+    /// `map[K]V`), after which a `{` opens a composite literal even in the
+    /// header of a statement.
+    var spellsLiteralType = false
 
     mutating func render() -> String {
         for (index, token) in tokens.enumerated() {
@@ -281,6 +285,11 @@ private struct FormatPrinter {
 
         let followsTypeBracket = afterTypeBracket
         afterTypeBracket = false
+        let followsLiteralType = spellsLiteralType && !pendingFunction
+        // A type goes on through names, pointers, and further brackets.
+        spellsLiteralType =
+            spellsLiteralType
+            && (token.kind == .word || ["*", ".", "[", "]"].contains(token.text))
         let tokenIsUnaryOperator =
             token.text == "!"
             || ((token.text == "&" || token.text == "^") && isUnaryOperator)
@@ -342,16 +351,27 @@ private struct FormatPrinter {
             } else if opensSliceType, previous?.kind == .word {
                 // A slice type after a name declares it: `lines []string`.
                 ensureSpace()
+            } else if let previous, previous.kind == .word, !endsOperand(previous) {
+                // An array type after a keyword: `range [2]string{...}`.
+                ensureSpace()
             }
             append("[")
         case "]":
             trimTrailingWhitespace()
             append("]")
             afterTypeBracket = typeBrackets.popLast() ?? false
+            if afterTypeBracket { spellsLiteralType = true }
         case "{":
             // `interface{}` stays on its line; an interface with methods is
             // a block like a struct.
-            if isCompositeLiteralBrace, !(previous?.text == "interface" && next?.text != "}") {
+            let isLiteral =
+                followsLiteralType
+                // Inside a literal every brace is an element's.
+                || (compositeDepths.contains(braceDepth)
+                    && (previous?.kind == .word || ["{", ",", ":", "]"].contains(previous?.text)))
+                || (isCompositeLiteralBrace
+                    && !(previous?.text == "interface" && next?.text != "}"))
+            if isLiteral {
                 append("{")
                 braceDepth += 1
                 compositeDepths.insert(braceDepth)

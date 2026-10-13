@@ -101,6 +101,10 @@ struct GoConformanceTests {
     @Test func parallelAssignmentAndSeveralNames() throws {
         try expectSameOutput(parallelAssignmentAndSeveralNamesSource, parallelAssignmentAndSeveralNamesExpected)
     }
+
+    @Test func eachIterationHasItsOwnVariables() throws {
+        try expectSameOutput(eachIterationHasItsOwnVariablesSource, eachIterationHasItsOwnVariablesExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -2408,5 +2412,197 @@ uint8 int string *errors.errorString
 string false
 9 1
 more 4 1
+
+"""#
+
+private let eachIterationHasItsOwnVariablesSource = #"""
+package main
+
+import "fmt"
+
+type node struct {
+	id   int
+	next *node
+}
+
+type registry struct {
+	items []*counter
+}
+
+type counter struct {
+	n int
+}
+
+func (c *counter) join(r *registry) {
+	r.items = append(r.items, c)
+}
+
+func (c *counter) bump() {
+	c.n++
+}
+
+type wrapper struct {
+	inner counter
+}
+
+func show(label string, pointers []*int) {
+	fmt.Print(label)
+	for _, p := range pointers {
+		fmt.Print(" ", *p)
+	}
+	fmt.Println()
+}
+
+func two(i int) (int, bool) {
+	return i * 3, i%2 == 0
+}
+
+func main() {
+	var declared []*int
+	for i := 0; i < 3; i++ {
+		x := i * 10
+		declared = append(declared, &x)
+	}
+	show("declared in body:", declared)
+	*declared[0] = 99
+	show("after a store:", declared)
+
+	var counters []*int
+	for i := 0; i < 3; i++ {
+		counters = append(counters, &i)
+	}
+	show("loop variable:", counters)
+
+	var pairs []*int
+	for i, j := 0, 10; i < 3; i, j = i+1, j-1 {
+		pairs = append(pairs, &i, &j)
+	}
+	show("two loop variables:", pairs)
+
+	source := []int{7, 8, 9}
+	var ranged []*int
+	var indexes []*int
+	for index, value := range source {
+		ranged = append(ranged, &value)
+		indexes = append(indexes, &index)
+	}
+	show("range values:", ranged)
+	show("range indexes:", indexes)
+
+	var nodes []*node
+	for i := 0; i < 3; i++ {
+		n := node{id: i}
+		if len(nodes) > 0 {
+			n.next = nodes[len(nodes)-1]
+		}
+		nodes = append(nodes, &n)
+	}
+	fmt.Println(nodes[0].id, nodes[1].id, nodes[2].id, nodes[0] == nodes[1], nodes[2].next.next.id, nodes[0].next == nil)
+
+	var vars []*int
+	for i := 0; i < 3; i++ {
+		var zero int
+		zero += i
+		vars = append(vars, &zero)
+	}
+	show("var in body:", vars)
+
+	r := registry{}
+	for i := 0; i < 3; i++ {
+		c := counter{n: i}
+		c.join(&r)
+		c.bump()
+	}
+	fmt.Println(len(r.items), r.items[0].n, r.items[1].n, r.items[2].n)
+
+	var slices [][]int
+	for i := 0; i < 3; i++ {
+		buffer := [2]int{i, i * 2}
+		slices = append(slices, buffer[:])
+	}
+	fmt.Println(slices)
+
+	var results []*int
+	var flags []*bool
+	for i := 0; i < 3; i++ {
+		tripled, even := two(i)
+		a, b := tripled+1, !even
+		results = append(results, &tripled, &a)
+		flags = append(flags, &even, &b)
+	}
+	show("call results:", results)
+	fmt.Println(*flags[0], *flags[1], *flags[2], *flags[3], len(flags))
+
+	var kept []*int
+	for i := 0; i < 6; i++ {
+		if i%2 == 1 {
+			continue
+		}
+		kept = append(kept, &i)
+	}
+	show("with continue:", kept)
+
+	var nested []*int
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 2; j++ {
+			cell := i*10 + j
+			nested = append(nested, &cell)
+		}
+	}
+	show("nested:", nested)
+
+	total := 0
+	for i := 0; i < 4; i++ {
+		step := i * 2
+		total += step
+	}
+	fmt.Println(total)
+
+	var wrapped []*counter
+	for i := 0; i < 2; i++ {
+		w := wrapper{inner: counter{n: i}}
+		w.inner.bump()
+		wrapped = append(wrapped, &w.inner)
+	}
+	fmt.Println(wrapped[0].n, wrapped[1].n)
+
+	var last *int
+	for i := 0; i < 3; i++ {
+		last = &i
+		*last += 10
+	}
+	fmt.Println(*last)
+
+	ch := make(chan int, 3)
+	ch <- 1
+	ch <- 2
+	close(ch)
+	var received []*int
+	for v := range ch {
+		received = append(received, &v)
+	}
+	show("channel:", received)
+}
+"""#
+
+private let eachIterationHasItsOwnVariablesExpected = #"""
+declared in body: 0 10 20
+after a store: 99 10 20
+loop variable: 0 1 2
+two loop variables: 0 10 1 9 2 8
+range values: 7 8 9
+range indexes: 0 1 2
+0 1 2 false 0 true
+var in body: 0 1 2
+3 1 2 3
+[[0 0] [1 2] [2 4]]
+call results: 0 1 3 4 6 7
+true false false true 6
+with continue: 0 2 4
+nested: 0 1 10 11
+12
+1 2
+10
+channel: 1 2
 
 """#

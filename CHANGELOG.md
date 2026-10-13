@@ -126,6 +126,16 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- A variable declared in a loop body, and the variable of a `for` or `range`
+  clause, was one variable for all iterations, so pointers taken in
+  different iterations named the same storage: after
+  `for i := 0; i < 3; i++ { x := i; list = append(list, &x) }` every element
+  of `list` pointed at `2`. Each iteration now has its own variable, as in
+  Go. The same held for a pointer-receiver method that kept its receiver and
+  for a slice of a loop-local array. Programs that take no such pointer
+  compile to the same instructions as before.
+- A composite literal with a literal type was rejected in the header of a
+  `for`, `if`, or `switch` (`for _, v := range []int{1, 2} { }`).
 - A value read from a map had no static type in the compiler, so
   `p := m[k]` followed by `p.field` failed with `bytecode operand type
   mismatch` when the map held pointers, and a map value stored in an

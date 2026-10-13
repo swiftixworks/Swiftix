@@ -1313,11 +1313,14 @@ private struct IRLowerer {
     var wrapperNamespace = "main"
     /// Functions synthesized for `go`/`defer` of a native library call.
     var nativeWrappers: [String: GoIRFunction] = [:]
+    /// Variables of the function being lowered that a pointer can reach.
+    var addressedVariables = GoAddressedVariables()
 
     mutating func lower(
         _ function: GoFunctionDeclaration,
         compiledName: String
     ) throws -> GoIRFunction {
+        addressedVariables = GoAddressedVariables(function.body)
         if let receiver = function.receiver {
             scopes[0][receiver.name] = LoweredBinding(
                 register: allocateRegister(),
@@ -1386,14 +1389,13 @@ private struct IRLowerer {
         switch statement {
         case .declaration(let name, let explicitType, let expression, _, let position):
             let variable = allocateRegister()
+            let value: Int
             if let expression {
-                let value = try lowerConverted(expression, to: explicitType.map(resolve))
-                operations.append(.copy(destination: variable, source: value))
+                value = try lowerConverted(expression, to: explicitType.map(resolve))
             } else if let explicitType {
-                let value = try zeroValue(
+                value = try zeroValue(
                     for: resolve(explicitType),
                     position: position)
-                operations.append(.copy(destination: variable, source: value))
             } else {
                 throw GoDiagnostic(position: position, message: "missing variable type or initialization")
             }
@@ -1401,6 +1403,8 @@ private struct IRLowerer {
             guard let variableType else {
                 throw GoDiagnostic(position: position, message: "missing variable type or initialization")
             }
+            startVariable(variable, named: name, type: variableType)
+            operations.append(.copy(destination: variable, source: value))
             scopes[scopes.count - 1][name] = LoweredBinding(
                 register: variable,
                 type: variableType)
@@ -1435,11 +1439,12 @@ private struct IRLowerer {
                 for (name, value) in zip(names, values) {
                     let existing = name == GoValueList.blank ? nil : scopes[scopes.count - 1][name]
                     let temporary = allocateRegister()
-                    operations.append(
-                        .copy(
-                            destination: temporary,
-                            source: try lowerConverted(value, to: existing?.type)))
-                    temporaries.append((temporary, try existing?.type ?? type(of: value)))
+                    let source = try lowerConverted(value, to: existing?.type)
+                    let valueType = try existing?.type ?? type(of: value)
+                    // A new name's temporary becomes its variable.
+                    if existing == nil { startVariable(temporary, named: name, type: valueType) }
+                    operations.append(.copy(destination: temporary, source: source))
+                    temporaries.append((temporary, valueType))
                 }
                 for (name, temporary) in zip(names, temporaries) where name != GoValueList.blank {
                     if let existing = scopes[scopes.count - 1][name] {
@@ -1478,6 +1483,7 @@ private struct IRLowerer {
                 for index in names.indices {
                     let name = names[index]
                     let variable = allocateRegister()
+                    startVariable(variable, named: name, type: types[index])
                     operations.append(.copy(destination: variable, source: registers[index]))
                     scopes[scopes.count - 1][name] = LoweredBinding(
                         register: variable, type: types[index])
@@ -1500,6 +1506,7 @@ private struct IRLowerer {
                 let types: [GoType] = [valueType, .bool]
                 for index in names.indices {
                     let variable = allocateRegister()
+                    startVariable(variable, named: names[index], type: types[index])
                     operations.append(.copy(destination: variable, source: registers[index]))
                     scopes[scopes.count - 1][names[index]] = LoweredBinding(
                         register: variable, type: types[index])
@@ -1525,6 +1532,7 @@ private struct IRLowerer {
                 for index in names.indices {
                     let name = names[index]
                     let variable = allocateRegister()
+                    startVariable(variable, named: name, type: bindingTypes[index])
                     operations.append(.copy(destination: variable, source: registers[index]))
                     scopes[scopes.count - 1][name] = LoweredBinding(
                         register: variable, type: bindingTypes[index])
@@ -1540,8 +1548,9 @@ private struct IRLowerer {
             let resultTypes = multiReturnTypes(callee: callee)
             for (index, (name, register)) in zip(names, results).enumerated() {
                 let variable = allocateRegister()
-                operations.append(.copy(destination: variable, source: register))
                 let bindingType = index < resultTypes.count ? resultTypes[index] : .void
+                startVariable(variable, named: name, type: bindingType)
+                operations.append(.copy(destination: variable, source: register))
                 scopes[scopes.count - 1][name] = LoweredBinding(
                     register: variable,
                     type: bindingType)
@@ -1869,6 +1878,10 @@ private struct IRLowerer {
                 break
             }
             if let initializer { try lower(initializer) }
+            // The variables of the clause, which each iteration has anew.
+            let iterationVariables = scopes[scopes.count - 1]
+                .filter { mayBeAddressed($0.key, type: $0.value.type) }
+                .sorted { $0.value.register < $1.value.register }
             let conditionLabel = allocateLabel()
             let postLabel = allocateLabel()
             let endLabel = allocateLabel()
@@ -1883,6 +1896,14 @@ private struct IRLowerer {
             breakLabels.removeLast()
             continueLabels.removeLast()
             operations.append(.label(postLabel))
+            for variable in iterationVariables {
+                // Go copies each one before the post statement, so a pointer
+                // taken in the body keeps the value the iteration ended with.
+                let carried = allocateRegister()
+                operations.append(.copy(destination: carried, source: variable.value.register))
+                renewVariable(variable.value.register)
+                operations.append(.copy(destination: variable.value.register, source: carried))
+            }
             if let post { try lower(post) }
             operations.append(.jump(target: conditionLabel))
             operations.append(.label(endLabel))
@@ -1902,6 +1923,9 @@ private struct IRLowerer {
                 let received = allocateRegister()
                 let ok = allocateRegister()
                 let zero = try zeroValue(for: elementType, position: collection.position)
+                if let indexName, mayBeAddressed(indexName, type: elementType) {
+                    renewVariable(received)
+                }
                 operations.append(.receiveChannel(
                     destination: received,
                     okDestination: ok,
@@ -1949,12 +1973,14 @@ private struct IRLowerer {
             operations.append(.jumpIfFalse(condition: conditionRegister, target: endLabel))
 
             let keyRegister = allocateRegister()
+            let keyType: GoType
+            if case .map(let mapKey, _) = collectionType { keyType = mapKey } else { keyType = .int }
+            if let indexName, mayBeAddressed(indexName, type: keyType) {
+                renewVariable(keyRegister)
+            }
             operations.append(.getIndex(
                 destination: keyRegister, base: keysRegister, index: indexRegister))
             if let indexName {
-                let keyType: GoType
-                if case .map(let mapKey, _) = collectionType { keyType = mapKey }
-                else { keyType = .int }
                 scopes[scopes.count - 1][indexName] = LoweredBinding(
                     register: keyRegister, type: keyType)
             }
@@ -1969,6 +1995,7 @@ private struct IRLowerer {
                 default: elementType = .void
                 }
                 let zero = try zeroValue(for: elementType, position: collection.position)
+                if mayBeAddressed(valueName, type: elementType) { renewVariable(valueRegister) }
                 operations.append(.rangeValue(
                     destination: valueRegister,
                     base: collectionRegister,
@@ -3252,6 +3279,46 @@ private struct IRLowerer {
         }
     }
 
+    /// Whether a pointer can reach a variable `name` of `type` somewhere in
+    /// the function being lowered. See `GoAddressedVariables`.
+    func mayBeAddressed(_ name: String, type: GoType) -> Bool {
+        guard name != GoValueList.blank, !name.hasPrefix("$") else { return false }
+        if addressedVariables.addressed.contains(name) { return true }
+        if addressedVariables.sliced.contains(name), case .array = underlying(type) { return true }
+        if case .named(let typeName) = type,
+            let methods = addressedVariables.receivers[name],
+            methods.contains(where: {
+                methodInfos[methodKey(baseName: typeName, pointer: true, method: $0)] != nil
+            })
+        {
+            return true
+        }
+        if let methods = addressedVariables.nestedReceivers[name] {
+            // A method of something inside the variable: one with a pointer
+            // receiver, whatever its type, takes an address within it.
+            return methodInfos.keys.contains { key in
+                key.hasPrefix("*") && methods.contains { key.hasSuffix("." + $0) }
+            }
+        }
+        return false
+    }
+
+    /// Makes `register` a new variable before a declaration stores in it,
+    /// when a loop can reach the declaration again and a pointer can reach
+    /// the variable: each iteration then has its own, as in Go.
+    mutating func startVariable(_ register: Int, named name: String, type: GoType) {
+        guard !continueLabels.isEmpty, mayBeAddressed(name, type: type) else { return }
+        renewVariable(register)
+    }
+
+    /// Unbinds `register` from its storage cell; the next store allocates one.
+    mutating func renewVariable(_ register: Int) {
+        operations.append(
+            .call(
+                function: GoPredeclared.freshVariable + String(register),
+                arguments: [], destinations: []))
+    }
+
     /// `var a, b T`, `var a, b = x, y`, and `var n, err = f()`. The values
     /// are all read before a name is bound, so none sees another.
     mutating func lowerVariables(
@@ -3269,16 +3336,15 @@ private struct IRLowerer {
         for index in names.indices {
             let variable = allocateRegister()
             if index < values.count {
-                operations.append(
-                    .copy(
-                        destination: variable,
-                        source: try lowerConverted(values[index], to: declared)))
-                variables.append((variable, try declared ?? self.type(of: values[index])))
+                let source = try lowerConverted(values[index], to: declared)
+                let valueType = try declared ?? self.type(of: values[index])
+                startVariable(variable, named: names[index], type: valueType)
+                operations.append(.copy(destination: variable, source: source))
+                variables.append((variable, valueType))
             } else if let declared {
-                operations.append(
-                    .copy(
-                        destination: variable,
-                        source: try zeroValue(for: declared, position: position)))
+                let source = try zeroValue(for: declared, position: position)
+                startVariable(variable, named: names[index], type: declared)
+                operations.append(.copy(destination: variable, source: source))
                 variables.append((variable, declared))
             } else {
                 throw GoDiagnostic(

@@ -78,6 +78,18 @@ enum GoNative {
     }
 
     /// Result of a two-operand integer operator, or nil when `name` is not one.
+    /// Prefix of the call that starts a new variable in a local of the
+    /// executing frame: `$fresh.<index>` unbinds the local from its cell, so
+    /// the store that follows allocates one and pointers to the old cell
+    /// keep the old variable.
+    static let freshLocalPrefix = "$fresh."
+
+    /// The local a `$fresh.<index>` call names, or nil for any other name.
+    static func freshLocal(_ name: String) -> Int? {
+        guard name.hasPrefix(freshLocalPrefix) else { return nil }
+        return Int(name.dropFirst(freshLocalPrefix.utf8.count))
+    }
+
     /// Shifts follow Go: a negative count panics, and a count of 64 or more
     /// shifts every bit out (leaving the sign for an arithmetic right shift).
     static func integerBinary(_ name: String, _ lhs: Int64, _ rhs: Int64) throws -> Int64? {

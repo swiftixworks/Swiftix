@@ -3422,6 +3422,14 @@ public struct GoVirtualMachine: Sendable {
             argumentCount: Int,
             stack: inout [GoValue]
         ) throws -> Bool {
+            if let local = GoNative.freshLocal(name) {
+                let frameIndex = frames.count - 1
+                guard argumentCount == 0, frames[frameIndex].locals.indices.contains(local) else {
+                    throw GoRuntimeError.invalidLocal(local)
+                }
+                frames[frameIndex].locals[local] = nil
+                return true
+            }
             guard let expected = GoNative.argumentCounts[name] else { return false }
             guard argumentCount == expected else {
                 throw GoRuntimeError.argumentCountMismatch(

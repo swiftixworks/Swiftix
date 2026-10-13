@@ -1002,9 +1002,10 @@ private struct Parser {
                     type: .named(qualifier + "." + typeName, position: typePosition))
                 continue
             }
-            if allowCompositeLiteral, check(.leftBrace),
-                case .typeExpression(let type, _) = expression
-            {
+            // A literal type before `{` is a composite literal wherever it
+            // stands, in a `for`, `if`, or `switch` header too: only a type
+            // *name* could be mistaken for the operand before a block.
+            if check(.leftBrace), case .typeExpression(let type, _) = expression {
                 expression = try parseCompositeLiteral(type: type)
                 continue
             }
