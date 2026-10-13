@@ -129,6 +129,9 @@ public struct GoFile: Sendable, Equatable {
     public let typeDeclarations: [GoTypeDeclaration]
     public let globalDeclarations: [GoGlobalDeclaration]
     public let functions: [GoFunctionDeclaration]
+    /// Whether a function of the file declares a type, which name resolution
+    /// has yet to move to the package level.
+    var declaresLocalTypes = false
 
     public init(
         path: String,
@@ -240,10 +243,19 @@ public enum GoChannelDirection: Sendable, Equatable {
 }
 
 public struct GoImportDeclaration: Sendable, Equatable {
+    /// The name the file gives the package: an identifier, `_` for an import
+    /// made only for its initialization, or `.` for one whose exported names
+    /// the file uses unqualified. `nil` is the package's own name.
+    public let name: String?
     public let path: String
     public let position: GoSourcePosition
 
     public init(path: String, position: GoSourcePosition) {
+        self.init(name: nil, path: path, position: position)
+    }
+
+    public init(name: String?, path: String, position: GoSourcePosition) {
+        self.name = name
         self.path = path
         self.position = position
     }

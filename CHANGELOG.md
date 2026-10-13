@@ -40,7 +40,27 @@ format, behavior and platform changes are recorded here.
   context (`value, ok := store.Get(key)`, `return store.Get(key)`).
 - A function with results may end in a call to `panic` instead of a `return`.
 - Declaration groups: `import ( ... )`, `var ( ... )`, `const ( ... )`, and
-  `type ( ... )`, at package level and, for `var` and `const`, in functions.
+  `type ( ... )`, at package level and, for `var`, `const`, and `type`, in
+  functions.
+- Import names: `import f "fmt"` calls the package `f` in that file,
+  `import _ "pkg"` imports it for its initialization alone, and
+  `import . "pkg"` brings its exported names into the file. They work for
+  packages of the run-time library and of the module, so two packages of one
+  name can be imported side by side (`stderrors "errors"` beside a local
+  `errors`), and a file that renames a package may use the package's own
+  name for a variable, a function, or a type. A file can dot-import one
+  package of the run-time library.
+- Types declared in functions, alone or in a `type ( ... )` group. A local
+  type reaches from its declaration to the end of its block, hides an outer
+  type of that name, may refer to itself, and is distinct from a type of the
+  same name in another function; `%T` prints both as Go does (`main.pair`).
+  A failed assertion between two such types ends in Go's
+  `(types from different scopes)`, and between types of one name in two
+  packages in `(types from different packages)`.
+- `go test` finds `func TestX(t *tt.T)` in a file that says
+  `import tt "testing"`, by the shape of the parameter as Go's does.
+- `gofmt` prints an import's name before its path and sorts the imports of a
+  group by path and then by name, as Go's does.
 - `iota`, the index of a specification in its `const` declaration, and the
   implicit repetition of the previous specification's type and expression:
   `const ( red color = iota; green; blue )`,
@@ -108,6 +128,12 @@ format, behavior and platform changes are recorded here.
   now tests the method set.
 - A `const` without a value is reported as `missing init expr for x`, Go's
   wording (was `missing value in const declaration`).
+- A diagnostic about an import is reported where Go reports it, at the
+  import's name or else its path (`main.go:3:8`), not at the `import` keyword
+  (`main.go:3:1`). A package named where a value is expected is
+  `use of package os not in selector` (was `undefined: os`), and an unused
+  local package whose name is not the last element of its path is
+  `"path" imported as name and not used`.
 - Diagnostics reworded to Go's: a multi-value `:=` without a new name is
   `no new variables on left side of :=` (was `x redeclared in this block`),
   a count that does not match is `assignment mismatch: 2 variables but 1
@@ -160,6 +186,9 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- Importing a package of the run-time library twice in one file is reported
+  by that package's name (`os redeclared in this block`); the message used to
+  say `fmt` whatever the package was.
 - A variable declared in a loop body, and the variable of a `for` or `range`
   clause, was one variable for all iterations, so pointers taken in
   different iterations named the same storage: after

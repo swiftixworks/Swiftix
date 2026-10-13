@@ -640,14 +640,14 @@ struct GoCrossPackageTests: GoTestHarness {
         ])
         #expect(
             diagnostic(cycle)
-                == "/m/b/b.go:2:1: import cycle not allowed: example/m/a imports example/m/b imports example/m/a")
+                == "/m/b/b.go:2:8: import cycle not allowed: example/m/a imports example/m/b imports example/m/a")
         #expect(shell(cycle).contains("import cycle not allowed"))
 
         let unused = GuestModule([
             ("lib/lib.go", "package lib\nfunc F() {}\n"),
             ("main.go", "package main\nimport \"example/m/lib\"\nfunc main() {}\n"),
         ])
-        #expect(diagnostic(unused) == "/m/main.go:2:1: \"example/m/lib\" imported and not used")
+        #expect(diagnostic(unused) == "/m/main.go:2:8: \"example/m/lib\" imported and not used")
 
         let program = GuestModule([
             ("tool/main.go", "package main\nfunc main() {}\nfunc Helper() {}\n"),
@@ -655,12 +655,12 @@ struct GoCrossPackageTests: GoTestHarness {
         ])
         #expect(
             diagnostic(program)
-                == "/m/main.go:2:1: import \"example/m/tool\" is a program, not an importable package")
+                == "/m/main.go:2:8: import \"example/m/tool\" is a program, not an importable package")
 
         let missing = GuestModule([
             ("main.go", "package main\nimport \"example/m/absent\"\nfunc main() {\n\tabsent.F()\n}\n")
         ])
-        #expect(diagnostic(missing) == "/m/main.go:2:1: package example/m/absent is not available")
+        #expect(diagnostic(missing) == "/m/main.go:2:8: package example/m/absent is not available")
 
         let mixed = GuestModule([
             ("lib/a.go", "package lib\nfunc F() {}\n"),
@@ -677,7 +677,7 @@ struct GoCrossPackageTests: GoTestHarness {
                 "package main\nimport \"example/m/x/lib\"\nimport \"example/m/y/lib\"\nfunc main() {\n\tlib.F()\n}\n"
             ),
         ])
-        #expect(diagnostic(clash) == "/m/main.go:3:1: lib redeclared in this block")
+        #expect(diagnostic(clash) == "/m/main.go:3:8: lib redeclared in this block")
     }
 
     @Test func internalPackagesAreVisibleOnlyInsideTheirParentTree() throws {
@@ -704,7 +704,7 @@ struct GoCrossPackageTests: GoTestHarness {
         ])
         #expect(
             diagnostic(outside)
-                == "/m/main.go:3:1: use of internal package example/m/tools/internal/secret not allowed")
+                == "/m/main.go:3:8: use of internal package example/m/tools/internal/secret not allowed")
         #expect(shell(outside).contains("use of internal package example/m/tools/internal/secret not allowed"))
 
         #expect(GoModuleLinker.allowsInternalImport(of: "m/internal/x", from: "m"))
@@ -899,7 +899,7 @@ struct GoCrossPackageTests: GoTestHarness {
             }
             Issue.record("expected a missing package to be reported")
         } catch let diagnostic as GoDiagnostic {
-            #expect(diagnostic.description == "/m/a/a.go:2:1: package example/m/b is not available")
+            #expect(diagnostic.description == "/m/a/a.go:2:8: package example/m/b is not available")
         }
     }
 

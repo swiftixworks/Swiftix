@@ -109,6 +109,22 @@ struct GoConformanceTests {
     @Test func groupedDeclarationsAndIota() throws {
         try expectSameOutput(groupedDeclarationsAndIotaSource, groupedDeclarationsAndIotaExpected)
     }
+
+    @Test func importNamesAndTheProgramsOwnNames() throws {
+        try expectSameOutput(importNamesAndTheProgramsOwnNamesSource, importNamesAndTheProgramsOwnNamesExpected)
+    }
+
+    @Test func importNamesAtTheEdges() throws {
+        try expectSameOutput(importNamesAtTheEdgesSource, importNamesAtTheEdgesExpected)
+    }
+
+    @Test func typesDeclaredInFunctions() throws {
+        try expectSameOutput(typesDeclaredInFunctionsSource, typesDeclaredInFunctionsExpected)
+    }
+
+    @Test func localTypesInAssertions() throws {
+        try expectSameOutput(localTypesInAssertionsSource, localTypesInAssertionsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -2702,5 +2718,448 @@ red green blue 1024 1048576 1073741824
 {0 0} [red green blue] 80 0 closed 512
 1 2 3 6 OK 0 0 1 y 0
 main.color int blue 2
+
+"""#
+
+private let importNamesAndTheProgramsOwnNamesSource = #"""
+package main
+
+import (
+	"errors"
+	f "fmt"
+	str "strings"
+	_ "sort"
+	conv "strconv"
+	stdtime "time"
+)
+
+type point struct {
+	X int
+	Y int
+}
+
+// A program's own names may be those of packages it calls something else.
+func describe(strings []string, time int) string {
+	fmt := str.Join(strings, "+")
+	return f.Sprintf("%s@%d", fmt, time)
+}
+
+func elapsed(since stdtime.Time) bool {
+	stdtime.Sleep(2 * stdtime.Millisecond)
+	return stdtime.Since(since) >= 2*stdtime.Millisecond
+}
+
+func parse(text string) (int, error) {
+	n, err := conv.Atoi(text)
+	if err != nil {
+		return 0, errors.New("bad number: " + text)
+	}
+	return n, nil
+}
+
+func main() {
+	f.Println("alias", str.ToUpper("fmt"), str.Repeat("ab", 2))
+	f.Println(describe([]string{"a", "b"}, 7))
+	f.Println(elapsed(stdtime.Now()))
+	n, err := parse("42")
+	f.Println(n, err)
+	n, err = parse("x")
+	f.Println(n, err)
+
+	// An alias is a name like any other: a block may declare it again.
+	if n == 0 {
+		str := "shadow"
+		f.Println(str, len(str))
+	}
+	f.Println(str.Contains("shadow", "had"))
+
+	conv := point{X: 3, Y: 4}
+	f.Println(conv.X+conv.Y, conv)
+	time := []int{1, 2, 3}
+	f.Println(len(time), time)
+	var started stdtime.Time = stdtime.Now()
+	f.Printf("%v %T\n", elapsed(started), started)
+	f.Printf("%T %v\n", conv, f.Sprint(conv))
+}
+"""#
+
+private let importNamesAndTheProgramsOwnNamesExpected = #"""
+alias FMT abab
+a+b@7
+true
+42 <nil>
+0 bad number: x
+shadow 6
+true
+7 {3 4}
+3 [1 2 3]
+true time.Time
+main.point {3 4}
+
+"""#
+
+private let importNamesAtTheEdgesSource = #"""
+package main
+
+import (
+	. "fmt"
+	web "net/http"
+	"os"
+	sys "os"
+	strings "strings"
+	sc "strconv"
+	sorting "sort"
+)
+
+type item struct {
+	Name string
+}
+
+var total int
+
+func init() {
+	type weight int
+	total += int(weight(4))
+}
+
+func (i item) label() string {
+	type tag struct {
+		text string
+	}
+	return tag{text: "<" + i.Name + ">"}.text
+}
+
+// The names of parameters, results, and loop variables hide an import's.
+func hidden(sc []string, sorting int) (sys string) {
+	for strings := range sc {
+		sys += Sprint(strings+sorting, ";")
+	}
+	return sys
+}
+
+func kinds(values []interface{}) string {
+	type small int
+	out := ""
+	for _, v := range values {
+		type small string
+		if _, ok := v.(small); ok {
+			out += "S"
+		} else {
+			out += "-"
+		}
+	}
+	if _, ok := values[0].(small); ok {
+		out += "I"
+	}
+	return out
+}
+
+func build() interface{} {
+	type small int
+	return small(5)
+}
+
+func collections() {
+	type entry struct {
+		Key   string
+		Count int
+	}
+	list := make([]entry, 0)
+	list = append(list, entry{Key: "a", Count: 1}, entry{"b", 2})
+	byKey := map[string]*entry{}
+	for i := range list {
+		byKey[list[i].Key] = &list[i]
+	}
+	byKey["a"].Count += 10
+	queue := make(chan entry, 1)
+	queue <- list[0]
+	got := <-queue
+	var grid [2]entry
+	grid[1] = got
+	Println(list, len(byKey), got, grid)
+	Printf("%T %T %T\n", list, byKey, grid)
+
+	if len(list) == 2 {
+		// A variable of an inner block takes the name back.
+		entry := 3
+		Println(entry + 1)
+	}
+	var last entry = list[1]
+	Println(last.Key)
+}
+
+func handle(w web.ResponseWriter, r *web.Request) {
+	total++
+}
+
+func main() {
+	Println(strings.ToUpper("dot"), sc.Itoa(12)+"!", len(os.Args) == len(sys.Args))
+	names := []string{"b", "a"}
+	sorting.Strings(names)
+	Println(names, hidden(names, 1), total)
+	Println(item{Name: "x"}.label(), kinds([]interface{}{build(), "s", 1}))
+	collections()
+	Fprintln(sys.Stdout, "done")
+}
+"""#
+
+private let importNamesAtTheEdgesExpected = #"""
+DOT 12! true
+[a b] 1;2; 4
+<x> ---
+[{a 11} {b 2}] 2 {a 11} [{ 0} {a 11}]
+[]main.entry map[string]*main.entry [2]main.entry
+4
+b
+done
+
+"""#
+
+private let typesDeclaredInFunctionsSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type point struct {
+	X int
+	Y int
+}
+
+type shape interface {
+	Area() int
+}
+
+type square struct {
+	Side int
+}
+
+func (s square) Area() int { return s.Side * s.Side }
+
+// A type of the same name in another function is another type.
+func first() interface{} {
+	type pair struct {
+		A int
+		B string
+	}
+	return pair{A: 1, B: "one"}
+}
+
+func second() interface{} {
+	type pair struct {
+		Left  string
+		Right string
+	}
+	return &pair{Left: "l", Right: "r"}
+}
+
+func total(values []int) int {
+	type sum int
+	var s sum
+	for _, v := range values {
+		s += sum(v)
+	}
+	return int(s)
+}
+
+func list() []string {
+	type node struct {
+		name string
+		next *node
+	}
+	tail := &node{name: "c"}
+	head := &node{name: "a", next: &node{name: "b", next: tail}}
+	var names []string
+	for n := head; n != nil; n = n.next {
+		names = append(names, n.name)
+	}
+	return names
+}
+
+func scopes() {
+	// A local type hides the package's type of that name from there on.
+	p := point{X: 1, Y: 2}
+	type point struct {
+		Name string
+	}
+	q := point{Name: "local"}
+	fmt.Println(p, q)
+	fmt.Printf("%T %T\n", p, q)
+	if p.X == 1 {
+		type point int
+		var r point = 7
+		fmt.Printf("%v %T\n", r, r)
+	}
+	var s point
+	s.Name = "again"
+	fmt.Printf("%+v %T\n", s, s)
+}
+
+func grouped() {
+	type (
+		id    int
+		names []string
+		table map[string]id
+		named interface {
+			Area() int
+		}
+	)
+	t := table{"a": 1, "b": 2}
+	n := names{"x", "y"}
+	var v named = square{Side: 3}
+	fmt.Println(t["a"]+t["b"], len(n), n, v.Area())
+	fmt.Printf("%T %T %T\n", t, n, id(3))
+}
+
+var steps int
+
+func closures() int {
+	type step int
+	done := make(chan bool)
+	defer func() {
+		// The function's own type, not the one around it.
+		type step struct {
+			by int
+		}
+		steps += step{by: 2}.by
+		fmt.Printf("%T %d\n", step{}, steps)
+	}()
+	go func(done chan bool) {
+		type step string
+		steps += len(step("abc"))
+		done <- true
+	}(done)
+	<-done
+	return steps + int(step(10))
+}
+
+func asserted(v interface{}) string {
+	type pair struct {
+		A int
+		B string
+	}
+	if _, ok := v.(pair); ok {
+		return "pair"
+	}
+	if s, ok := v.(shape); ok {
+		return fmt.Sprint("shape ", s.Area())
+	}
+	return fmt.Sprintf("%T", v)
+}
+
+var failed error
+
+func failing() {
+	type failure struct {
+		Code int
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			failed = errors.New(fmt.Sprint("recovered: ", r))
+		}
+	}()
+	panic(failure{Code: 3})
+}
+
+func main() {
+	a, b := first(), second()
+	fmt.Printf("%v %T\n", a, a)
+	fmt.Printf("%v %T\n", b, b)
+	fmt.Printf("%+v\n", a)
+	fmt.Println(total([]int{1, 2, 3}), list())
+	scopes()
+	grouped()
+	fmt.Println(closures())
+	fmt.Println(asserted(a), asserted(square{Side: 2}), asserted(3))
+	failing()
+	fmt.Println(failed)
+}
+"""#
+
+private let typesDeclaredInFunctionsExpected = #"""
+{1 one} main.pair
+&{l r} *main.pair
+{A:1 B:one}
+6 [a b c]
+{1 2} {local}
+main.point main.point
+7 main.point
+{Name:again} main.point
+3 2 [x y] 9
+main.table main.names main.id
+main.step 5
+13
+main.pair shape 4 int
+recovered: {3}
+
+"""#
+
+private let localTypesInAssertionsSource = #"""
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type pair struct {
+	Z int
+}
+
+func make1() interface{} {
+	type pair struct {
+		A int
+	}
+	return pair{A: 1}
+}
+
+func try(v interface{}) {
+	defer func() {
+		fmt.Println(recover())
+	}()
+	type pair struct {
+		A int
+	}
+	p := v.(pair)
+	fmt.Println("unreachable", p)
+}
+
+func outer(v interface{}) {
+	defer func() {
+		fmt.Println(recover())
+	}()
+	fmt.Println(v.(pair))
+}
+
+func pointers(v interface{}) {
+	defer func() {
+		fmt.Println(recover())
+	}()
+	type pair struct {
+		A int
+	}
+	fmt.Println(v.(*pair))
+}
+
+func main() {
+	type pair struct {
+		A int
+	}
+	try(make1())
+	outer(make1())
+	pointers(&pair{A: 2})
+	if _, ok := make1().(pair); !ok {
+		fmt.Fprintln(os.Stdout, "not the same pair")
+	}
+}
+"""#
+
+private let localTypesInAssertionsExpected = #"""
+interface conversion: interface {} is main.pair, not main.pair (types from different scopes)
+interface conversion: interface {} is main.pair, not main.pair (types from different scopes)
+interface conversion: interface {} is *main.pair, not *main.pair (types from different scopes)
+not the same pair
 
 """#

@@ -5681,10 +5681,26 @@ public struct GoVirtualMachine: Sendable {
                             }
                             ?? GoTypeDescriptor.dynamicType(named: targetName).map(
                                 GoTypeDescriptor.name(of:)) ?? targetName
+                        // Two types may print alike: Go says what keeps
+                        // them apart.
+                        var apart = ""
+                        if held == wanted, source != .nilValue {
+                            var heldPackage: String?
+                            if case .interface(let interfaceValue) = source {
+                                heldPackage = GoTypeDescriptor.packagePath(
+                                    ofTypeName: interfaceValue.typeName)
+                            }
+                            let wantedPackage = GoTypeDescriptor.packagePath(ofTypeName: targetName)
+                            if let heldPackage, let wantedPackage, heldPackage != wantedPackage {
+                                apart = " (types from different packages)"
+                            } else {
+                                apart = " (types from different scopes)"
+                            }
+                        }
                         frames[frameIndex].pendingExit = .panicking(
                             GoRuntimePanic(
                                 GoErrors.assertionErrorType,
-                                "interface conversion: interface {} is \(held), not \(wanted)"
+                                "interface conversion: interface {} is \(held), not \(wanted)\(apart)"
                             ).value)
                     }
                 case .rangeKeys:

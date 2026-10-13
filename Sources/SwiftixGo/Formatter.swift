@@ -1398,8 +1398,14 @@ private struct FormatPrinter {
                 continuations[list].hasMeasuredElement = false
             }
         case ".":
-            trimTrailingWhitespace()
-            append(".")
+            if next?.kind == .literal {
+                // A dot import: the `.` stands where a name would.
+                if previous?.text == "import" { ensureSpace() }
+                append(". ")
+            } else {
+                trimTrailingWhitespace()
+                append(".")
+            }
         case GoSpread.spelling:
             // Before a type it marks a variadic parameter, `values ...T`;
             // after an argument it spreads a slice, `values...`.

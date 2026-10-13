@@ -288,11 +288,13 @@ public enum GoToolchain {
                 function.name.hasPrefix("Test"), function.name.count > 4
             else { return false }
             if function.parameters.isEmpty { return true }
+            // As `go test` does, by the shape `*T` or `*something.T`: the
+            // file may give `testing` a name of its own.
             guard function.parameters.count == 1,
                 case .pointer(let pointee, _) = function.parameters[0].type,
-                case .named("testing.T", _) = pointee
+                case .named(let name, _) = pointee
             else { return false }
-            return true
+            return name == "T" || name.hasSuffix(".T")
         }
         guard !testFunctions.isEmpty else {
             context.print("?   \t\(packageName)\t[no test functions]\n")

@@ -142,6 +142,15 @@ public enum GoTypeChecker {
         _ files: [GoFile],
         availablePackages: [String: GoPackageExport]
     ) throws -> GoTypedPackage {
+        try GoNames.reporting {
+            try check(resolved: GoNames.resolve(files), availablePackages: availablePackages)
+        }
+    }
+
+    private static func check(
+        resolved files: [GoFile],
+        availablePackages: [String: GoPackageExport]
+    ) throws -> GoTypedPackage {
         guard let first = files.first else {
             throw GoDiagnostic(position: syntheticPosition(), message: "no Go source files")
         }
@@ -172,10 +181,12 @@ public enum GoTypeChecker {
                         position: declaration.position,
                         message: "package \(declaration.path) is not available")
                 }
+                // An import made for its initialization names nothing.
+                if declaration.name == GoImportName.blank { continue }
                 guard importedPaths.insert(declaration.path).inserted else {
                     throw GoDiagnostic(
                         position: declaration.position,
-                        message: "fmt redeclared in this block")
+                        message: "\(importName) redeclared in this block")
                 }
             }
             importedPathsByFile.append(importedPaths)
@@ -1194,7 +1205,13 @@ private struct FunctionChecker {
             if name == "true" || name == "false" { return .bool }
             if name == "nil" { return .nilType }
             guard let binding = lookup(name) else {
-                throw GoDiagnostic(position: position, message: "undefined: \(name)")
+                let isPackage = importedPaths.contains {
+                    GoImportName.defaultName(ofPath: $0) == name
+                }
+                throw GoDiagnostic(
+                    position: position,
+                    message: isPackage
+                        ? GoImportName.misuse(ofPackage: name) : "undefined: \(name)")
             }
             return binding.type
         case .selector(let base, let name, let position):

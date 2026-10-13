@@ -55,6 +55,8 @@ private struct Parser {
     var index = 0
     /// The parentheses around expressions, which the tree does not keep.
     var parentheses = GoParentheses()
+    /// Whether a function body declared a type.
+    var declaresLocalTypes = false
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -63,19 +65,13 @@ private struct Parser {
 
         var imports: [GoImportDeclaration] = []
         while check(.import) {
-            let position = current.position
             advance()
             if check(.leftParen) {
                 // `import ( "a"; "b" )`: an import for each path.
                 advance()
                 skipSemicolons()
                 while !check(.rightParen) {
-                    let pathPosition = current.position
-                    guard case .string(let importPath) = current.kind else {
-                        throw diagnostic("expected import path")
-                    }
-                    advance()
-                    imports.append(GoImportDeclaration(path: importPath, position: pathPosition))
+                    imports.append(try parseImport())
                     if check(.semicolon) {
                         skipSemicolons()
                     } else if !check(.rightParen) {
@@ -84,11 +80,7 @@ private struct Parser {
                 }
                 advance()
             } else {
-                guard case .string(let importPath) = current.kind else {
-                    throw diagnostic("expected import path")
-                }
-                advance()
-                imports.append(GoImportDeclaration(path: importPath, position: position))
+                imports.append(try parseImport())
             }
             try expectTerminator()
         }
@@ -108,13 +100,35 @@ private struct Parser {
             }
             skipSemicolons()
         }
-        return GoFile(
+        var file = GoFile(
             path: path,
             packageName: packageName,
             imports: imports,
             typeDeclarations: typeDeclarations,
             globalDeclarations: globalDeclarations,
             functions: functions)
+        file.declaresLocalTypes = declaresLocalTypes
+        return file
+    }
+
+    /// One import: the name the file gives the package, if any, and its path.
+    mutating func parseImport() throws -> GoImportDeclaration {
+        let position = current.position
+        var name: String?
+        if check(.period) {
+            name = GoImportName.dot
+            advance()
+        } else if case .identifier(let identifier) = current.kind,
+            !GoBitwiseOperator.isOperatorSpelling(identifier)
+        {
+            name = identifier
+            advance()
+        }
+        guard case .string(let importPath) = current.kind else {
+            throw diagnostic("expected import path")
+        }
+        advance()
+        return GoImportDeclaration(name: name, path: importPath, position: position)
     }
 
     /// One specification of a `var` or `const`: `names [type] [= values]`.
@@ -573,6 +587,16 @@ private struct Parser {
     /// `const` declaration stands for.
     mutating func parseStatements() throws -> [GoStatement] {
         if check(.variable) || check(.constant) { return try parseDeclarations() }
+        if check(.typeKeyword) {
+            declaresLocalTypes = true
+            // Go reports a type by where its name is.
+            let isGroup = lookahead(1).kind == .leftParen
+            let namePosition = lookahead(1).position
+            return try parseTypeDeclarations().map {
+                .localType(
+                    name: $0.name, type: $0.type, position: isGroup ? $0.position : namePosition)
+            }
+        }
         return [try parseStatement()]
     }
 

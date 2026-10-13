@@ -210,9 +210,11 @@ struct GoTypeDescriptor: Equatable, Sendable {
 
     /// Go's spelling of a type name the VM carries: a type of the main
     /// package gains `main.`, and a linker symbol `path/to/pkg.Name` keeps its
-    /// last path component.
+    /// last path component. What the compiler adds after a middle dot keeps
+    /// apart two types a source names alike, and is no part of the name.
     static func goName(_ typeName: String) -> String {
         var name = typeName[...]
+        if let marker = name.firstIndex(of: "\u{B7}") { name = name[..<marker] }
         var prefix = ""
         while name.hasPrefix("*") {
             prefix += "*"
@@ -222,6 +224,23 @@ struct GoTypeDescriptor: Equatable, Sendable {
         let package = name[..<dot]
         guard let slash = package.lastIndex(of: "/") else { return prefix + name }
         return prefix + package[package.index(after: slash)...] + name[dot...]
+    }
+
+    /// The path of the package that declares the defined type `typeName`
+    /// names or points to; nil when it is no defined type.
+    static func packagePath(ofTypeName typeName: String) -> String? {
+        var symbol: Substring
+        if typeName.hasPrefix(marker) {
+            guard var type = GoTypeDescriptor(typeName: typeName)?.type else { return nil }
+            while case .pointer(let pointee) = type { type = pointee }
+            guard case .named(let name) = type else { return nil }
+            symbol = name[...]
+        } else {
+            symbol = typeName[...]
+            while symbol.hasPrefix("*") { symbol = symbol.dropFirst() }
+        }
+        guard let dot = symbol.lastIndex(of: ".") else { return "main" }
+        return String(symbol[..<dot])
     }
 
     /// Decoder for the encoding in the file header.

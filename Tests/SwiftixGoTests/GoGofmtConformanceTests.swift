@@ -6,8 +6,9 @@
 /// formatting it again. Together they cover what Go's printer does beyond
 /// spacing tokens: the columns of struct fields, trailing comments, one-line
 /// functions, and the values of composite literal elements; the functions,
-/// structs, and interfaces it keeps on one line; and the line breaks inside
-/// a statement that it keeps, with their indentation.
+/// structs, and interfaces it keeps on one line; the line breaks inside a
+/// statement that it keeps, with their indentation; declaration groups; the
+/// names and the order of imports; and types declared in functions.
 ///
 /// To add a case, format the source with Go and paste both texts.
 
@@ -68,6 +69,18 @@ struct GoGofmtConformanceTests {
 
     @Test func unusualDeclarationGroups() throws {
         try expectGofmt(unusualDeclarationGroupsSource, unusualDeclarationGroupsExpected)
+    }
+
+    @Test func namedImports() throws {
+        try expectGofmt(namedImportsSource, namedImportsExpected)
+    }
+
+    @Test func importsOfEveryForm() throws {
+        try expectGofmt(importsOfEveryFormSource, importsOfEveryFormExpected)
+    }
+
+    @Test func typesDeclaredInFunctions() throws {
+        try expectGofmt(typesDeclaredInFunctionsSource, typesDeclaredInFunctionsExpected)
     }
 }
 
@@ -1643,6 +1656,224 @@ func f() {
 		use(d, ee)
 	}
 	use(a, bb, cc, only, k, l)
+}
+
+"""#
+
+private let namedImportsSource = #"""
+package main
+
+import f   "fmt"
+import (
+	str "strings"
+	"os"
+	_ "sort"
+	conv   "strconv"
+	. "errors"
+	"io"
+
+	stdtime "time"
+	ctx "context"
+	"sync" // locks
+	n "net"
+)
+
+func main() {
+	f.Println(str.ToUpper("x"), conv.Itoa(1), New("e"), os.Args, io.EOF, stdtime.Now(), ctx.Background(), n.Dial)
+	var m sync.Mutex
+	m.Lock()
+}
+
+"""#
+
+private let namedImportsExpected = #"""
+package main
+
+import f "fmt"
+import (
+	. "errors"
+	"io"
+	"os"
+	_ "sort"
+	conv "strconv"
+	str "strings"
+
+	ctx "context"
+	n "net"
+	"sync" // locks
+	stdtime "time"
+)
+
+func main() {
+	f.Println(str.ToUpper("x"), conv.Itoa(1), New("e"), os.Args, io.EOF, stdtime.Now(), ctx.Background(), n.Dial)
+	var m sync.Mutex
+	m.Lock()
+}
+
+"""#
+
+private let importsOfEveryFormSource = #"""
+package main
+
+import   .   "errors"
+import f   "fmt"
+import _"sort"
+import (
+	. "strings"
+)
+import (
+	b "bytes"
+	a "bytes"
+	"bytes"
+	_ "bytes"
+	. "bytes"
+	c "bytes" // last
+	"bufio"
+)
+
+func main() {
+	f.Println(New("e"), ToUpper("x"))
+}
+
+"""#
+
+private let importsOfEveryFormExpected = #"""
+package main
+
+import . "errors"
+import f "fmt"
+import _ "sort"
+import (
+	. "strings"
+)
+import (
+	"bufio"
+	"bytes"
+	. "bytes"
+	_ "bytes"
+	a "bytes"
+	b "bytes"
+	c "bytes" // last
+)
+
+func main() {
+	f.Println(New("e"), ToUpper("x"))
+}
+
+"""#
+
+private let typesDeclaredInFunctionsSource = #"""
+package main
+
+import "fmt"
+
+func main() {
+	type pair struct {
+		A int
+		Name string // the name
+		LongerField []string
+	}
+	type id int
+	type   names   []string
+	type (
+		table map[string]id
+		short int // s
+		named interface {
+			Area() int
+			String() string
+		}
+	)
+	type empty struct{}
+	type one struct{ A int }
+	type (
+		single int
+	)
+	type ()
+
+	if true {
+		type inner struct {
+			X int
+
+			Y int
+		}
+		fmt.Println(inner{X: 1})
+	}
+	for i := 0; i < 1; i++ {
+		type (
+			a int
+			bb string
+		)
+		fmt.Println(a(i), bb("x"))
+	}
+	var p pair
+	fmt.Println(p, id(1), names{"a"}, table{}, short(1), empty{}, one{}, single(1))
+}
+
+func other() {
+	type T struct { X int; Y int }
+	type U struct {
+		X int }
+	fmt.Println(T{}, U{})
+}
+
+"""#
+
+private let typesDeclaredInFunctionsExpected = #"""
+package main
+
+import "fmt"
+
+func main() {
+	type pair struct {
+		A           int
+		Name        string // the name
+		LongerField []string
+	}
+	type id int
+	type names []string
+	type (
+		table map[string]id
+		short int // s
+		named interface {
+			Area() int
+			String() string
+		}
+	)
+	type empty struct{}
+	type one struct{ A int }
+	type (
+		single int
+	)
+	type ()
+
+	if true {
+		type inner struct {
+			X int
+
+			Y int
+		}
+		fmt.Println(inner{X: 1})
+	}
+	for i := 0; i < 1; i++ {
+		type (
+			a  int
+			bb string
+		)
+		fmt.Println(a(i), bb("x"))
+	}
+	var p pair
+	fmt.Println(p, id(1), names{"a"}, table{}, short(1), empty{}, one{}, single(1))
+}
+
+func other() {
+	type T struct {
+		X int
+		Y int
+	}
+	type U struct {
+		X int
+	}
+	fmt.Println(T{}, U{})
 }
 
 """#

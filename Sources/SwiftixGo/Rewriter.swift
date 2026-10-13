@@ -105,7 +105,13 @@ public enum GoSourceRewriter {
             case .increment(let target, _, _):
                 consider(target)
             case .expression(let expression):
-                consider(expression)
+                if let declaration = statement.localType {
+                    // Of a type declared here the source holds the name;
+                    // the call around it is the parser's.
+                    consider(.identifier(declaration.name, position: declaration.position))
+                } else {
+                    consider(expression)
+                }
             case .deferStatement(let expression, _), .goStatement(let expression, _):
                 consider(expression)
             case .sendStatement(let channel, let value, _):

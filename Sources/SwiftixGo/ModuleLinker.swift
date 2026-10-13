@@ -49,7 +49,8 @@ struct GoLinkedModule {
             message = GoModuleLinker.replacing(
                 path + ".", with: path == home ? "" : name + ".", in: message)
         }
-        return GoDiagnostic(position: diagnostic.position, message: message)
+        return GoDiagnostic(
+            position: diagnostic.position, message: GoLocalTypes.sourceNames(in: message))
     }
 }
 
@@ -111,7 +112,7 @@ enum GoModuleLinker {
                     position: syntheticPosition("<link>"),
                     message: "no Go source files in package \(path)")
             }
-            let files = try sources.map(GoParser.parse)
+            let files = try GoLocalTypes.hoist(try sources.map(GoParser.parse))
             let name = files[0].packageName
             for file in files where file.packageName != name {
                 throw GoDiagnostic(
@@ -208,11 +209,12 @@ enum GoModuleLinker {
                 files.append(
                     try rewriter.rewrite(file, packageName: rootPackage.name))
             }
+            // What is left to name is the run-time library.
             units.append(
                 GoLinkedUnit(
                     importPath: path,
                     initializerName: isRoot ? "$package.init" : "$" + path + ".init",
-                    files: files))
+                    files: try GoImportNames.resolve(files)))
         }
         var names: [String: String] = [:]
         for path in order where path != root { names[path] = parsed[path]?.name }
@@ -272,9 +274,12 @@ private struct FileRewriter {
     let isRoot: Bool
     let packages: [String: ParsedPackage]
 
-    /// Local packages imported by the file, by qualifier.
+    /// Local packages imported by the file, by the name the file gives them.
     private var qualifiers: [String: ParsedPackage] = [:]
     private var usedQualifiers: Set<String> = []
+    /// Local packages whose exported names the file uses unqualified.
+    private var dotImports: [ParsedPackage] = []
+    private var usedDotImports: Set<String> = []
     private var scopes: [Set<String>] = []
 
     init(package: ParsedPackage, isRoot: Bool, packages: [String: ParsedPackage]) {
@@ -286,19 +291,38 @@ private struct FileRewriter {
     mutating func rewrite(_ file: GoFile, packageName: String) throws -> GoFile {
         var remainingImports: [GoImportDeclaration] = []
         var importPositions: [String: GoImportDeclaration] = [:]
+        var dotDeclarations: [GoImportDeclaration] = []
+        var libraryNames: Set<String> = []
         for declaration in file.imports {
             guard let imported = packages[declaration.path],
                 declaration.path != package.importPath
             else {
                 remainingImports.append(declaration)
+                let name = declaration.name ?? GoImportName.defaultName(ofPath: declaration.path)
+                if GoImportName.isQualifier(name) { libraryNames.insert(name) }
                 continue
             }
-            guard qualifiers.updateValue(imported, forKey: imported.name) == nil else {
-                throw GoDiagnostic(
-                    position: declaration.position,
-                    message: "\(imported.name) redeclared in this block")
+            switch declaration.name {
+            case GoImportName.blank?:
+                // Imported for its initialization, which linking it gives.
+                continue
+            case GoImportName.dot?:
+                dotImports.append(imported)
+                dotDeclarations.append(declaration)
+            default:
+                let name = declaration.name ?? imported.name
+                guard qualifiers.updateValue(imported, forKey: name) == nil else {
+                    throw GoDiagnostic(
+                        position: declaration.position,
+                        message: "\(name) redeclared in this block")
+                }
+                importPositions[name] = declaration
             }
-            importPositions[imported.name] = declaration
+        }
+        for (name, declaration) in importPositions.sorted(by: { $0.key < $1.key })
+        where libraryNames.contains(name) {
+            throw GoDiagnostic(
+                position: declaration.position, message: "\(name) redeclared in this block")
         }
 
         let types = try file.typeDeclarations.map { declaration in
@@ -319,6 +343,14 @@ private struct FileRewriter {
 
         for (qualifier, declaration) in importPositions.sorted(by: { $0.key < $1.key })
         where !usedQualifiers.contains(qualifier) {
+            // Go names the package when its path does not end in that name.
+            let isNamed = qualifier != GoImportName.defaultName(ofPath: declaration.path)
+            throw GoDiagnostic(
+                position: declaration.position,
+                message: "\"\(declaration.path)\" imported"
+                    + (isNamed ? " as \(qualifier)" : "") + " and not used")
+        }
+        for declaration in dotDeclarations where !usedDotImports.contains(declaration.path) {
             throw GoDiagnostic(
                 position: declaration.position,
                 message: "\"\(declaration.path)\" imported and not used")
@@ -346,6 +378,17 @@ private struct FileRewriter {
     private mutating func declare(_ name: String?) {
         guard let name, !scopes.isEmpty else { return }
         scopes[scopes.count - 1].insert(name)
+    }
+
+    /// The symbol for the unqualified `name`, when a dot-imported local
+    /// package declares it and nothing nearer does.
+    private mutating func dotImportedSymbol(_ name: String) -> String? {
+        guard !dotImports.isEmpty, GoModuleLinker.isExported(name), !isShadowed(name),
+            !package.declared.contains(name),
+            let imported = dotImports.first(where: { $0.declared.contains(name) })
+        else { return nil }
+        usedDotImports.insert(imported.importPath)
+        return GoModuleLinker.symbol(imported.importPath, name)
     }
 
     /// The symbol for `qualifier.member`, or nil when `qualifier` is not a
@@ -411,6 +454,7 @@ private struct FileRewriter {
                 }
                 return type
             }
+            if let symbol = dotImportedSymbol(name) { return .named(symbol, position: position) }
             return .named(renamed(name), position: position)
         case .structure(let fields, let position):
             return .structure(
@@ -555,6 +599,13 @@ private struct FileRewriter {
         case .integer, .string:
             return expression
         case .identifier(let name, let position):
+            if let symbol = dotImportedSymbol(name) {
+                return .identifier(symbol, position: position)
+            }
+            guard qualifiers[name] == nil || isShadowed(name) else {
+                throw GoDiagnostic(
+                    position: position, message: GoImportName.misuse(ofPackage: name))
+            }
             return .identifier(renamed(name), position: position)
         case .selector(let base, let name, let position):
             if case .identifier(let qualifier, let basePosition) = base,
