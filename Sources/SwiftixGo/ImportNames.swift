@@ -41,16 +41,18 @@ enum GoImportNames {
     /// The files of one package with every package of the run-time library
     /// named by its own name.
     static func resolve(_ files: [GoFile]) throws -> [GoFile] {
-        var isNeeded = false
+        guard files.contains(where: { !$0.hasResolvedImports && !$0.imports.isEmpty }) else {
+            return files
+        }
+        var renames = false
         // The packages some file calls by another name.
         var freed: Set<String> = []
         for declaration in files.lazy.flatMap(\.imports) {
             guard let name = declaration.name, name != GoImportName.blank else { continue }
-            isNeeded = true
+            renames = true
             let ownName = GoImportName.defaultName(ofPath: declaration.path)
             if name != ownName { freed.insert(ownName) }
         }
-        guard isNeeded else { return files }
 
         var packageLevel: Set<String> = []
         for file in files {
@@ -59,8 +61,15 @@ enum GoImportNames {
             packageLevel.formUnion(file.functions.lazy.filter { $0.receiver == nil }.map(\.name))
         }
         return try files.map { file in
+            guard !file.hasResolvedImports, !file.imports.isEmpty else { return file }
             var resolver = try Resolver(file: file, freed: freed, packageLevel: packageLevel)
-            return try resolver.resolve(file)
+            var resolved = try resolver.resolve(file)
+            try resolver.requireUses(of: file.imports)
+            // A package where nothing is renamed says what it said: the
+            // walk only found each import its use.
+            if !renames { resolved = file }
+            resolved.hasResolvedImports = true
+            return resolved
         }
     }
 }
@@ -73,6 +82,8 @@ private struct Resolver: GoScopedRewriter {
     private let freed: Set<String>
     private let packageLevel: Set<String>
     private var scopes: [Set<String>] = []
+    /// The names of the file's imports that something is selected from.
+    private var used: Set<String> = []
 
     init(file: GoFile, freed: Set<String>, packageLevel: Set<String>) throws {
         self.freed = freed
@@ -120,6 +131,7 @@ private struct Resolver: GoScopedRewriter {
             GoTypeDeclaration(
                 name: spelled(declaration.name),
                 type: try rewrite(declaration.type),
+                isAlias: declaration.isAlias,
                 position: declaration.position)
         }
         let globals = try file.globalDeclarations.map { declaration in
@@ -146,9 +158,7 @@ private struct Resolver: GoScopedRewriter {
                 body: rewritten.body,
                 position: rewritten.position)
         }
-        return GoFile(
-            path: file.path,
-            packageName: file.packageName,
+        return file.rebuilt(
             imports: imports,
             typeDeclarations: types,
             globalDeclarations: globals,
@@ -171,14 +181,36 @@ private struct Resolver: GoScopedRewriter {
         isLocal(name) ? nil : packages[name]
     }
 
+    /// The package `qualifier.member` selects from, which that uses.
+    private mutating func selectedPackage(_ qualifier: String) -> String? {
+        guard let package = package(named: qualifier) else { return nil }
+        used.insert(qualifier)
+        return package
+    }
+
     /// The package that brings the unqualified `name` into the file: an
     /// exported name nothing in the package declares. A linker symbol has a
     /// `.` and is another package's already.
-    private func dotImporter(of name: String) -> String? {
+    private mutating func dotImporter(of name: String) -> String? {
         guard let package = dotImported, GoModuleLinker.isExported(name),
             !name.contains("."), !isLocal(name), !packageLevel.contains(name)
         else { return nil }
+        used.insert(GoImportName.dot)
         return package
+    }
+
+    /// Go refuses an import the file has no use for.
+    func requireUses(of imports: [GoImportDeclaration]) throws {
+        for declaration in imports where declaration.name != GoImportName.blank {
+            let ownName = GoImportName.defaultName(ofPath: declaration.path)
+            let name = declaration.name ?? ownName
+            guard !used.contains(name) else { continue }
+            let isRenamed = name != ownName && name != GoImportName.dot
+            throw GoDiagnostic(
+                position: declaration.position,
+                message: "\"\(declaration.path)\" imported"
+                    + (isRenamed ? " as \(name)" : "") + " and not used")
+        }
     }
 
     mutating func openScope() { scopes.append([]) }
@@ -206,7 +238,7 @@ private struct Resolver: GoScopedRewriter {
 
     mutating func type(named name: String, at position: GoSourcePosition) -> GoTypeExpression {
         if let dot = name.firstIndex(of: ".") {
-            guard let package = package(named: String(name[..<dot])) else {
+            guard let package = selectedPackage(String(name[..<dot])) else {
                 return .named(name, position: position)
             }
             return .named(package + name[dot...], position: position)
@@ -221,16 +253,19 @@ private struct Resolver: GoScopedRewriter {
         _ member: String, of qualifier: String,
         qualifierPosition: GoSourcePosition, position: GoSourcePosition
     ) -> GoExpression? {
-        guard let package = package(named: qualifier) else { return nil }
+        guard let package = selectedPackage(qualifier) else { return nil }
         return .selector(
             base: .identifier(package, position: qualifierPosition),
             name: member,
             position: position)
     }
 
-    mutating func localType(
-        name: String, type: GoTypeExpression, position: GoSourcePosition
-    ) -> [GoStatement] {
-        [.localType(name: name, type: type, position: position)]
+    mutating func localType(_ declaration: GoTypeDeclaration) -> [GoStatement] {
+        // None is left: local types are hoisted first.
+        [
+            .localType(
+                name: declaration.name, type: declaration.type, isAlias: declaration.isAlias,
+                position: declaration.position)
+        ]
     }
 }

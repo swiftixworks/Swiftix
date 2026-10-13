@@ -329,6 +329,7 @@ private struct FileRewriter {
             GoTypeDeclaration(
                 name: renamed(declaration.name),
                 type: try rewrite(declaration.type),
+                isAlias: declaration.isAlias,
                 position: declaration.position)
         }
         let globals = try file.globalDeclarations.map { declaration in
@@ -355,8 +356,7 @@ private struct FileRewriter {
                 position: declaration.position,
                 message: "\"\(declaration.path)\" imported and not used")
         }
-        return GoFile(
-            path: file.path,
+        return file.rebuilt(
             packageName: packageName,
             imports: remainingImports,
             typeDeclarations: types,

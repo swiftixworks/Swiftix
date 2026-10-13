@@ -19,9 +19,7 @@ struct GoStringsPackageTests: GoTestHarness {
         let executable = try GoCompiler.compile(sources: [
             GoSourceFile(path: "main.go", text: """
                 package main
-                import "fmt"
-                import "strconv"
-                import "strings"
+                \(goImportLines(["fmt", "strconv", "strings"], usedIn: declarations + body).joined(separator: "\n"))
                 \(declarations)
                 func main() {
                 \(body)

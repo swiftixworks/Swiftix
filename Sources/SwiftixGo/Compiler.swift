@@ -85,7 +85,8 @@ public enum GoCompiler {
         units: [GoLinkedUnit],
         fallbackPath: String
     ) throws -> GoExecutable {
-        let files = try units.flatMap { try GoNames.resolve($0.files) }
+        let files = try GoNames.resolve(
+            program: try units.flatMap { try GoNames.resolve($0.files) })
         let package = try GoTypeChecker.check(files)
         guard package.name == "main" else {
             let position =
@@ -255,15 +256,16 @@ public enum GoCompiler {
         importedPackages: [String: GoCompiledPackage],
         packageOrder: [String] = []
     ) throws -> GoExecutable {
-        let files = try GoNames.resolve(try sources.map(GoParser.parse))
+        let parsed = try GoNames.resolve(try sources.map(GoParser.parse))
         if importedPackages.isEmpty {
             return try compile(
                 units: [
                     GoLinkedUnit(
-                        importPath: "main", initializerName: "$package.init", files: files)
+                        importPath: "main", initializerName: "$package.init", files: parsed)
                 ],
                 fallbackPath: sources.first?.path ?? "<input>")
         }
+        let files = try GoNames.resolve(program: parsed)
         let availablePackageExports = Dictionary(
             uniqueKeysWithValues: importedPackages.map { ($0.key, $0.value.export) })
         let package = try GoTypeChecker.check(files, availablePackages: availablePackageExports)
@@ -474,7 +476,8 @@ public enum GoCompiler {
         importedPackages: [String: GoCompiledPackage] = [:],
         globalOffset: Int = 0
     ) throws -> GoCompiledPackage {
-        let files = try GoNames.resolve(try sources.map(GoParser.parse))
+        let files = try GoNames.resolve(
+            program: try GoNames.resolve(try sources.map(GoParser.parse)))
         let availablePackageExports = Dictionary(
             uniqueKeysWithValues: importedPackages.map { ($0.key, $0.value.export) })
         let package = try GoTypeChecker.check(
@@ -1875,6 +1878,10 @@ private struct IRLowerer {
                 // `break` or `continue` inside it belongs to what encloses it.
                 try lower(scoped.initializer)
                 try lower(scoped.statement)
+                break
+            }
+            if let block = statement.block {
+                try lower(block)
                 break
             }
             if let initializer { try lower(initializer) }

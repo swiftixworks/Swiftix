@@ -20,6 +20,16 @@ import Testing
 
 protocol GoTestHarness {}
 
+/// An `import` line for each of `paths` in a file whose other text is `text`.
+/// Go refuses an import a file has no use for, so a package the text does not
+/// name is imported as `_`: the line stays, and the file is one Go accepts.
+func goImportLines(_ paths: [String], usedIn text: String) -> [String] {
+    paths.map { path in
+        let name = path.split(separator: "/").last.map(String.init) ?? path
+        return text.contains(name + ".") ? "import \"\(path)\"" : "import _ \"\(path)\""
+    }
+}
+
 extension GoTestHarness {
 
     /// Runs `lines` through a real shell on a fresh kernel and returns everything
@@ -84,12 +94,16 @@ extension GoTestHarness {
     }
 
     /// The program text ``runGoMain(_:imports:declarations:machine:)`` compiles.
+    ///
+    /// `imports` are the packages the snippet may use. Go refuses an import a
+    /// file has no use for, so one the snippet does not name is imported as
+    /// `_`, which keeps every line where it was.
     func goMainSource(
         _ body: String,
         imports: [String] = ["fmt"],
         declarations: String = ""
     ) -> String {
-        (["package main"] + imports.map { "import \"\($0)\"" }
+        (["package main"] + goImportLines(imports, usedIn: declarations + "\n" + body)
             + [declarations, "func main() {", body, "}", ""]).joined(separator: "\n")
     }
 

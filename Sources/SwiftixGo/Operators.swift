@@ -280,6 +280,32 @@ extension GoStatement {
     }
 }
 
+/// A block that is a statement of its own, `{ ... }`.
+///
+/// It is carried the way a statement with an initializer is: as a `for`
+/// whose post statement is a `break`, here without an initializer and with
+/// the block for its body. A pass that only walks the tree reads a loop and
+/// finds the statements; the passes that give loops a meaning ask `block`
+/// first, because a `break` or `continue` inside belongs to what encloses it.
+extension GoStatement {
+    static func block(_ block: GoBlock, position: GoSourcePosition) -> GoStatement {
+        .forStatement(
+            initializer: nil,
+            condition: nil,
+            post: .breakStatement(position: position),
+            body: block,
+            position: position)
+    }
+
+    /// The block, when this statement is one.
+    var block: GoBlock? {
+        guard case .forStatement(nil, nil, .breakStatement?, let body, _) = self else {
+            return nil
+        }
+        return body
+    }
+}
+
 /// Several values where a frozen statement holds one expression.
 ///
 /// `a, b := x, y` and `a, b = y, x` carry their right side as a call to

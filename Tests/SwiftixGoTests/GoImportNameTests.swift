@@ -352,8 +352,43 @@ struct GoImportNameTests: GoTestHarness {
                 == "main.go:6:2: undefined: fmt")
         // A name a declaration hides is that declaration.
         #expect(
-            diagnostic(program(" f \"fmt\"", " f := 3\n f.Println(f)"))
-                == "main.go:7:3: int has no field or method Println")
+            diagnostic(program(" f \"fmt\"", " f.Print()\n f := 3\n f.Println(f)"))
+                == "main.go:8:3: int has no field or method Println")
+    }
+
+    @Test func anImportMustBeUsed() {
+        #expect(
+            diagnostic("package main\nimport \"os\"\nfunc main() {}\n")
+                == "main.go:2:8: \"os\" imported and not used")
+        #expect(
+            diagnostic(
+                "package main\nimport (\n \"fmt\"\n \"os\"\n \"strings\"\n)\nfunc main() {\n fmt.Println(1)\n}\n")
+                == "main.go:4:2: \"os\" imported and not used")
+        #expect(
+            diagnostic("package main\nimport f \"fmt\"\nfunc main() {}\n")
+                == "main.go:2:8: \"fmt\" imported as f and not used")
+        #expect(
+            diagnostic("package main\nimport . \"fmt\"\nfunc main() {}\n")
+                == "main.go:2:8: \"fmt\" imported and not used")
+        // Each name of a package is an import of its own.
+        #expect(
+            diagnostic(
+                "package main\nimport (\n \"fmt\"\n f \"fmt\"\n)\nfunc main() {\n fmt.Println(1)\n}\n")
+                == "main.go:4:2: \"fmt\" imported as f and not used")
+        // A variable of the name is no use of the package.
+        #expect(
+            diagnostic("package main\nimport \"os\"\nfunc main() {\n os := 1\n _ = os\n}\n")
+                == "main.go:2:8: \"os\" imported and not used")
+        // It comes before what is wrong further down.
+        #expect(
+            diagnostic("package main\nimport \"os\"\nfunc main() {\n x := 1\n}\n")
+                == "main.go:2:8: \"os\" imported and not used")
+
+        // A type of the package is a use, and `_` asks for none.
+        #expect(
+            diagnostic("package main\nimport \"time\"\nfunc main() {\n var t time.Time\n _ = t\n}\n")
+                == nil)
+        #expect(diagnostic("package main\nimport _ \"fmt\"\nfunc main() {}\n") == nil)
     }
 
     @Test func aPackageIsNoValue() {
@@ -411,7 +446,10 @@ struct GoImportNameTests: GoTestHarness {
         // import do.
         #expect(try GoNames.resolve(resolved) == resolved)
         let plain = [try parse("package main\nimport \"fmt\"\nfunc main() {\n fmt.Println(1)\n}\n")]
-        #expect(try GoNames.resolve(plain) == plain)
+        let checked = try GoNames.resolve(plain)
+        #expect(checked[0].imports == plain[0].imports)
+        #expect(checked[0].functions == plain[0].functions)
+        #expect(try GoNames.resolve(checked) == checked)
     }
 
     @Test func aDiagnosticNamesWhatTheSourceNames() {
@@ -419,7 +457,7 @@ struct GoImportNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 "package main\nimport t \"time\"\nfunc main() {\n var time int\n var time string\n t.Sleep(0)\n}\n")
-                == "main.go:5:2: time redeclared in this block")
+                == "main.go:4:6: declared and not used: time")
         #expect(GoLocalTypes.sourceNames(in: "a time\u{B7} and a T\u{B7}12, twice: T\u{B7}3.") == "a time and a T, twice: T.")
     }
 

@@ -132,6 +132,38 @@ public struct GoFile: Sendable, Equatable {
     /// Whether a function of the file declares a type, which name resolution
     /// has yet to move to the package level.
     var declaresLocalTypes = false
+    /// Where the names of a declaration of several names are, by the offset
+    /// of the declaration's position: a statement has one position, and Go
+    /// reports an unused variable at its name.
+    var namePositions: [Int: [GoSourcePosition]] = [:]
+    /// What the alias declarations of the file stood for. The declarations
+    /// are gone once every use has its type; the checker still has to find
+    /// each of these a type, used or not.
+    var aliasTargets: [GoTypeExpression] = []
+    /// Whether the imports of the file have been found a use and given the
+    /// names of their packages, which is done once.
+    var hasResolvedImports = false
+
+    /// A file with the same source, after a pass rebuilt its declarations.
+    func rebuilt(
+        packageName: String? = nil,
+        imports: [GoImportDeclaration],
+        typeDeclarations: [GoTypeDeclaration],
+        globalDeclarations: [GoGlobalDeclaration],
+        functions: [GoFunctionDeclaration]
+    ) -> GoFile {
+        var file = GoFile(
+            path: path,
+            packageName: packageName ?? self.packageName,
+            imports: imports,
+            typeDeclarations: typeDeclarations,
+            globalDeclarations: globalDeclarations,
+            functions: functions)
+        file.namePositions = namePositions
+        file.aliasTargets = aliasTargets
+        file.hasResolvedImports = hasResolvedImports
+        return file
+    }
 
     public init(
         path: String,
@@ -175,11 +207,19 @@ public struct GoGlobalDeclaration: Sendable, Equatable {
 public struct GoTypeDeclaration: Sendable, Equatable {
     public let name: String
     public let type: GoTypeExpression
+    /// Whether this is `type Name = T`, another name for `T`, and not the
+    /// declaration of a new type.
+    public let isAlias: Bool
     public let position: GoSourcePosition
 
     public init(name: String, type: GoTypeExpression, position: GoSourcePosition) {
+        self.init(name: name, type: type, isAlias: false, position: position)
+    }
+
+    public init(name: String, type: GoTypeExpression, isAlias: Bool, position: GoSourcePosition) {
         self.name = name
         self.type = type
+        self.isAlias = isAlias
         self.position = position
     }
 }

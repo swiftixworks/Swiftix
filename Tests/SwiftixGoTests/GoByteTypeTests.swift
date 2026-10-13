@@ -132,7 +132,9 @@ struct GoByteTypeTests: GoTestHarness {
     }
 
     @Test func byteAndIntDoNotMixWithoutConversion() {
-        let prelude = "s := \"ab\"\ni := 1\nvar b byte = 1\n"
+        // Each variable is read once, so that the error is the first Go
+        // reports as well.
+        let prelude = "s := \"ab\"\ni := 1\nvar b byte = 1\nfmt.Println(s, i, b)\n"
         #expect(goMainDiagnostic(prelude + "var n int = s[0]\nfmt.Println(n, i, b)") == "cannot use byte as int value")
         #expect(goMainDiagnostic(prelude + "fmt.Println(i + s[0], b)") == "mismatched types int and byte")
         #expect(goMainDiagnostic(prelude + "fmt.Println(b == i)") == "mismatched types byte and int")

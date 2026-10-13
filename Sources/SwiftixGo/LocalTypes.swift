@@ -16,6 +16,8 @@ enum GoLocalTypes {
     static let marker: Character = "\u{B7}"
 
     static let calleeName = "$type"
+    /// The callee for `type Name = T`.
+    static let aliasCalleeName = "$alias"
 
     /// The name as the program wrote it.
     static func sourceName<S: StringProtocol>(_ name: S) -> S.SubSequence {
@@ -64,9 +66,7 @@ enum GoLocalTypes {
                     position: declaration.position)
             }
             let functions = try file.functions.map { try hoister.rewrite($0) }
-            return GoFile(
-                path: file.path,
-                packageName: file.packageName,
+            return file.rebuilt(
                 imports: file.imports,
                 typeDeclarations: file.typeDeclarations + hoister.hoisted,
                 globalDeclarations: globals,
@@ -77,11 +77,13 @@ enum GoLocalTypes {
 
 extension GoStatement {
     static func localType(
-        name: String, type: GoTypeExpression, position: GoSourcePosition
+        name: String, type: GoTypeExpression, isAlias: Bool = false, position: GoSourcePosition
     ) -> GoStatement {
         .expression(
             .call(
-                callee: .identifier(GoLocalTypes.calleeName, position: position),
+                callee: .identifier(
+                    isAlias ? GoLocalTypes.aliasCalleeName : GoLocalTypes.calleeName,
+                    position: position),
                 arguments: [
                     .identifier(name, position: position),
                     .typeExpression(type, position: type.position),
@@ -90,13 +92,16 @@ extension GoStatement {
     }
 
     /// The type a function declares here, when this is such a declaration.
-    var localType: (name: String, type: GoTypeExpression, position: GoSourcePosition)? {
-        guard case .expression(.call(.identifier(GoLocalTypes.calleeName, _), let arguments, let position)) = self,
+    var localType: GoTypeDeclaration? {
+        guard case .expression(.call(.identifier(let callee, _), let arguments, let position)) = self,
+            callee == GoLocalTypes.calleeName || callee == GoLocalTypes.aliasCalleeName,
             arguments.count == 2,
             case .identifier(let name, _) = arguments[0],
             case .typeExpression(let type, _) = arguments[1]
         else { return nil }
-        return (name, type, position)
+        return GoTypeDeclaration(
+            name: name, type: type, isAlias: callee == GoLocalTypes.aliasCalleeName,
+            position: position)
     }
 }
 
@@ -142,18 +147,20 @@ private struct Hoister: GoScopedRewriter {
         nil
     }
 
-    mutating func localType(
-        name: String, type: GoTypeExpression, position: GoSourcePosition
-    ) throws -> [GoStatement] {
+    mutating func localType(_ declaration: GoTypeDeclaration) throws -> [GoStatement] {
+        let name = declaration.name
         guard scopes[scopes.count - 1][name] == nil else {
-            throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
+            throw GoDiagnostic(
+                position: declaration.position, message: "\(name) redeclared in this block")
         }
         count += 1
         let hoistedName = name + String(GoLocalTypes.marker) + String(count)
         // Declared before its own type is read: a type may refer to itself.
         if name != GoValueList.blank { scopes[scopes.count - 1][name] = hoistedName }
         hoisted.append(
-            GoTypeDeclaration(name: hoistedName, type: try rewrite(type), position: position))
+            GoTypeDeclaration(
+                name: hoistedName, type: try rewrite(declaration.type),
+                isAlias: declaration.isAlias, position: declaration.position))
         return []
     }
 }

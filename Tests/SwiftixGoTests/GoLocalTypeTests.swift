@@ -472,7 +472,7 @@ struct GoLocalTypeTests: GoTestHarness {
             diagnostic(program(" if true {\n  type T int\n }\n var x T\n fmt.Println(x)"))
                 == "main.go:7:8: undefined: T")
         #expect(
-            diagnostic("package main\nfunc f() {\n type T int\n}\nfunc main() {\n var x T\n}\n")
+            diagnostic("package main\nfunc f() {\n type T int\n}\nfunc main() {\n var x T\n _ = x\n}\n")
                 == "main.go:6:8: undefined: T")
     }
 

@@ -587,9 +587,14 @@ private struct FormatPrinter {
     /// Makes the name of a struct field a cell of its own. A field without a
     /// name, an embedded type, has no blank and stays one piece.
     mutating func endStructFieldName() {
-        guard lineIsStructField, cells.isEmpty, let blank = current.firstIndex(of: " ") else {
-            return
-        }
+        // The names of a field list, `X, Y int`, are one cell: the blank
+        // that ends them is the first that follows no comma.
+        guard lineIsStructField, cells.isEmpty,
+            let blank = current.indices.first(where: { index in
+                current[index] == " " && index > current.startIndex
+                    && current[current.index(before: index)] != ","
+            })
+        else { return }
         cells.append(String(current[..<blank]))
         current = String(current[current.index(after: blank)...])
     }

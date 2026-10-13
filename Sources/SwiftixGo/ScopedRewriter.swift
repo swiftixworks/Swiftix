@@ -30,9 +30,7 @@ protocol GoScopedRewriter {
     ) throws -> GoExpression?
 
     /// A type declared in a function; returns what stands in its place.
-    mutating func localType(
-        name: String, type: GoTypeExpression, position: GoSourcePosition
-    ) throws -> [GoStatement]
+    mutating func localType(_ declaration: GoTypeDeclaration) throws -> [GoStatement]
 }
 
 extension GoScopedRewriter {
@@ -130,10 +128,7 @@ extension GoScopedRewriter {
     }
 
     mutating func rewrite(_ statement: GoStatement) throws -> [GoStatement] {
-        if let declaration = statement.localType {
-            return try localType(
-                name: declaration.name, type: declaration.type, position: declaration.position)
-        }
+        if let declaration = statement.localType { return try localType(declaration) }
         switch statement {
         case .declaration(let name, let explicitType, let expression, let isConstant, let position):
             let type = try explicitType.map { try rewrite($0) }

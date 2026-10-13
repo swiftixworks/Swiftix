@@ -82,6 +82,10 @@ struct GoGofmtConformanceTests {
     @Test func typesDeclaredInFunctions() throws {
         try expectGofmt(typesDeclaredInFunctionsSource, typesDeclaredInFunctionsExpected)
     }
+
+    @Test func fieldListsBlocksAndAliases() throws {
+        try expectGofmt(fieldListsBlocksAndAliasesSource, fieldListsBlocksAndAliasesExpected)
+    }
 }
 
 private let columnsOfFieldsAndCommentsSource = #"""
@@ -1874,6 +1878,135 @@ func other() {
 		X int
 	}
 	fmt.Println(T{}, U{})
+}
+
+"""#
+
+private let fieldListsBlocksAndAliasesSource = #"""
+package main
+
+import "fmt"
+
+type point struct {
+	X,Y int
+	Name string // the name
+	a, b,   c bool
+	LongerFieldName []string
+}
+
+type one struct{ X, Y int }
+
+type   coord=point
+type bytes   =   []byte
+type (
+	text = string
+	index = map[string][]coord
+	counter int
+	tally = counter // alias
+	longerName = interface{}
+)
+
+func main() {
+	x := 1
+	{
+		x := 2
+		fmt.Println(x)
+	}
+	{ fmt.Println(x) }
+	{
+	}
+	{}
+	for i := 0; i < 2; i++ {
+		{
+			type local = point
+			var p local
+			fmt.Println(p)
+		}
+
+		{
+			fmt.Println(i)
+
+		}
+	}
+	if x > 0 {
+		{
+			fmt.Println(1)
+		}
+	}
+	switch {
+	case x > 0:
+		{
+			fmt.Println(2)
+		}
+	}
+	var s struct{ A, B int }
+	fmt.Println(s, point{X: 1, Y: 2}, coord{}, bytes("x"))
+}
+
+"""#
+
+private let fieldListsBlocksAndAliasesExpected = #"""
+package main
+
+import "fmt"
+
+type point struct {
+	X, Y            int
+	Name            string // the name
+	a, b, c         bool
+	LongerFieldName []string
+}
+
+type one struct{ X, Y int }
+
+type coord = point
+type bytes = []byte
+type (
+	text       = string
+	index      = map[string][]coord
+	counter    int
+	tally      = counter // alias
+	longerName = interface{}
+)
+
+func main() {
+	x := 1
+	{
+		x := 2
+		fmt.Println(x)
+	}
+	{
+		fmt.Println(x)
+	}
+	{
+	}
+	{
+	}
+	for i := 0; i < 2; i++ {
+		{
+			type local = point
+			var p local
+			fmt.Println(p)
+		}
+
+		{
+			fmt.Println(i)
+
+		}
+	}
+	if x > 0 {
+		{
+			fmt.Println(1)
+		}
+	}
+	switch {
+	case x > 0:
+		{
+			fmt.Println(2)
+		}
+	}
+	var s struct{ A, B int }
+	fmt.Println(s, point{X: 1, Y: 2}, coord{}, bytes("x"))
 }
 
 """#

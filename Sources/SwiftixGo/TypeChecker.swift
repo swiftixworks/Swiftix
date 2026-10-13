@@ -143,7 +143,9 @@ public enum GoTypeChecker {
         availablePackages: [String: GoPackageExport]
     ) throws -> GoTypedPackage {
         try GoNames.reporting {
-            try check(resolved: GoNames.resolve(files), availablePackages: availablePackages)
+            try check(
+                resolved: GoNames.resolve(program: GoNames.resolve(files)),
+                availablePackages: availablePackages)
         }
     }
 
@@ -223,6 +225,9 @@ public enum GoTypeChecker {
             typeDefinitions[declaration.name] = GoTypeDefinition(
                 name: declaration.name,
                 underlying: underlying)
+        }
+        for target in files.lazy.flatMap(\.aliasTargets) {
+            _ = try resolve(target, availableTypes: availableTypes)
         }
         for definition in typeDefinitions.values {
             try rejectRecursiveValueType(
@@ -375,7 +380,8 @@ public enum GoTypeChecker {
                     typeDefinitions: typeDefinitions,
                     availableTypes: availableTypes,
                     availablePackages: availablePackages,
-                    globalBindings: globalBindings)
+                    globalBindings: globalBindings,
+                    namePositions: file.namePositions)
                 try checker.check(function)
             }
         }
@@ -563,6 +569,11 @@ private struct Binding {
     /// Value of a constant declared without a type from an untyped integer
     /// constant expression. Such a name stays usable with any integer type.
     var constantValue: Int64? = nil
+    /// Where a statement of a function declared the variable. Go requires
+    /// such a variable to be read; a parameter, a result, and a variable of
+    /// the package have no position and need not be.
+    var position: GoSourcePosition? = nil
+    var isUsed = false
 }
 
 private enum SwitchCaseConstant: Hashable {
@@ -583,6 +594,15 @@ private struct FunctionChecker {
     var loopDepth = 0
     var expectedResults: [GoType] = []
     var namedResultCount = 0
+    /// Where the names of a declaration of several names are, by the
+    /// offset of the declaration.
+    let namePositions: [Int: [GoSourcePosition]]
+    /// The variables whose scope ended without a statement reading them.
+    var unused: [(position: GoSourcePosition, name: String)] = []
+    /// Whether the function is being checked again after an error, only to
+    /// learn which of its variables are read: a statement that fails is
+    /// passed over.
+    var isRecovering = false
 
     init(
         importedPaths: Set<String>,
@@ -591,7 +611,8 @@ private struct FunctionChecker {
         typeDefinitions: [String: GoTypeDefinition],
         availableTypes: Set<String>,
         availablePackages: [String: GoPackageExport] = [:],
-        globalBindings: [String: Binding] = [:]
+        globalBindings: [String: Binding] = [:],
+        namePositions: [Int: [GoSourcePosition]] = [:]
     ) {
         self.importedPaths = importedPaths
         self.functionSignatures = functionSignatures
@@ -600,6 +621,173 @@ private struct FunctionChecker {
         self.availableTypes = availableTypes
         self.availablePackages = availablePackages
         self.scopes = [globalBindings, [:]]
+        self.namePositions = namePositions
+    }
+
+    // MARK: Unused variables
+
+    /// A statement reads the variable `name`.
+    mutating func use(_ name: String) {
+        for index in scopes.indices.dropFirst().reversed() where scopes[index][name] != nil {
+            scopes[index][name]?.isUsed = true
+            return
+        }
+    }
+
+    /// The variable `name` of the innermost scope was declared at `position`.
+    mutating func place(_ name: String, at position: GoSourcePosition) {
+        // A stand-in the checker made up is nothing the source declares.
+        guard name != GoValueList.blank, !name.hasPrefix("$"),
+            let binding = scopes[scopes.count - 1][name], !binding.isConstant,
+            binding.position == nil
+        else { return }
+        scopes[scopes.count - 1][name]?.position = position
+    }
+
+    /// Marks every variable the expressions of `statement` read. Not every
+    /// path of the checker types each operand, so what is read is settled
+    /// here, on the tree: every name is a read except the bare target of an
+    /// assignment. The statements of a nested block are read when they are
+    /// checked, in their own scope.
+    mutating func read(_ statement: GoStatement) {
+        switch statement {
+        case .declaration(_, _, let expression, _, _):
+            if let expression { read(expression) }
+        case .multiDeclaration(_, let expression, _):
+            read(expression)
+        case .assignment(let target, let expression, _):
+            if case .identifier = target {} else { read(target) }
+            read(expression)
+        case .multiAssignment(let targets, let expression, _):
+            for target in targets {
+                if case .identifier = target {} else { read(target) }
+            }
+            read(expression)
+        case .increment(let target, _, _):
+            read(target)
+        case .expression(let expression), .deferStatement(let expression, _),
+            .goStatement(let expression, _):
+            read(expression)
+        case .returnValues(let values, _):
+            values.forEach { read($0) }
+        case .sendStatement(let channel, let value, _):
+            read(channel)
+            read(value)
+        case .ifStatement(let condition, _, _, _):
+            read(condition)
+        case .forRangeStatement(_, _, let collection, _, _):
+            read(collection)
+        case .switchStatement(let expression, let cases, _):
+            if let expression { read(expression) }
+            for switchCase in cases { switchCase.expressions.forEach { read($0) } }
+        case .forStatement, .selectStatement, .breakStatement, .continueStatement:
+            // The clauses of a `for` and the cases of a `select` come after
+            // what the statement itself declares.
+            break
+        }
+    }
+
+    /// A statement failed while the function is checked past its errors.
+    /// Everything it and the blocks inside it name counts as read, and what
+    /// it would have declared is declared, so that later statements can
+    /// read it.
+    mutating func recover(from statement: GoStatement) {
+        readAll(statement)
+        var names: [String] = []
+        var isConstant = false
+        switch statement {
+        case .declaration(let name, _, _, let constant, _):
+            names = [name]
+            isConstant = constant
+        case .multiDeclaration(let declared, let expression, _):
+            names = declared
+            isConstant = expression.variables?.isConstant ?? false
+        default:
+            return
+        }
+        for name in names where name != GoValueList.blank && scopes[scopes.count - 1][name] == nil {
+            scopes[scopes.count - 1][name] = Binding(type: .int, isConstant: isConstant)
+        }
+        place(statement)
+    }
+
+    mutating func readAll(_ statement: GoStatement) {
+        read(statement)
+        switch statement {
+        case .ifStatement(_, let thenBlock, let elseBlock, _):
+            thenBlock.statements.forEach { readAll($0) }
+            elseBlock?.statements.forEach { readAll($0) }
+        case .forStatement(let initializer, let condition, let post, let body, _):
+            if let initializer { readAll(initializer) }
+            if let condition { read(condition) }
+            if let post { readAll(post) }
+            body.statements.forEach { readAll($0) }
+        case .forRangeStatement(_, _, _, let body, _):
+            body.statements.forEach { readAll($0) }
+        case .switchStatement(_, let cases, _):
+            for switchCase in cases { switchCase.body.statements.forEach { readAll($0) } }
+        case .selectStatement(let cases, _):
+            for selectCase in cases {
+                if let communication = selectCase.communication { readAll(communication) }
+                selectCase.body.statements.forEach { readAll($0) }
+            }
+        default:
+            break
+        }
+    }
+
+    mutating func read(_ expression: GoExpression) {
+        switch expression {
+        case .integer, .string, .typeExpression, .functionLiteral:
+            // A literal's body is checked as the function it is.
+            break
+        case .identifier(let name, _):
+            use(name)
+        case .selector(let base, _, _), .typeAssertion(let base, _, _):
+            read(base)
+        case .unary(_, let operand, _):
+            read(operand)
+        case .binary(let left, _, let right, _):
+            read(left)
+            read(right)
+        case .index(let base, let index, _):
+            read(base)
+            read(index)
+        case .slicing(let base, let low, let high, _):
+            read(base)
+            if let low { read(low) }
+            if let high { read(high) }
+        case .call(let callee, let arguments, _):
+            read(callee)
+            arguments.forEach { read($0) }
+        case .compositeLiteral(_, let elements, _):
+            for element in elements {
+                // The key of a map may be a variable; a field's name that
+                // is also a variable's only spares that variable a report.
+                if let key = element.key { use(key) }
+                if let key = element.keyExpression { read(key) }
+                read(element.value)
+            }
+        }
+    }
+
+    /// The innermost scope ends where its block does, without an error:
+    /// what it declared and nothing read is unused.
+    mutating func endScope() {
+        for (name, binding) in scopes[scopes.count - 1] where !binding.isUsed {
+            if let position = binding.position { unused.append((position, name)) }
+        }
+    }
+
+    /// Go's report of the first unused variable.
+    func unusedVariable(before limit: GoSourcePosition? = nil) -> GoDiagnostic? {
+        let first = unused.min { $0.position.offset < $1.position.offset }
+        guard let first else { return nil }
+        if let limit, first.position.path != limit.path || first.position.offset >= limit.offset {
+            return nil
+        }
+        return GoDiagnostic(
+            position: first.position, message: "declared and not used: \(first.name)")
     }
 
     mutating func check(_ function: GoFunctionDeclaration) throws {
@@ -652,7 +840,22 @@ private struct FunctionChecker {
                 position: function.position,
                 message: "mixed named and unnamed parameters")
         }
-        try checkBlock(function.body, createsScope: false)
+        let entry = self
+        do {
+            try checkBlock(function.body, createsScope: false)
+        } catch let diagnostic as GoDiagnostic {
+            // Go checks on after an error and reports all it finds in the
+            // order of the source, so an unused variable declared before
+            // this error comes first. Whether one is unused takes the rest
+            // of the function to say: check it again, past its errors.
+            var recovery = entry
+            recovery.isRecovering = true
+            try? recovery.checkBlock(function.body, createsScope: false)
+            recovery.endScope()
+            throw recovery.unusedVariable(before: diagnostic.position) ?? diagnostic
+        }
+        endScope()
+        if let diagnostic = unusedVariable() { throw diagnostic }
         if !signature.results.isEmpty, !blockTerminates(function.body) {
             throw GoDiagnostic(position: function.position, message: "missing return")
         }
@@ -661,10 +864,40 @@ private struct FunctionChecker {
     mutating func checkBlock(_ block: GoBlock, createsScope: Bool = true) throws {
         if createsScope { scopes.append([:]) }
         defer { if createsScope { scopes.removeLast() } }
-        for statement in block.statements { try check(statement) }
+        for statement in block.statements {
+            guard isRecovering else {
+                try check(statement)
+                continue
+            }
+            do { try check(statement) } catch { recover(from: statement) }
+        }
+        if createsScope { endScope() }
     }
 
     mutating func check(_ statement: GoStatement) throws {
+        // Before the statement declares anything: `x := x + 1` reads the
+        // `x` outside.
+        read(statement)
+        try checkStatement(statement)
+        place(statement)
+    }
+
+    /// The variables `statement` declared are where it names them.
+    mutating func place(_ statement: GoStatement) {
+        switch statement {
+        case .declaration(let name, _, _, _, let position):
+            place(name, at: namePositions[position.offset]?.first ?? position)
+        case .multiDeclaration(let names, _, let position):
+            let positions = namePositions[position.offset] ?? []
+            for (index, name) in names.enumerated() {
+                place(name, at: index < positions.count ? positions[index] : position)
+            }
+        default:
+            break
+        }
+    }
+
+    private mutating func checkStatement(_ statement: GoStatement) throws {
         switch statement {
         case .declaration(let name, let explicitType, let expression, let isConstant, let position):
             guard scopes[scopes.count - 1][name] == nil else {
@@ -700,7 +933,7 @@ private struct FunctionChecker {
                 try requireValue(expression)
                 return
             }
-            let targetType = try assignableType(of: target)
+            let targetType = try assignableType(of: target, asTarget: true)
             let expressionType = try type(of: expression)
             guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
                 throw GoDiagnostic(
@@ -827,7 +1060,7 @@ private struct FunctionChecker {
                         try requireValue(value)
                         continue
                     }
-                    let targetType = try assignableType(of: target)
+                    let targetType = try assignableType(of: target, asTarget: true)
                     try requireSingleValue(value, at: value.position)
                     let valueType = try type(of: value)
                     guard try isAssignable(value, ofType: valueType, to: targetType) else {
@@ -851,7 +1084,7 @@ private struct FunctionChecker {
                 }
                 for (target, resultType) in zip(targets, [elementType, GoType.bool]) {
                     if target.isBlank { continue }
-                    let targetType = try assignableType(of: target)
+                    let targetType = try assignableType(of: target, asTarget: true)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
                             position: target.position,
@@ -871,7 +1104,7 @@ private struct FunctionChecker {
                 try require(key, assignableTo: keyType)
                 for (target, resultType) in zip(targets, [valueType, .bool]) {
                     if target.isBlank { continue }
-                    let targetType = try assignableType(of: target)
+                    let targetType = try assignableType(of: target, asTarget: true)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
                             position: target.position,
@@ -890,7 +1123,7 @@ private struct FunctionChecker {
                 let resultTypes = [try declaredType(assertedType), GoType.bool]
                 for (target, resultType) in zip(targets, resultTypes) {
                     if target.isBlank { continue }
-                    let targetType = try assignableType(of: target)
+                    let targetType = try assignableType(of: target, asTarget: true)
                     guard isAssignable(resultType, to: targetType) else {
                         throw GoDiagnostic(
                             position: target.position,
@@ -913,7 +1146,7 @@ private struct FunctionChecker {
             }
             for (target, resultType) in zip(targets, resultTypes) {
                 if target.isBlank { continue }
-                let targetType = try assignableType(of: target)
+                let targetType = try assignableType(of: target, asTarget: true)
                 guard isAssignable(resultType, to: targetType) else {
                     throw GoDiagnostic(
                         position: target.position,
@@ -1053,10 +1286,18 @@ private struct FunctionChecker {
                 // in scope for the statement, which is no loop.
                 try check(scoped.initializer)
                 try check(scoped.statement)
+                endScope()
+                break
+            }
+            if let block = statement.block {
+                try checkBlock(block)
                 break
             }
             if let initializer { try check(initializer) }
-            if let condition { try requireBool(condition) }
+            if let condition {
+                read(condition)
+                try requireBool(condition)
+            }
             if let post { try check(post) }
             breakableDepth += 1
             loopDepth += 1
@@ -1065,6 +1306,7 @@ private struct FunctionChecker {
                 loopDepth -= 1
             }
             try checkBlock(body)
+            endScope()
 
         case .forRangeStatement(let indexName, let valueName, let collection, let body, let position):
             scopes.append([:])
@@ -1107,7 +1349,10 @@ private struct FunctionChecker {
             if let valueName {
                 scopes[scopes.count - 1][valueName] = Binding(type: elementType, isConstant: false)
             }
-            _ = position
+            let positions = namePositions[position.offset] ?? []
+            for (index, name) in [indexName, valueName].enumerated() {
+                if let name { place(name, at: index < positions.count ? positions[index] : position) }
+            }
             breakableDepth += 1
             loopDepth += 1
             defer {
@@ -1115,6 +1360,7 @@ private struct FunctionChecker {
                 loopDepth -= 1
             }
             try checkBlock(body)
+            endScope()
 
         case .switchStatement(let expression, let cases, _):
             let switchType = try expression.map { try type(of: $0) } ?? .bool
@@ -1190,6 +1436,7 @@ private struct FunctionChecker {
                     hasDefault = true
                 }
                 try checkBlock(selectCase.body, createsScope: false)
+                endScope()
             }
             _ = position
         }
@@ -1213,6 +1460,7 @@ private struct FunctionChecker {
                     message: isPackage
                         ? GoImportName.misuse(ofPackage: name) : "undefined: \(name)")
             }
+            use(name)
             return binding.type
         case .selector(let base, let name, let position):
             if case .identifier(let packageName, _) = base,
@@ -1389,6 +1637,7 @@ private struct FunctionChecker {
                 }
             }
             try checkBlock(body, createsScope: false)
+            endScope()
             return .function(parameters: parameterTypes, results: resolvedResults)
         case .call(let callee, let arguments, let position):
             if case .functionLiteral = callee,
@@ -1575,6 +1824,7 @@ private struct FunctionChecker {
                     if let binding = lookup(name),
                         binding.type == .named("context.CancelFunc")
                     {
+                        use(name)
                         guard arguments.isEmpty else {
                             throw GoDiagnostic(
                                 position: position,
@@ -2153,7 +2403,13 @@ private struct FunctionChecker {
         }
     }
 
-    mutating func assignableType(of expression: GoExpression) throws -> GoType {
+    /// The type of what `expression` names, which must be something a
+    /// value can be stored in. To be the target of an assignment is not to
+    /// be read: `x = 1` alone leaves `x` unused, where `x.f = 1`, `x[i] = 1`,
+    /// `x++`, and `&x` read it.
+    mutating func assignableType(
+        of expression: GoExpression, asTarget: Bool = false
+    ) throws -> GoType {
         switch expression {
         case .identifier(let name, let position):
             guard let binding = lookup(name) else {
@@ -2162,6 +2418,7 @@ private struct FunctionChecker {
             guard !binding.isConstant else {
                 throw GoDiagnostic(position: position, message: "cannot assign to \(name)")
             }
+            if !asTarget { use(name) }
             return binding.type
         case .selector(let base, let name, let position):
             let baseType = try assignableType(of: base)
@@ -3246,6 +3503,7 @@ private struct FunctionChecker {
 
     func statementTerminates(_ statement: GoStatement) -> Bool {
         if let scoped = statement.initialized { return statementTerminates(scoped.statement) }
+        if let block = statement.block { return blockTerminates(block) }
         switch statement {
         case .returnValues:
             return true
@@ -3269,6 +3527,11 @@ private struct FunctionChecker {
 
     func containsBreakTargetingCurrentConstruct(_ block: GoBlock) -> Bool {
         for statement in block.statements {
+            // A `break` in a block of its own looks past the block.
+            if let inner = statement.block {
+                if containsBreakTargetingCurrentConstruct(inner) { return true }
+                continue
+            }
             // An `if` with an initializer is still that `if`.
             switch statement.initialized?.statement ?? statement {
             case .breakStatement:

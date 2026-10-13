@@ -34,8 +34,7 @@ struct GoFileSystemTests: GoTestHarness {
     private static func program(_ body: String) -> String {
         """
         package main
-        import "fmt"
-        import "io"
+        \(goImportLines(["fmt", "io"], usedIn: body).joined(separator: "\n"))
         import "os"
         func check(err error) string {
             if err != nil {

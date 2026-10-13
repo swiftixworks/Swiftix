@@ -57,6 +57,10 @@ format, behavior and platform changes are recorded here.
   A failed assertion between two such types ends in Go's
   `(types from different scopes)`, and between types of one name in two
   packages in `(types from different packages)`.
+- Struct fields that share a type, `X, Y int`; a block as a statement of its
+  own, `{ ... }`, with its own scope; and alias declarations,
+  `type Name = T`, at package level, in functions, and across packages. An
+  alias and its type are one type. `gofmt` lays all three out as Go's does.
 - `go test` finds `func TestX(t *tt.T)` in a file that says
   `import tt "testing"`, by the shape of the parameter as Go's does.
 - `gofmt` prints an import's name before its path and sorts the imports of a
@@ -128,6 +132,18 @@ format, behavior and platform changes are recorded here.
   now tests the method set.
 - A `const` without a value is reported as `missing init expr for x`, Go's
   wording (was `missing value in const declaration`).
+- A variable that a function declares and never reads is an error, as in
+  Go: `declared and not used: x`, at the variable's name. Being assigned is
+  no read (`x := 1; x = 2`), while `x++`, `x += 1`, `x.f = 1`, `x[i] = 1`,
+  and `&x` are; parameters, results, and constants need not be read. Source
+  that compiled with an unused variable no longer does: remove the variable
+  or write `_ = x`.
+- An import of a run-time library package that the file never names is an
+  error, as an unused local package already was:
+  `"os" imported and not used`. Remove the import, or write
+  `import _ "os"`.
+- A type declaration is reported at its name (`main.go:3:6`), where Go
+  reports it, not at the `type` keyword.
 - A diagnostic about an import is reported where Go reports it, at the
   import's name or else its path (`main.go:3:8`), not at the `import` keyword
   (`main.go:3:1`). A package named where a value is expected is

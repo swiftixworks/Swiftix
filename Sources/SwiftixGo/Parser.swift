@@ -57,6 +57,9 @@ private struct Parser {
     var parentheses = GoParentheses()
     /// Whether a function body declared a type.
     var declaresLocalTypes = false
+    /// The names of each declaration of several names, which the tree keeps
+    /// as text.
+    var namePositions: [Int: [GoSourcePosition]] = [:]
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -108,6 +111,7 @@ private struct Parser {
             globalDeclarations: globalDeclarations,
             functions: functions)
         file.declaresLocalTypes = declaresLocalTypes
+        file.namePositions = namePositions
         return file
     }
 
@@ -141,11 +145,14 @@ private struct Parser {
 
     mutating func parseValueSpecification() throws -> ValueSpecification {
         let position = current.position
+        var positions = [position]
         var names = [try expectIdentifier(message: "expected name in declaration")]
         while check(.comma) {
             advance()
+            positions.append(current.position)
             names.append(try expectIdentifier(message: "expected name in declaration"))
         }
+        namePositions[position.offset] = positions
         var type: GoTypeExpression?
         if !check(.assign), !check(.semicolon), !check(.rightParen), !check(.eof) {
             type = try parseTypeExpression()
@@ -198,6 +205,9 @@ private struct Parser {
         }
         guard check(.leftParen) else {
             var specification = try parseValueSpecification()
+            // The declaration is where its keyword is; its names are not.
+            namePositions[keywordPosition.offset] = namePositions.removeValue(
+                forKey: specification.position.offset)
             specification = ValueSpecification(
                 names: specification.names, type: specification.type,
                 values: isConstant
@@ -275,9 +285,7 @@ private struct Parser {
         while !check(.rightParen) {
             guard !check(.eof) else { throw diagnostic("expected ')'") }
             let position = current.position
-            let name = try expectIdentifier(message: "expected type name")
-            declarations.append(
-                GoTypeDeclaration(name: name, type: try parseTypeExpression(), position: position))
+            declarations.append(try parseTypeSpecification(position: position))
             if check(.semicolon) {
                 skipSemicolons()
             } else if !check(.rightParen) {
@@ -289,13 +297,18 @@ private struct Parser {
     }
 
     mutating func parseTypeDeclaration() throws -> GoTypeDeclaration {
-        let position = current.position
         advance()
+        // A type is where its name is: the place Go reports it by.
+        return try parseTypeSpecification(position: current.position)
+    }
+
+    /// `Name T`, a new type, or `Name = T`, another name for `T`.
+    mutating func parseTypeSpecification(position: GoSourcePosition) throws -> GoTypeDeclaration {
         let name = try expectIdentifier(message: "expected type name")
+        let isAlias = check(.assign)
+        if isAlias { advance() }
         return GoTypeDeclaration(
-            name: name,
-            type: try parseTypeExpression(),
-            position: position)
+            name: name, type: try parseTypeExpression(), isAlias: isAlias, position: position)
     }
 
     mutating func parseTypeExpression() throws -> GoTypeExpression {
@@ -425,13 +438,18 @@ private struct Parser {
             var fields: [GoStructFieldDeclaration] = []
             while !check(.rightBrace) {
                 guard !check(.eof) else { throw diagnostic("expected '}'") }
-                let fieldPosition = current.position
-                let name = try expectIdentifier(message: "expected field name")
-                fields.append(
-                    GoStructFieldDeclaration(
-                        name: name,
-                        type: try parseTypeExpression(),
-                        position: fieldPosition))
+                // `X, Y int`: a field of that type for each name.
+                var names = [(current.position, try expectIdentifier(message: "expected field name"))]
+                while check(.comma) {
+                    advance()
+                    names.append(
+                        (current.position, try expectIdentifier(message: "expected field name")))
+                }
+                let type = try parseTypeExpression()
+                for (fieldPosition, name) in names {
+                    fields.append(
+                        GoStructFieldDeclaration(name: name, type: type, position: fieldPosition))
+                }
                 if check(.semicolon) {
                     skipSemicolons()
                 } else if !check(.rightBrace) {
@@ -589,12 +607,9 @@ private struct Parser {
         if check(.variable) || check(.constant) { return try parseDeclarations() }
         if check(.typeKeyword) {
             declaresLocalTypes = true
-            // Go reports a type by where its name is.
-            let isGroup = lookahead(1).kind == .leftParen
-            let namePosition = lookahead(1).position
             return try parseTypeDeclarations().map {
                 .localType(
-                    name: $0.name, type: $0.type, position: isGroup ? $0.position : namePosition)
+                    name: $0.name, type: $0.type, isAlias: $0.isAlias, position: $0.position)
             }
         }
         return [try parseStatement()]
@@ -615,6 +630,10 @@ private struct Parser {
             let position = current.position
             advance()
             return .continueStatement(position: position)
+        }
+        if check(.leftBrace) {
+            let position = current.position
+            return .block(try parseBlock(), position: position)
         }
         if check(.deferKeyword) {
             let position = current.position
@@ -750,6 +769,7 @@ private struct Parser {
         // Try to detect for-range with variables: for x := range ..., for x, y := range ...
         if case .identifier(let firstName) = current.kind {
             let saved = self
+            let firstPosition = current.position
             advance()
             if check(.declare) {
                 // for x := range expr
@@ -757,6 +777,7 @@ private struct Parser {
                 if check(.rangeKeyword) {
                     advance()
                     let collection = try parseExpression(allowCompositeLiteral: false)
+                    namePositions[position.offset] = [firstPosition]
                     return .forRangeStatement(
                         indexName: firstName,
                         valueName: nil,
@@ -769,6 +790,7 @@ private struct Parser {
             } else if check(.comma) {
                 advance()
                 if case .identifier(let secondName) = current.kind {
+                    let secondPosition = current.position
                     advance()
                     if check(.declare) {
                         advance()
@@ -776,6 +798,7 @@ private struct Parser {
                             // for x, y := range expr
                             advance()
                             let collection = try parseExpression(allowCompositeLiteral: false)
+                            namePositions[position.offset] = [firstPosition, secondPosition]
                             return .forRangeStatement(
                                 indexName: firstName,
                                 valueName: secondName,
@@ -984,6 +1007,7 @@ private struct Parser {
                     }
                     return name
                 }
+                namePositions[position.offset] = targets.map(\.position)
                 return .multiDeclaration(
                     names: names,
                     expression: try parseValues(allowCompositeLiteral: allowCompositeLiteral),

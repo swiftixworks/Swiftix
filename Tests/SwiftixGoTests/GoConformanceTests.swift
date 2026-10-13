@@ -125,6 +125,10 @@ struct GoConformanceTests {
     @Test func localTypesInAssertions() throws {
         try expectSameOutput(localTypesInAssertionsSource, localTypesInAssertionsExpected)
     }
+
+    @Test func fieldListsBlocksAndAliases() throws {
+        try expectSameOutput(fieldListsBlocksAndAliasesSource, fieldListsBlocksAndAliasesExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -3161,5 +3165,161 @@ interface conversion: interface {} is main.pair, not main.pair (types from diffe
 interface conversion: interface {} is main.pair, not main.pair (types from different scopes)
 interface conversion: interface {} is *main.pair, not *main.pair (types from different scopes)
 not the same pair
+
+"""#
+
+private let fieldListsBlocksAndAliasesSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+)
+
+// Several fields of one type.
+type point struct {
+	X, Y int
+	Name string
+	a, b, c bool
+}
+
+type segment struct {
+	From, To point
+	Tags     []string
+}
+
+// Other names for types.
+type (
+	coord   = point
+	bytes   = []byte
+	text    = string
+	index   = map[string][]coord
+	file    = os.File
+	failure = error
+	counter int
+	tally   = counter
+	anyOne  = interface{}
+)
+
+type shape interface {
+	Area() int
+}
+
+type figure = shape
+
+func (c coord) Area() int { return c.X * c.Y }
+
+func (t tally) Twice() tally { return t * 2 }
+
+func describe(v anyOne) string {
+	switch {
+	case v == nil:
+		return "nil"
+	}
+	if p, ok := v.(coord); ok {
+		return fmt.Sprint("coord ", p.X, p.Y)
+	}
+	if t, ok := v.(text); ok {
+		return "text " + t
+	}
+	if n, ok := v.(tally); ok {
+		return fmt.Sprint("tally ", int(n))
+	}
+	return fmt.Sprintf("%T", v)
+}
+
+func open(f *file) bool { return f != nil }
+
+func fail() failure { return errors.New("failed") }
+
+func blocks() (result int) {
+	x := 1
+	{
+		x := 10
+		result += x
+		{
+			x := 100
+			result += x
+		}
+	}
+	result += x
+	for i := 0; i < 5; i++ {
+		{
+			if i == 1 {
+				continue
+			}
+			if i == 3 {
+				break
+			}
+		}
+		result += 1000
+	}
+	return result
+}
+
+func sign(n int) string {
+	if n < 0 {
+		return "-"
+	}
+	{
+		if n == 0 {
+			return "0"
+		}
+		return "+"
+	}
+}
+
+func main() {
+	p := point{X: 1, Y: 2, Name: "p", a: true}
+	p.b, p.c = p.a, false
+	fmt.Printf("%v %+v\n", p, p)
+	s := segment{From: p, To: point{3, 4, "q", false, true, false}}
+	fmt.Println(s.From.X+s.To.Y, s.To, len(s.Tags))
+
+	var c coord = p
+	c.X = 5
+	var again point = c
+	fmt.Printf("%v %T %T %d\n", again, c, coord{}, c.Area())
+	var f figure = c
+	var sh shape = f
+	fmt.Println(sh.Area(), describe(c), describe(p), describe(text("t")), describe("s"))
+
+	b := bytes("hi")
+	b = append(b, 33)
+	var t text = string(b)
+	idx := index{"a": []coord{c}, "b": []coord{p, p}}
+	idx["a"] = append(idx["a"], coord{X: 9})
+	fmt.Println(t, len(idx["a"]), len(idx["b"]), idx["a"][1].X)
+	fmt.Printf("%T %T %T %T\n", b, t, idx, make(bytes, 2))
+
+	var n tally = 4
+	var m counter = n.Twice()
+	fmt.Printf("%v %T %T %s\n", m, n, m, describe(n))
+	fmt.Println(open(os.Stdout), fail(), describe(nil), describe(fail()))
+
+	{
+		type local = point
+		type pair struct {
+			L, R local
+		}
+		v := pair{L: p, R: local{X: 7}}
+		fmt.Printf("%v %T %T\n", v.R.X, v, v.L)
+	}
+	fmt.Println(blocks(), sign(-1), sign(0), sign(1))
+}
+"""#
+
+private let fieldListsBlocksAndAliasesExpected = #"""
+{1 2 p true true false} {X:1 Y:2 Name:p a:true b:true c:false}
+5 {3 4 q false true false} 0
+{5 2 p true true false} main.point main.point 10
+10 coord 5 2 coord 1 2 text t text s
+hi! 2 2 9
+[]uint8 string map[string][]main.point []uint8
+8 main.counter main.counter tally 4
+true failed nil *errors.errorString
+7 main.pair main.point
+2111 - 0 +
 
 """#
