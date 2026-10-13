@@ -3,8 +3,10 @@
 public enum GoSourceRewriter {
     public static func rewrite(_ source: GoSourceFile, rule: String) throws -> GoSourceFile {
         let parts = splitRule(rule)
-        let pattern = try parseRuleExpression(parts.pattern, label: "pattern")
-        let replacement = try parseRuleExpression(parts.replacement, label: "replacement")
+        let pattern = try parseRuleExpression(
+            parts.pattern, label: "pattern", keepsParentheses: true)
+        let replacement = try parseRuleExpression(
+            parts.replacement, label: "replacement", keepsParentheses: true)
         if case .identifier(let name, _) = pattern, !isWildcard(name),
             case .identifier(let newName, _) = replacement
         {
@@ -49,18 +51,27 @@ public enum GoSourceRewriter {
         return (rule, "")
     }
 
-    private static func parseRuleExpression(_ text: String, label: String) throws -> GoExpression {
+    /// The expression `text` is. The parentheses of a rule are part of it:
+    /// `(a) -> a` matches an expression in parentheses and nothing else.
+    /// The tree has no node for them, so with `keepsParentheses` each
+    /// expression of the rule that has a pair is carried inside a call no
+    /// program can write.
+    private static func parseRuleExpression(
+        _ text: String, label: String, keepsParentheses: Bool = false
+    ) throws -> GoExpression {
         guard !text.isEmpty else {
             throw GoDiagnostic(position: rulePosition(), message: "rewrite \(label) is empty")
         }
-        let file = try GoParser.parse(GoSourceFile(path: "<rewrite>", text: ruleSource(text)))
-        guard let function = file.functions.first,
+        let parsed = try GoParser.parseRecordingParentheses(
+            GoSourceFile(path: "<rewrite>", text: ruleSource(text)))
+        guard let function = parsed.file.functions.first,
             let statement = function.body.statements.first,
             case .assignment(_, let expression, _) = statement
         else {
             throw GoDiagnostic(position: rulePosition(), message: "invalid rewrite \(label)")
         }
-        return expression
+        guard keepsParentheses, !parsed.parentheses.pairs.isEmpty else { return expression }
+        return expression.markingParentheses(Set(parsed.parentheses.pairs.keys))
     }
 
     /// A file that holds the expression `text` and nothing else to match.
@@ -87,38 +98,68 @@ public enum GoSourceRewriter {
         /// it and then to it, or nil when nothing in it matches. Go rewrites
         /// the operands of a node first and then matches the node that
         /// results, so `f(f(1))` under `f(1) -> 1` becomes `1`.
-        func rewritten(_ expression: GoExpression) -> String? {
-            guard let range = expressionRange(expression, bytes: bytes) else { return nil }
+        /// The text of `expression` once the rule has been applied inside
+        /// it and then to it, with the source it replaces, or nil when
+        /// nothing in it matches. Go rewrites the operands of a node first
+        /// and then matches the node that results, so `f(f(1))` under
+        /// `f(1) -> 1` becomes `1`.
+        func rewritten(_ expression: GoExpression) -> (range: Range<Int>, text: String)? {
+            guard var range = expressionRange(expression, bytes: bytes) else { return nil }
             var operands: [(range: Range<Int>, text: String)] = []
             for child in children(of: expression) {
-                guard let childRange = expressionRange(child, bytes: bytes),
-                    childRange.lowerBound >= range.lowerBound,
-                    childRange.upperBound <= range.upperBound,
-                    !operands.contains(where: { $0.range.overlaps(childRange) }),
-                    let text = rewritten(child)
+                guard let result = rewritten(child),
+                    result.range.lowerBound >= range.lowerBound,
+                    result.range.upperBound <= range.upperBound,
+                    !operands.contains(where: { $0.range.overlaps(result.range) })
                 else { continue }
-                operands.append((childRange, text))
+                operands.append(result)
             }
             var captures: [String: String] = [:]
-            guard !operands.isEmpty else {
-                return matches(pattern, expression, source: bytes, captures: &captures)
-                    ? render(replacement, captures: captures) : nil
+            var text: String?
+            if operands.isEmpty {
+                // Parentheses around the node are matched below.
+                if pattern.parenthesized == nil,
+                    matches(pattern, expression, source: bytes, captures: &captures)
+                {
+                    text = render(replacement, captures: captures)
+                }
+            } else {
+                var spliced = Array(bytes[range])
+                for operand in operands.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
+                    let lower = operand.range.lowerBound - range.lowerBound
+                    let upper = operand.range.upperBound - range.lowerBound
+                    spliced.replaceSubrange(lower..<upper, with: operand.text.utf8)
+                }
+                let current = String(decoding: spliced, as: UTF8.self)
+                text = matched(current, captures: &captures) ?? current
             }
-            var text = Array(bytes[range])
-            for operand in operands.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
-                let lower = operand.range.lowerBound - range.lowerBound
-                let upper = operand.range.upperBound - range.lowerBound
-                text.replaceSubrange(lower..<upper, with: operand.text.utf8)
+            guard pattern.parenthesized != nil else { return text.map { (range, $0) } }
+
+            // In Go's tree each pair of parentheses is a node around the
+            // expression, matched in its turn from the inside out.
+            var current = text ?? String(decoding: bytes[range], as: UTF8.self)
+            var isChanged = text != nil
+            for outer in groupings(of: range, bytes: bytes).dropFirst() {
+                let grouped = "(" + current + ")"
+                captures = [:]
+                if let replaced = matched(grouped, captures: &captures) {
+                    current = replaced
+                    isChanged = true
+                } else {
+                    current = grouped
+                }
+                range = outer
             }
-            let current = String(decoding: text, as: UTF8.self)
-            // What the node has become is read again to be matched.
-            if let node = try? parseRuleExpression(current, label: "operand"),
-                matches(
-                    pattern, node, source: Array(ruleSource(current).utf8), captures: &captures)
-            {
-                return render(replacement, captures: captures)
-            }
-            return current
+            return isChanged ? (range, current) : nil
+        }
+
+        /// What the rule makes of the expression `text` as a whole, read
+        /// again as the node it has become; nil when it does not match.
+        func matched(_ text: String, captures: inout [String: String]) -> String? {
+            guard let node = try? parseRuleExpression(text, label: "operand"),
+                matches(pattern, node, source: Array(ruleSource(text).utf8), captures: &captures)
+            else { return nil }
+            return render(replacement, captures: captures)
         }
 
         func consider(_ expression: GoExpression) {
@@ -126,10 +167,10 @@ public enum GoSourceRewriter {
             if let range = expressionRange(expression, bytes: bytes),
                 // A constant that repeats the specification before it has
                 // that one's expression, which the source holds once.
-                !edits.contains(where: { $0.range == range }),
-                let text = rewritten(expression)
+                !edits.contains(where: { $0.range.overlaps(range) }),
+                let result = rewritten(expression)
             {
-                edits.append(Edit(range: range, replacement: text))
+                edits.append(Edit(range: result.range, replacement: result.text))
             }
             // The statements of a function literal are not operands; they
             // are reached where the expression around them stays as it is.
@@ -303,6 +344,20 @@ public enum GoSourceRewriter {
         source: [UInt8],
         captures: inout [String: String]
     ) -> Bool {
+        // Parentheses in the pattern ask for parentheses in the source. What
+        // they hold is matched without the outermost pair.
+        if let inner = pattern.parenthesized {
+            guard let range = expressionRange(target, bytes: source) else { return false }
+            let levels = groupings(of: range, bytes: source)
+            guard levels.count > 1 else { return false }
+            if case .identifier(let name, _) = inner, isWildcard(name) {
+                let text = String(decoding: source[levels[levels.count - 2]], as: UTF8.self)
+                if let existing = captures[name] { return existing == text }
+                captures[name] = text
+                return true
+            }
+            return matches(inner, target, source: source, captures: &captures)
+        }
         // Bitwise operators are call-shaped nodes whose callee names the
         // operator, so the callee must match exactly instead of capturing.
         if let patternOperation = pattern.bitwiseOperation {
@@ -425,15 +480,22 @@ public enum GoSourceRewriter {
     /// expression. Those of a call or a conversion follow a name or a
     /// closing bracket and are left alone.
     private static func grouped(_ range: Range<Int>, bytes: [UInt8]) -> Range<Int> {
+        groupings(of: range, bytes: bytes).last ?? range
+    }
+
+    /// `range` and, from the inside out, what it is with each pair of
+    /// grouping parentheses around it.
+    private static func groupings(of range: Range<Int>, bytes: [UInt8]) -> [Range<Int>] {
         func isBlank(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
         var range = range
+        var levels = [range]
         while true {
             var open = range.lowerBound - 1
             while open >= 0, isBlank(bytes[open]) { open -= 1 }
             var close = range.upperBound
             while close < bytes.count, isBlank(bytes[close]) { close += 1 }
             guard open >= 0, close < bytes.count, bytes[open] == 0x28, bytes[close] == 0x29 else {
-                return range
+                return levels
             }
             var before = open - 1
             while before >= 0, isBlank(bytes[before]) { before -= 1 }
@@ -443,9 +505,10 @@ public enum GoSourceRewriter {
                     byte == 0x29 || byte == 0x5D || byte == 0x7D || byte == 0x5F || byte >= 0x80
                     || (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A)
                     || (byte >= 0x61 && byte <= 0x7A)
-                if endsOperand { return range }
+                if endsOperand { return levels }
             }
             range = open..<(close + 1)
+            levels.append(range)
         }
     }
 
@@ -628,6 +691,9 @@ public enum GoSourceRewriter {
     }
 
     private static func render(_ expression: GoExpression, captures: [String: String]) -> String {
+        if let inner = expression.parenthesized {
+            return "(" + render(inner, captures: captures) + ")"
+        }
         if let operation = expression.bitwiseOperation {
             // Print the operator syntax back, parenthesizing operands that
             // would otherwise regroup under Go's precedence.
@@ -802,4 +868,69 @@ private extension String {
 
 private extension Set where Element == Character {
     static let whitespaces: Set<Character> = [" ", "\t", "\n", "\r"]
+}
+
+/// Parentheses of a rewrite rule, which the tree has no node for: an
+/// expression of the rule that has a pair is the one argument of a call to
+/// a name no Go identifier can be.
+extension GoExpression {
+    private static let parenthesesName = "$paren"
+
+    /// What the parentheses of a rule hold, when this is such a pair.
+    fileprivate var parenthesized: GoExpression? {
+        guard case .call(.identifier(Self.parenthesesName, _), let arguments, _) = self,
+            arguments.count == 1
+        else { return nil }
+        return arguments[0]
+    }
+
+    /// The expression with every part that has parentheses in the source
+    /// carried as a pair: `offsets` are the positions of those parts.
+    fileprivate func markingParentheses(_ offsets: Set<Int>) -> GoExpression {
+        func marked(_ expression: GoExpression) -> GoExpression {
+            expression.markingParentheses(offsets)
+        }
+        let rebuilt: GoExpression
+        switch self {
+        case .integer, .string, .identifier, .typeExpression, .functionLiteral:
+            rebuilt = self
+        case .selector(let base, let name, let position):
+            rebuilt = .selector(base: marked(base), name: name, position: position)
+        case .compositeLiteral(let type, let elements, let position):
+            rebuilt = .compositeLiteral(
+                type: type,
+                elements: elements.map {
+                    GoCompositeElement(
+                        key: $0.key, keyExpression: $0.keyExpression.map(marked),
+                        value: marked($0.value), position: $0.position)
+                },
+                position: position)
+        case .index(let base, let index, let position):
+            rebuilt = .index(base: marked(base), index: marked(index), position: position)
+        case .slicing(let base, let low, let high, let position):
+            rebuilt = .slicing(
+                base: marked(base), low: low.map(marked), high: high.map(marked),
+                position: position)
+        case .call(let callee, let arguments, let position):
+            // The callee of an operator the parser carries as a call is no
+            // expression of the rule, and stands where the operator does.
+            var isOperator = false
+            if case .identifier(let name, _) = callee { isOperator = name.hasPrefix("$") }
+            rebuilt = .call(
+                callee: isOperator ? callee : marked(callee), arguments: arguments.map(marked),
+                position: position)
+        case .typeAssertion(let base, let type, let position):
+            rebuilt = .typeAssertion(base: marked(base), type: type, position: position)
+        case .unary(let unaryOperator, let operand, let position):
+            rebuilt = .unary(operator: unaryOperator, operand: marked(operand), position: position)
+        case .binary(let left, let binaryOperator, let right, let position):
+            rebuilt = .binary(
+                left: marked(left), operator: binaryOperator, right: marked(right),
+                position: position)
+        }
+        guard offsets.contains(position.offset) else { return rebuilt }
+        return .call(
+            callee: .identifier(Self.parenthesesName, position: position), arguments: [rebuilt],
+            position: position)
+    }
 }

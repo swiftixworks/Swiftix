@@ -411,6 +411,36 @@ public enum GoTypeChecker {
         names[name] = position
     }
 
+    /// Whether the run-time library package at `path` has `member`: a type,
+    /// a value, or a function. Nothing lists what such a package declares.
+    /// The checker knows each member where a program can write it, so it is
+    /// asked the way a program asks: as a type, as a value, and as a call.
+    static func libraryDeclares(path: String, member: String) -> Bool {
+        let name = GoImportName.defaultName(ofPath: path)
+        let position = syntheticPosition()
+        if (try? resolve(.named(name + "." + member, position: position), availableTypes: [])) != nil {
+            return true
+        }
+        let selection = GoExpression.selector(
+            base: .identifier(name, position: position), name: member, position: position)
+        for probe in [selection, .call(callee: selection, arguments: [], position: position)] {
+            var checker = FunctionChecker(
+                importedPaths: [path], functionSignatures: [:], methodSignatures: [:],
+                typeDefinitions: [:], availableTypes: [])
+            do {
+                _ = try checker.type(of: probe)
+                return true
+            } catch let diagnostic as GoDiagnostic {
+                // Anything but not knowing it is knowing it: too few
+                // arguments, a result nothing takes.
+                if !diagnostic.message.hasPrefix("undefined: ") { return true }
+            } catch {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func resolve(
         _ expression: GoTypeExpression,
         availableTypes: Set<String>
@@ -629,6 +659,15 @@ private struct FunctionChecker {
         self.availablePackages = availablePackages
         self.scopes = [globalBindings, [:]]
         self.namePositions = namePositions
+    }
+
+    /// The package `expression` names: the name of one the file imports,
+    /// which no variable hides.
+    func importedPackage(named expression: GoExpression) -> String? {
+        guard case .identifier(let name, _) = expression, lookup(name) == nil,
+            importedPaths.contains(where: { GoImportName.defaultName(ofPath: $0) == name })
+        else { return nil }
+        return name
     }
 
     // MARK: Unused variables
@@ -1511,9 +1550,7 @@ private struct FunctionChecker {
             {
                 return GoPredeclared.filePointer
             }
-            if case .identifier(let packageName, _) = base, lookup(packageName) == nil,
-                importedPaths.contains(where: { GoImportName.defaultName(ofPath: $0) == packageName })
-            {
+            if let packageName = importedPackage(named: base) {
                 // Nothing above knows the member of the package.
                 throw GoDiagnostic(position: position, message: "undefined: \(packageName).\(name)")
             }
@@ -2390,11 +2427,7 @@ private struct FunctionChecker {
             }
             return funcExport.results.first ?? .void
         }
-        if case .identifier(let packageName, _) = base,
-            lookup(packageName) == nil,
-            importedPaths.contains(packageName),
-            GoStandardLibrary.supportedPackages.contains(packageName)
-        {
+        if let packageName = importedPackage(named: base) {
             // Name the missing member instead of reporting the package
             // itself as undefined.
             throw GoDiagnostic(
@@ -3472,6 +3505,10 @@ private struct FunctionChecker {
                 default:
                     break
                 }
+            }
+            if let packageName = importedPackage(named: base) {
+                throw GoDiagnostic(
+                    position: callee.position, message: "undefined: \(packageName).\(name)")
             }
             let baseType = try type(of: base)
             let candidates: [String]

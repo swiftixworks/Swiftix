@@ -133,6 +133,10 @@ struct GoConformanceTests {
     @Test func namesInInterfaceMethods() throws {
         try expectSameOutput(namesInInterfaceMethodsSource, namesInInterfaceMethodsExpected)
     }
+
+    @Test func severalDotImports() throws {
+        try expectSameOutput(severalDotImportsSource, severalDotImportsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -3391,5 +3395,68 @@ func main() {
 private let namesInInterfaceMethodsExpected = #"""
 v true false 1 6 9 <nil> true 1 1 1
 *main.table
+
+"""#
+
+private let severalDotImportsSource = #"""
+package main
+
+import (
+	"errors"
+	. "fmt"
+	. "os"
+	. "sort"
+	. "strconv"
+	. "strings"
+	. "time"
+)
+
+type Report struct {
+	Lines []string
+	Made  Time
+}
+
+func parse(text string) (int, error) {
+	n, err := Atoi(text)
+	if err != nil {
+		return 0, errors.New("bad number: " + text)
+	}
+	return n, nil
+}
+
+func (r *Report) add(format string, values ...interface{}) {
+	r.Lines = append(r.Lines, Sprintf(format, values...))
+}
+
+func main() {
+	r := &Report{Made: Now()}
+	n, err := parse("41")
+	r.add("%d %v", n+1, err)
+	_, err = parse("x")
+	r.add("%v %v", err, errors.Is(err, err))
+	r.add("%s|%s", ToUpper("up"), Repeat("ab", 2))
+	names := []string{"c", "a", "b"}
+	Strings(names)
+	r.add("%v %s %d", names, Join(names, "+"), len(Args)-len(Args))
+	r.add("%v %v", Since(r.Made) >= 0, Itoa(7)+"!")
+	Fprintln(Stdout, Join(r.Lines, "\n"))
+	if len(r.Lines) == 5 {
+		// A name of the block hides the dot-imported ones.
+		Join := Sprint("own ", Second > Millisecond)
+		Println(Join)
+	}
+	var out *File = Stdout
+	Fprintf(out, "%T %v\n", out, out == Stdout)
+}
+"""#
+
+private let severalDotImportsExpected = #"""
+42 <nil>
+bad number: x true
+UP|abab
+[a b c] a+b+c 0
+true 7!
+own true
+*os.File true
 
 """#

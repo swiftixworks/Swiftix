@@ -8,8 +8,9 @@
 /// file. As in Go, an identifier of a rule is a wildcard when it is one
 /// lower-case letter and matches itself otherwise; the operands of an
 /// expression are rewritten before the expression is matched, so one rule
-/// can apply at several depths; and a rule from one identifier to another
-/// renames the identifier wherever the file has it.
+/// can apply at several depths; a rule from one identifier to another
+/// renames the identifier wherever the file has it; and parentheses in a
+/// pattern match parentheses, so `(a) -> a` removes every pair.
 ///
 /// To add a case, run the rule with Go and paste the lines it changes.
 
@@ -67,6 +68,11 @@ struct GoRewriteRuleTests {
         ("list[a:b] -> list[a+1 : b]", [22: "\tfmt.Println(f(f(1)), (p.A+0)+0, list[1+1:len(list)], f((p.B)))"]),
         ("sum(a, 0) -> a", [11: "var total = sum(1, 2)"]),
         ("ab -> cd", [:]),
+        ("(a) -> a", [22: "\tfmt.Println(f(f(1)), p.A+0+0, list[1:len(list)], f(p.B))"]),
+        ("(a + 0) -> a", [22: "\tfmt.Println(f(f(1)), p.A+0, list[1:len(list)], f((p.B)))"]),
+        ("f((a)) -> f(a)", [22: "\tfmt.Println(f(f(1)), (p.A+0)+0, list[1:len(list)], f(p.B))"]),
+        ("sum(a, b) -> (a + b)", [11: "var total = ((1 + 2) + 0)", 21: "\tfmt.Println((p.A + p.B), id(3), local(4), total)", 24: "\t\tfmt.Println((1 + 2) == 3 == true)"]),
+        ("(a) -> f(a)", [22: "\tfmt.Println(f(f(1)), f(p.A+0)+0, list[1:len(list)], f(f(p.B)))"]),
     ]
 }
 

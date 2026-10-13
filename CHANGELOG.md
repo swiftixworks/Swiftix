@@ -48,8 +48,7 @@ format, behavior and platform changes are recorded here.
   packages of the run-time library and of the module, so two packages of one
   name can be imported side by side (`stderrors "errors"` beside a local
   `errors`), and a file that renames a package may use the package's own
-  name for a variable, a function, or a type. A file can dot-import one
-  package of the run-time library.
+  name for a variable, a function, or a type.
 - Types declared in functions, alone or in a `type ( ... )` group. A local
   type reaches from its declaration to the end of its block, hides an outer
   type of that name, may refer to itself, and is distinct from a type of the
@@ -163,7 +162,9 @@ format, behavior and platform changes are recorded here.
   matched, so a rule applies at every depth (`f(f(1))` under `f(1) -> 1` is
   `1`), also inside function literals. A rule from one identifier to another
   renames it wherever the file has it, declarations included
-  (`total -> sum`).
+  (`total -> sum`). Parentheses in a pattern match parentheses, so
+  `gofmt -r '(a) -> a'` removes every pair, and those in a replacement are
+  written.
 - A type declaration is reported at its name (`main.go:3:6`), where Go
   reports it, not at the `type` keyword. So is a function, where it used to
   be reported at `func`; `missing return` is reported where the body ends;

@@ -78,8 +78,9 @@ enum GoImportNames {
 private struct Resolver: GoScopedRewriter {
     /// The package each name of the file stands for, by the package's own name.
     private var packages: [String: String] = [:]
-    /// The package whose exported names the file uses unqualified.
-    private var dotImported: String?
+    /// The packages whose exported names the file uses unqualified, by
+    /// their own names, with their paths and where each is imported.
+    private var dotImported: [(name: String, path: String, position: GoSourcePosition)] = []
     private let freed: Set<String>
     private let packageLevel: Set<String>
     private var scopes: [Set<String>] = []
@@ -97,15 +98,9 @@ private struct Resolver: GoScopedRewriter {
             case GoImportName.blank?:
                 continue
             case GoImportName.dot?:
-                // Nothing lists what a package of the run-time library
-                // declares, so a second one would leave a name's package
-                // a guess.
-                guard dotImported == nil || dotImported == ownName else {
-                    throw GoDiagnostic(
-                        position: declaration.position,
-                        message: "a file can dot-import only one package of the run-time library")
+                if !dotImported.contains(where: { $0.path == declaration.path }) {
+                    dotImported.append((ownName, declaration.path, declaration.position))
                 }
-                dotImported = ownName
             default:
                 let name = declaration.name ?? ownName
                 guard packages.updateValue(ownName, forKey: name) == nil else {
@@ -194,12 +189,29 @@ private struct Resolver: GoScopedRewriter {
     /// The package that brings the unqualified `name` into the file: an
     /// exported name nothing in the package declares. A linker symbol has a
     /// `.` and is another package's already.
-    private mutating func dotImporter(of name: String) -> String? {
-        guard let package = dotImported, GoModuleLinker.isExported(name),
+    private mutating func dotImporter(of name: String) throws -> String? {
+        guard !dotImported.isEmpty, GoModuleLinker.isExported(name),
             !name.contains("."), !isLocal(name), !packageLevel.contains(name)
         else { return nil }
-        used.insert(GoImportName.dot)
-        return package
+        // The name is the package's that declares it, and two that do
+        // cannot both lend it to the file. What a package of the run-time
+        // library declares the checker can say; of a package compiled
+        // apart it cannot, and the name is that one's when no other has it.
+        var owners = dotImported.filter {
+            GoStandardLibrary.supportedPackages.contains($0.path)
+                && GoTypeChecker.libraryDeclares(path: $0.path, member: name)
+        }
+        if owners.isEmpty {
+            let others = dotImported.filter { !GoStandardLibrary.supportedPackages.contains($0.path) }
+            if others.count == 1 { owners = others }
+        }
+        guard owners.count < 2 else {
+            throw GoDiagnostic(
+                position: owners[1].position, message: "\(name) redeclared in this block")
+        }
+        guard let package = owners.first else { return nil }
+        used.insert(GoImportName.dot + package.path)
+        return package.name
     }
 
     /// Go refuses an import the file has no use for.
@@ -207,7 +219,8 @@ private struct Resolver: GoScopedRewriter {
         for declaration in imports where declaration.name != GoImportName.blank {
             let ownName = GoImportName.defaultName(ofPath: declaration.path)
             let name = declaration.name ?? ownName
-            guard !used.contains(name) else { continue }
+            let use = name == GoImportName.dot ? name + declaration.path : name
+            guard !used.contains(use) else { continue }
             let isRenamed = name != ownName && name != GoImportName.dot
             throw GoDiagnostic(
                 position: declaration.position,
@@ -228,7 +241,7 @@ private struct Resolver: GoScopedRewriter {
         named name: String, at position: GoSourcePosition
     ) throws -> GoExpression {
         if name.hasPrefix("$") { return .identifier(name, position: position) }
-        if let package = dotImporter(of: name) {
+        if let package = try dotImporter(of: name) {
             return .selector(
                 base: .identifier(package, position: position), name: name, position: position)
         }
@@ -239,14 +252,16 @@ private struct Resolver: GoScopedRewriter {
         return .identifier(spelled(name), position: position)
     }
 
-    mutating func type(named name: String, at position: GoSourcePosition) -> GoTypeExpression {
+    mutating func type(
+        named name: String, at position: GoSourcePosition
+    ) throws -> GoTypeExpression {
         if let dot = name.firstIndex(of: ".") {
             guard let package = selectedPackage(String(name[..<dot])) else {
                 return .named(name, position: position)
             }
             return .named(package + name[dot...], position: position)
         }
-        if let package = dotImporter(of: name) {
+        if let package = try dotImporter(of: name) {
             return .named(package + "." + name, position: position)
         }
         return .named(spelled(name), position: position)

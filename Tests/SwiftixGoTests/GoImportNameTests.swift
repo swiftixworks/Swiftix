@@ -324,12 +324,82 @@ struct GoImportNameTests: GoTestHarness {
                 }
                 """) == "sides=3 X\nhidden 6\n")
 
-        // Nothing lists what a library package declares, so one file takes
-        // the unqualified names of one.
+    }
+
+    @Test func aFileMayDotImportSeveralPackages() throws {
+        // Each name is the package's that declares it: a function, a
+        // constant, a value, or a type.
+        #expect(
+            try output(
+                """
+                package main
+
+                import (
+                    . "fmt"
+                    . "os"
+                    . "strconv"
+                    . "strings"
+                    . "time"
+                )
+
+                type Report struct {
+                    Lines []string
+                    Made  Time
+                }
+
+                func main() {
+                    r := Report{Made: Now()}
+                    n, err := Atoi("41")
+                    r.Lines = append(r.Lines, Sprint(n+1, err), ToUpper("up"), Itoa(len(Args)-len(Args)))
+                    Println(Join(r.Lines, "|"), Since(r.Made) >= 0, Second > Millisecond)
+                    var out *File = Stdout
+                    Printf("%T %v\\n", out, out == Stdout)
+                }
+                """) == "42 <nil>|UP|0 true true\n*os.File true\n")
+    }
+
+    @Test func dotImportedNamesAreChecked() {
+        func program(_ imports: String, _ body: String) -> String {
+            "package main\nimport (\n" + imports + "\n)\nfunc main() {\n" + body + "\n}\n"
+        }
+
+        // A name no dot-imported package declares is a name of nothing.
+        #expect(
+            diagnostic(program(" . \"fmt\"", " Println(Nope)"))
+                == "main.go:6:10: undefined: Nope")
+        #expect(
+            diagnostic(program(" . \"fmt\"\n . \"strings\"", " Println(ToUpper(Nope))"))
+                == "main.go:7:18: undefined: Nope")
+        // Each must lend the file something.
+        #expect(
+            diagnostic(program(" . \"fmt\"\n . \"strings\"\n . \"time\"", " Println(Now())"))
+                == "main.go:4:2: \"strings\" imported and not used")
+        // Two packages cannot both lend a name, which Go reports where
+        // the second is imported.
         #expect(
             diagnostic(
-                "package main\nimport (\n . \"fmt\"\n . \"strings\"\n)\nfunc main() {\n Println(ToUpper(\"x\"))\n}\n")
-                == "main.go:4:2: a file can dot-import only one package of the run-time library")
+                program(
+                    " . \"os\"\n . \"swiftix/userland\"",
+                    " _ = WriteFile(\"name\", nil, 0)\n _ = SetRawMode(true)\n Exit(0)"))
+                == "main.go:4:2: WriteFile redeclared in this block")
+    }
+
+    @Test func theCheckerSaysWhatALibraryPackageDeclares() {
+        // Nothing lists the members of a package; the checker is asked.
+        func declares(_ path: String, _ member: String) -> Bool {
+            GoTypeChecker.libraryDeclares(path: path, member: member)
+        }
+        #expect(declares("fmt", "Println") && declares("fmt", "Sprintf") && declares("fmt", "Errorf"))
+        #expect(declares("os", "Args") && declares("os", "Stdout") && declares("os", "O_RDONLY"))
+        #expect(declares("os", "File") && declares("time", "Time") && declares("sync", "Mutex"))
+        #expect(declares("time", "Second") && declares("io", "EOF") && declares("errors", "New"))
+        #expect(declares("strings", "Join") && declares("sort", "Strings") && declares("strconv", "Atoi"))
+        #expect(declares("net/http", "Get") && declares("net/http", "Request"))
+        #expect(declares("swiftix/userland", "ReadInput"))
+
+        #expect(!declares("fmt", "Nope") && !declares("fmt", "ToUpper") && !declares("strings", "Println"))
+        #expect(!declares("net/http", "Nope") && !declares("swiftix/userland", "Println"))
+        #expect(!declares("time", "File") && !declares("os", "Time"))
     }
 
     @Test func importNamesMustDiffer() {
