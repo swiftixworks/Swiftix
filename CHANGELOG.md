@@ -165,6 +165,84 @@ format, behavior and platform changes are recorded here.
 - Pointer types with a name, `type ptr *T`: field selection and assignment,
   `*p`, nil comparison, conversion to and from `*T`. Was `ptr has no field or
   method n`.
+- Composite literals leave out what their type says: the type of an element
+  or key at any depth (`[]point{{1, 2}}`, `map[point]string{{1, 2}: "a"}`;
+  was `expected expression`), `&T` for pointer elements, and the length in
+  `[...]T`. Elements of arrays and slices take constant indexes
+  (`[]int{2: 5, 7}`; was `keyed slice literals are not supported yet`).
+- Struct types written in expressions: `struct{ a int }{1}`, tables
+  `[]struct{ ... }{{...}}`, `struct{}{}` (was `expected expression`). Struct
+  types of the same fields are one type; a value of one is assigned to,
+  compared with, and converted to a named type of that structure.
+- `new(T)`, `min` and `max` over integers and strings, `clear` for maps and
+  slices, and `make` of a named type (`make(names, 2)`). Each was `undefined`
+  or `invalid make call`.
+- Conversions to types in parentheses and to more types: `(func())(nil)`,
+  `(<-chan int)(ch)`, `any(5)`, `error(nil)`, a conversion to a named
+  interface, and between struct or array types of one structure.
+- A pointer to an array is followed by `p[i]`, `&p[i]`, `p[a:b]`, `len(p)`,
+  `cap(p)`, and `range p` (was `cannot index expression`).
+- Type switches: `switch v := x.(type) { case T: ... }`, with or without the
+  name and an initializer, over any interface value; cases of any type, of
+  several types, `nil`, and `default`. Duplicate and impossible cases, an
+  unused name, and `fallthrough` are refused as Go refuses them. Was
+  `expected type`.
+- Labels with `break L`, `continue L`, and `goto L`, on loops, `switch`,
+  `select`, and blocks, with Go's errors for a label that is unused, unknown,
+  defined twice, or no statement the jump can leave, and for a `goto` into a
+  block or over a variable declaration. Was `expected semicolon or newline`.
+- `fallthrough` in expression switches (was `expression evaluated but not
+  used`), and `for i := range n` and `for range n` over an integer (was
+  `cannot range over int`).
+- A function of the run-time library is a value of its Go type:
+  `f := strings.ToUpper`, `apply(strings.TrimSpace, s)`, the variadic
+  `fmt.Println` and `fmt.Sprintf`, and the several results of `strconv.Atoi`.
+  A method of a library type is a method value: `done := wg.Done`,
+  `unlock := mu.Unlock`, `write := file.WriteString`. `errors.As` and the
+  functions of `net/http` still can only be called.
+- `sort.Slice`, `SliceStable`, `SliceIsSorted`, `Sort`, `Stable`, `IsSorted`,
+  `Reverse`, `Interface`, `IntSlice`, `StringSlice`, `Search`, `SearchInts`,
+  `SearchStrings`, `Find`, `IntsAreSorted`, and `StringsAreSorted`. The order
+  of equal elements under the unstable sorts and the sequence of `Less` and
+  `Swap` calls are Go's. They are Go text compiled with the program that
+  uses them, linked like a package of the module; a program that names none
+  compiles to the image it had.
+- `sync.Once`: `once.Do(f)` calls `f` once, also when it panics, and a call
+  from another goroutine waits for the first to end.
+- Struct embedding: `type derived struct { base; name string }` gives
+  `derived` a field `base` and the fields and methods of `base`, by value, by
+  pointer, and for a type of another package, with Go's rules: the shallowest
+  name wins, two at one depth are `ambiguous selector` where used, and the
+  method sets of `S` and `*S` decide which interfaces the struct implements.
+  A struct may embed an interface or `error`; `sync.Mutex`, `sync.WaitGroup`,
+  `time.Time`, and `*os.File` are embedded with their methods (`c.Lock()`).
+  Was `expected type`.
+- Interfaces embed interfaces (`type ReadWriter interface { Reader; Writer }`),
+  `error` included, and a value of one interface type is assigned to another
+  whose methods it has.
+- Raw string literals (`` `...` ``), over several lines and without escapes,
+  and struct tags (``Name string `json:"name"` ``), which are part of the
+  struct type and have no other effect.
+- Sized integers: `int8`, `int16`, `int32`, `int64`, `uint`, `uint16`,
+  `uint32`, `uint64`, `uintptr`, and `rune` (another name for `int32`), with
+  Go's wraparound, unsigned division, remainder, comparison, and right shift
+  for the 64-bit unsigned types, shift counts of any integer type, and
+  conversions between all of them. `[]rune(s)` and `string(runes)` convert,
+  and `fmt` prints each type under every integer verb. Each was rejected by
+  name.
+- Exact constants: an untyped integer constant has any size (`1 << 100`,
+  `14695981039346656037`) and takes the type of what it meets. A literal past
+  64 bits was `integer literal overflows int64`.
+- Library: the integer bounds of `math` (`MaxInt8` to `MaxUint64`, `MinInt8`
+  to `MinInt64`, `MaxInt`, `MinInt`, `MaxUint`); `strconv.ParseInt`,
+  `ParseUint`, `FormatInt`, `FormatUint`; `unicode.IsLetter`, `IsDigit`,
+  `IsSpace`, `IsUpper`, `IsLower`, `ToUpper`, `ToLower`; `utf8.RuneCountInString`, `RuneLen`, `DecodeRuneInString`, `EncodeRune`,
+  `ValidString`; `strings.ContainsRune`, `IndexRune`, `IndexByte`.
+- `gofmt` lays out elided and nested literals, struct types written in
+  expressions, labels (on a line of their own, one level out), type switches,
+  embedded fields, tags in a column of their own, and raw strings as Go's
+  does; `gofmt -r` renames labels and rewrites the operand and the case types
+  of a type switch.
 
 
 ### Changed
@@ -336,6 +414,22 @@ format, behavior and platform changes are recorded here.
 - An unexported field or method of another package's type cannot be selected,
   called, or given in a struct literal; `v.secret`, `v.hidden()`, and
   `lib.T{secret: 7}` compiled.
+- A rune literal's default type is `rune`, and a `range` over a string yields
+  `rune`, as in Go; both were `int` (`%T` printed `int`). A program that used
+  either as an `int` needs a conversion.
+- Literal diagnostics are Go's, at Go's positions: `mixture of field:value
+  and value elements in struct literal` at the offending element, `too few
+  values` at the closing brace, `index 3 is out of bounds (>= 3)`, and
+  `cannot use string as int value in struct literal`. A literal element that
+  ends a line needs its comma, and `len(s)` alone is `len(s) is not used`;
+  both were accepted.
+- A second `default` is reported as `multiple defaults (first at
+  main.go:9:1)`; a duplicate constant case is `duplicate case in expression
+  switch` and is found through constant expressions and named untyped
+  constants (`case 1: case 2 - 1:` compiled); an interface that declares a
+  method twice is `duplicate method M` (it was accepted).
+- The message for an unsupported numeric type is `type float64 is not
+  supported; the numeric types are the integer types`.
 
 
 ### Fixed
@@ -437,6 +531,31 @@ format, behavior and platform changes are recorded here.
   Num {...}`) is resolved. Was `unsupported zero value type`.
 - `gofmt`: a variadic type that begins a list has no blank before it,
   `func(...int)` (was `func( ...int)`).
+- A literal of a named map type read an identifier or integer key as its
+  spelling: `m{k: 1}` printed `map[k:1]`, and `mi{1: "a"}[1]` was empty.
+  Duplicate constant keys in a map literal were accepted.
+- `var t T = x` with `x` of `struct{ a int }` gave `t == T{1}` false;
+  `x := 5; t := T{x: 1}` did not report `declared and not used: x`;
+  `defer len(s)` was `missing function: len`; `%T` of a function with a
+  struct parameter printed `func(struct)`.
+- `nil` is a case of a switch on a pointer, an interface, or a channel (was
+  `invalid case nil in switch on *T`); a slice, a map, or a function may be
+  switched on with `nil` as its only case; `true` may be a case twice;
+  `switch x := 1 {` and `switch nil {}` are refused, as in Go.
+- A function may end in a `select` whose clauses all return, in `select {}`,
+  in a `goto`, or in a clause that falls through. Was `missing return`.
+- A call `p.F(...)` where a variable `p` hides a package of that name calls
+  the variable's method. It called the package's function `F` when the
+  program linked one.
+- In a shift that is no constant, an untyped constant on the left takes the
+  type the shift is used at: `var u uint8 = 1 << n` was `cannot use int as
+  byte value`. A typed constant expression that leaves its type is reported:
+  `const c byte = 200; d := c + 100` compiled and printed `44`. An untyped
+  constant expression is computed exactly: `x := 1 << 62 * 4` printed `0`.
+- `gofmt`: `func fn(s struct { a int }) {` is written as Go writes it;
+  `gofmt -r` rewrites inside `[]interface{}{1, 2}`; a comment after the
+  closing brace of a field whose type is a struct of several lines follows
+  the brace after one blank.
 
 
 ## 0.13.1 — 2026-10-08
