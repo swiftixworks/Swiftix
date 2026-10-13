@@ -267,6 +267,18 @@ format, behavior and platform changes are recorded here.
 - `swiftix-go run` gives the program a loopback interface, so a program can
   reach a server it started; a connection from `listener.Accept` knows its
   peer address. `ProcessContext.tcpPeer` is public.
+- Floating point: `float64` and `float32`, floating-point literals in every
+  form, exact untyped constants, IEEE arithmetic and comparison, conversions
+  to and from the integer types, and `fmt`'s `%v %g %f %e %G %E %x %b` with
+  Go's shortest text. `var f float64` was `type float64 is not supported`,
+  and `x := 1.5` was `expected selector name`.
+- Library for floats: `strconv.ParseFloat` and `FormatFloat`; `math.Sqrt`,
+  `Floor`, `Ceil`, `Trunc`, `Round`, `RoundToEven`, `Abs`, `Max`, `Min`,
+  `Pow`, `Mod`, `Inf`, `NaN`, `IsNaN`, `IsInf`, `Signbit`, `Copysign`, the
+  `Float64bits` family, and the constants of `math`; `sort.Float64s`; `min`
+  and `max` of floats; `time.Duration`'s `Seconds`, `Minutes`, and `Hours`.
+- Array lengths that are constant expressions: `[n]T`, `[2 * n]T`,
+  `[len("abc")]T`. `var a [n]int` was `expected array length`.
 
 
 ### Changed
@@ -458,6 +470,12 @@ format, behavior and platform changes are recorded here.
   method (was `cannot use *buf as *os.File value`). A first argument that is
   no writer is `cannot use int as io.Writer value in argument to
   fmt.Fprintln`.
+- `time.Duration` is defined over `int64`, and `t.Unix()`, `t.UnixMilli()`,
+  `t.UnixNano()`, `d.Nanoseconds()`, `d.Microseconds()`, `d.Milliseconds()`,
+  the arguments of `time.Unix`, and `ContentLength` of an HTTP request and
+  response are `int64`, as in Go; `t.Unix()` was an `int`.
+- `gofmt` writes the letter of a base prefix and of an exponent in lower case
+  (`0X1F` to `0x1F`, `1E6` to `1e6`), as Go's does.
 
 
 ### Fixed
@@ -584,7 +602,11 @@ format, behavior and platform changes are recorded here.
   `gofmt -r` rewrites inside `[]interface{}{1, 2}`; a comment after the
   closing brace of a field whose type is a struct of several lines follows
   the brace after one blank.
-
+- An untyped string constant takes a named string type and an untyped
+  boolean a named bool type: `type S string; var s S = "a"` was `cannot use
+  string as S value`, and so were `const GET Method = "GET"`, a `Method` map
+  key or argument written as a string, and `type Flag bool; var f Flag =
+  true`.
 
 
 ## 0.13.1 — 2026-10-08

@@ -193,6 +193,10 @@ struct GoConformanceTests {
     @Test func deferAndGoOfInterfaceMethodsAndClose() throws {
         try expectSameOutput(deferAndGoOfInterfaceMethodsAndCloseSource, deferAndGoOfInterfaceMethodsAndCloseExpected)
     }
+
+    @Test func floatsNamedConstantsAndDurations() throws {
+        try expectSameOutput(floatsNamedConstantsAndDurationsSource, floatsNamedConstantsAndDurationsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -4903,5 +4907,136 @@ private let deferAndGoOfInterfaceMethodsAndCloseExpected = #"""
 8 [a: done 1 close a bad: done 2 close bad]
 body <nil>
 recovered: runtime error: invalid memory address or nil pointer dereference
+
+"""#
+
+private let floatsNamedConstantsAndDurationsSource = #"""
+package main
+
+import (
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Method string
+
+const (
+	GET  Method = "GET"
+	POST Method = "POST"
+)
+
+type Enabled bool
+
+type Celsius float64
+
+func (c Celsius) Fahrenheit() float64 { return float64(c)*9/5 + 32 }
+
+type sample struct {
+	method  Method
+	latency time.Duration
+	ok      Enabled
+	bytes   int64
+}
+
+const window = 4
+
+type ring [window]float64
+
+func mean(xs []float64) (m, sd float64) {
+	if len(xs) == 0 {
+		return math.NaN(), 0
+	}
+	for _, x := range xs {
+		m += x
+	}
+	m /= float64(len(xs))
+	for _, x := range xs {
+		sd += (x - m) * (x - m)
+	}
+	return m, math.Sqrt(sd / float64(len(xs)))
+}
+
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := p / 100 * float64(len(sorted)-1)
+	lo, hi := int(math.Floor(rank)), int(math.Ceil(rank))
+	return sorted[lo] + (sorted[hi]-sorted[lo])*(rank-float64(lo))
+}
+
+func describe(v any) string {
+	switch x := v.(type) {
+	case float64:
+		return "f64 " + strconv.FormatFloat(x, 'g', -1, 64)
+	case float32:
+		return fmt.Sprintf("f32 %v", x)
+	case Celsius:
+		return fmt.Sprintf("%.1f°C", float64(x))
+	case Method:
+		return "method " + strings.ToLower(string(x))
+	case Enabled:
+		return fmt.Sprint("enabled ", bool(x))
+	case time.Duration:
+		return fmt.Sprintf("%.3fs", x.Seconds())
+	}
+	return fmt.Sprintf("%T", v)
+}
+
+func main() {
+	samples := []sample{
+		{GET, 1500 * time.Microsecond, true, 512},
+		{"POST", 42 * time.Millisecond, false, 1 << 33},
+		{method: GET, latency: time.Second / 3, ok: 3 > 2},
+		{POST, 7 * time.Millisecond, true, 99},
+	}
+	counts := map[Method]int{"GET": 0}
+	var ms []float64
+	var r ring
+	total := 0.0
+	for i, s := range samples {
+		counts[s.method]++
+		v := float64(s.latency) / float64(time.Millisecond)
+		ms = append(ms, v)
+		r[i%window] = v
+		total += s.latency.Seconds()
+		if s.method == "POST" && !bool(s.ok) {
+			fmt.Println("failed post of", s.bytes, "bytes after", s.latency)
+		}
+	}
+	sort.Float64s(ms)
+	m, sd := mean(ms)
+	fmt.Println(counts[GET], counts[POST], ms, r, len(r))
+	fmt.Printf("%.3f %.3f %.2f %g %v\n", m, sd, percentile(ms, 90), total, math.Round(total*1000)/1000)
+	fmt.Println(0.1+0.2, 1e21, 1e20, 3.0, float32(0.1), 1/3.0, math.Inf(1), -math.MaxFloat64, math.Pi)
+	neg, big := -2.7, 200.9
+	fmt.Println(7/2, 7/2.0, int(neg), uint8(big), math.Pow(2, 0.5), math.Mod(7.5, 2), min(2.5, 1), max(1e3, 999))
+	x, err := strconv.ParseFloat("6.02e23", 64)
+	_, bad := strconv.ParseFloat("1.2.3", 64)
+	fmt.Println(x, err, bad, Celsius(36.6).Fahrenheit(), 5*time.Second/2, time.Duration(1.5*float64(time.Second)))
+	nan := math.NaN()
+	fmt.Println(nan == nan, nan != nan, nan < 1, math.IsNaN(nan), 1/math.Inf(-1) == 0)
+	for _, v := range []any{2.5, float32(2.5), Celsius(-40), POST, Enabled(true), 90 * time.Second, 1} {
+		fmt.Print(describe(v), "; ")
+	}
+	fmt.Println()
+	fmt.Printf("%8.3f|%-8.2f|%+.1e|%x|%T %T\n", math.E, -0.5, 123456.789, 1.0, 1.5, float32(1))
+}
+"""#
+
+private let floatsNamedConstantsAndDurationsExpected = #"""
+failed post of 8589934592 bytes after 42ms
+2 2 [1.5 7 42 333.333333] [1.5 42 333.333333 7] 4
+95.958 137.926 245.93 0.383833333 0.384
+0.3 1e+21 1e+20 3 0.1 0.3333333333333333 +Inf -1.7976931348623157e+308 3.141592653589793
+3 3.5 -2 200 1.4142135623730951 1.5 1 1000
+6.02e+23 <nil> strconv.ParseFloat: parsing "1.2.3": invalid syntax 97.88000000000001 2.5s 1.5s
+false true false true true
+f64 2.5; f32 2.5; -40.0°C; method post; enabled true; 90.000s; int;\#u{20}
+   2.718|-0.50   |+1.2e+05|0x1p+00|float64 float32
 
 """#
