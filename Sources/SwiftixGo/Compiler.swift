@@ -85,6 +85,9 @@ public enum GoCompiler {
         units: [GoLinkedUnit],
         fallbackPath: String
     ) throws -> GoExecutable {
+        // What the program uses of the library that is Go source is linked
+        // like a package of its own.
+        let units = try GoSourceLibrary.link(units)
         let files = try GoNames.resolve(
             program: try units.flatMap { try GoNames.resolve($0.files) })
         let package = try GoTypeChecker.check(files)
@@ -3421,7 +3424,8 @@ private struct IRLowerer {
         // Local package function call: pkg.Function(args...)
         if case .selector(let base, let member, _) = callee,
             case .identifier(let packageName, _) = base,
-            GoStandardLibrary.resolve(package: packageName, member: member) == nil
+            GoStandardLibrary.resolve(package: packageName, member: member) == nil,
+            lookup(packageName) == nil, globalInfos[packageName] == nil
         {
             // Check if this is a known imported package function (not fmt, not a method)
             let mangledName = packageName + "." + member
@@ -3949,6 +3953,9 @@ private struct IRLowerer {
         if let method = methodExpression(base: base, name: name) {
             return functionValue(symbol: methodExpressionSymbol(method))
         }
+        if let function = try lowerLibraryFunctionValue(base: base, member: name) {
+            return function
+        }
         if let baseType = try? type(of: base),
             case .interface(let methods) = underlying(baseType),
             let method = methods.first(where: { $0.name == name })
@@ -3974,6 +3981,9 @@ private struct IRLowerer {
             return functionValue(
                 symbol: info.functionName,
                 bound: [try lowerReceiver(of: info, base: base, baseType: baseType)])
+        }
+        if let method = try lowerLibraryMethodValue(base: base, member: name) {
+            return method
         }
         var baseRegister = try lower(base)
         if try type(of: base).pointee(in: typeDefinitions) != nil {
@@ -4718,6 +4728,7 @@ private struct IRLowerer {
                     parameters: [method.receiverType] + method.info.parameterTypes,
                     results: method.info.resultTypes)
             }
+            if let function = libraryFunction(base: base, member: name) { return function.type }
             let baseType = try type(of: base)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 if let info = try methodInfo(base: base, name: name) {
@@ -4727,6 +4738,9 @@ private struct IRLowerer {
                     let method = methods.first(where: { $0.name == name })
                 {
                     return .function(parameters: method.parameters, results: method.results)
+                }
+                if let method = GoLibraryValue.method(of: baseType, named: name) {
+                    return method.type
                 }
                 throw GoDiagnostic(position: position, message: "undefined selector")
             }
@@ -5264,6 +5278,121 @@ private struct IRLowerer {
                 ])
         }
         return (name, registers)
+    }
+
+    // MARK: Functions of the run-time library as values
+
+    /// What `base.member` takes and gives when it names a function of the
+    /// run-time library that can be a value: `base` is the package, which
+    /// nothing of the program hides.
+    func libraryFunction(base: GoExpression, member: String) -> GoLibrarySignature? {
+        guard case .identifier(let packageName, _) = base, lookup(packageName) == nil,
+            globalInfos[packageName] == nil, typeDefinitions[packageName] == nil
+        else { return nil }
+        return GoLibraryValue.function(package: packageName, member: member)
+    }
+
+    /// `base.member` as a value when it is a function of the run-time
+    /// library, or nil when it is anything else.
+    mutating func lowerLibraryFunctionValue(base: GoExpression, member: String) throws -> Int? {
+        guard case .identifier(let packageName, _) = base,
+            let signature = libraryFunction(base: base, member: member)
+        else { return nil }
+        return functionValue(
+            symbol: try libraryValueFunction(
+                named: packageName + "." + member, of: base, member: member,
+                signature: signature))
+    }
+
+    /// `base.member` as a value when it is a method of a type of the
+    /// run-time library, or nil when it is anything else: a function that
+    /// has its receiver, read now as a call would read it.
+    mutating func lowerLibraryMethodValue(base: GoExpression, member: String) throws -> Int? {
+        guard let baseType = try? type(of: base),
+            let signature = GoLibraryValue.method(of: baseType, named: member),
+            let receiverType = signature.receiver
+        else { return nil }
+        var receiver = try lower(base)
+        if receiverType != baseType {
+            // A pointer to a value the VM keeps behind a handle: the
+            // function holds the handle, as a call passes it.
+            let handle = allocateRegister()
+            operations.append(.dereference(destination: handle, pointer: receiver))
+            receiver = handle
+        }
+        return functionValue(
+            symbol: try libraryValueFunction(
+                named: "\(receiverType).\(member)", of: nil, member: member,
+                signature: signature),
+            bound: [receiver])
+    }
+
+    /// The function a function of the run-time library is as a value. Its
+    /// parameters are the library function's, a bound receiver first, and
+    /// its body is the call `package.member(parameters)`, or
+    /// `receiver.member(parameters)` when `package` is nil, lowered as a
+    /// call the program wrote is: whatever instruction or native call that
+    /// is, a call through the value runs it in a frame of its own.
+    mutating func libraryValueFunction(
+        named goName: String, of package: GoExpression?, member: String,
+        signature: GoLibrarySignature
+    ) throws -> String {
+        let name = "$native.\(wrapperNamespace).$value.\(goName)"
+        guard nativeWrappers[name] == nil else { return name }
+        let position = package?.position ?? GoSourcePosition(path: "", offset: 0, line: 1, column: 1)
+        var lowerer = self
+        lowerer.operations = []
+        lowerer.scopes = [[:]]
+        lowerer.nextRegister = 0
+        lowerer.nextLabel = 0
+        lowerer.breakLabels = []
+        lowerer.continueLabels = []
+        lowerer.testAbortLabels = []
+        lowerer.resultRegisters = []
+        lowerer.resultTypes = []
+        lowerer.returnsThroughResults = false
+        lowerer.pendingLiterals = []
+        lowerer.isLiteralBody = true
+        // The parameters have names no program can write.
+        let types = (signature.receiver.map { [$0] } ?? []) + signature.parameters
+        var operands: [GoExpression] = []
+        for (index, type) in types.enumerated() {
+            let operand = "$\(index)"
+            lowerer.scopes[0][operand] = LoweredBinding(
+                register: lowerer.allocateRegister(), type: type.parameterType)
+            let value = GoExpression.identifier(operand, position: position)
+            operands.append(type.variadicElement == nil ? value : .spread(value, position: position))
+        }
+        let callee = GoExpression.selector(
+            base: package ?? operands.removeFirst(), name: member, position: position)
+        let results: [Int]
+        switch signature.results.count {
+        case 0:
+            try lowerer.lowerExpressionStatement(
+                .call(callee: callee, arguments: operands, position: position))
+            results = []
+        case 1:
+            guard let result = try lowerer.lowerCall(callee: callee, arguments: operands) else {
+                throw GoDiagnostic(position: position, message: "no value used as value")
+            }
+            results = [result]
+        default:
+            guard
+                let several = try lowerer.lowerMultiReturnCall(callee: callee, arguments: operands)
+            else {
+                throw GoDiagnostic(position: position, message: "no value used as value")
+            }
+            results = several
+        }
+        lowerer.operations.append(results.isEmpty ? .return : .returnValues(sources: results))
+        nativeWrappers.merge(lowerer.nativeWrappers) { existing, _ in existing }
+        nativeWrappers[name] = GoIRFunction(
+            name: name,
+            parameterCount: types.count,
+            returnCount: results.count,
+            registerCount: lowerer.nextRegister,
+            operations: lowerer.operations)
+        return name
     }
 
     func methodInfo(base: GoExpression, name: String) throws -> MethodInfo? {

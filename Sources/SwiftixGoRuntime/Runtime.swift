@@ -3147,6 +3147,63 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// Run a native call of the library's own Go text: what the sorting
+        /// functions of `sort` need of a slice whose element type they do
+        /// not know. The slice arrives in an `any`. Returns `false` when
+        /// `name` is not such a call.
+        func executeSliceNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoNative.sliceArgumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            var held = operands[0]
+            var dynamicType = GoTypeDescriptor.inferred(from: held)
+            if case .interface(let boxed) = held {
+                held = boxed.value
+                dynamicType =
+                    typeDescriptor(named: boxed.typeName).map { $0.underlying($0.type) }
+                    ?? GoTypeDescriptor.inferred(from: held)
+            }
+            switch name {
+            case "$sort.length":
+                guard case .string(let caller) = operands[1] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                if case .slice(let slice) = held {
+                    stack.append(.int(Int64(try validatedSliceRange(slice).count)))
+                } else if held == .nilValue, case .slice? = dynamicType {
+                    stack.append(.int(0))
+                } else {
+                    // What Go's `reflect` says of a value that is no slice.
+                    throw GoRuntimePanic(
+                        text: "reflect: call of \(caller) on "
+                            + "\(GoNative.kindName(of: dynamicType)) Value")
+                }
+            default:
+                guard case .int(let first) = operands[1], case .int(let second) = operands[2],
+                    case .slice(let slice) = held
+                else { throw GoRuntimeError.typeMismatch }
+                let range = try validatedSliceRange(slice)
+                guard let i = Int(exactly: first), let j = Int(exactly: second),
+                    i >= 0, j >= 0, i < range.count, j < range.count
+                else { throw GoRuntimePanic(text: "reflect: slice index out of range") }
+                guard i != j else { break }
+                // Each element is read and written where it lies, so an
+                // exchange costs the same whatever the length.
+                let left = appending(index: range.lowerBound + i, to: slice.backing)
+                let right = appending(index: range.lowerBound + j, to: slice.backing)
+                let moved = try read(pointer: left, heap: heap)
+                try writePointer(try read(pointer: right, heap: heap), through: left, heap: &heap)
+                try writePointer(moved, through: right, heap: &heap)
+            }
+            return true
+        }
+
         /// Run an `os` file native: opening and closing files, positional I/O,
         /// seeking, and directory entries. Arguments are the top
         /// `argumentCount` stack entries in call order. A failed system call
@@ -4209,6 +4266,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeTimeNative(name, argumentCount: argumentCount)
                                 || executeFormatNative(name, argumentCount: argumentCount)
                                 || executeErrorNative(name, argumentCount: argumentCount)
+                                || executeSliceNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }

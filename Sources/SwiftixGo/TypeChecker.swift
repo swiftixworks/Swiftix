@@ -487,6 +487,7 @@ public enum GoTypeChecker {
     /// The checker knows each member where a program can write it, so it is
     /// asked the way a program asks: as a type, as a value, and as a call.
     static func libraryDeclares(path: String, member: String) -> Bool {
+        if GoSourceLibrary.declares(path: path, member: member) { return true }
         let name = GoImportName.defaultName(ofPath: path)
         let position = syntheticPosition()
         if (try? resolve(.named(name + "." + member, position: position), availableTypes: [])) != nil {
@@ -853,8 +854,8 @@ private struct FunctionChecker {
     }
 
     /// The report for `package.name` where a value is expected and the
-    /// package has a function of that name: a function of the run-time
-    /// library has no value here, and can only be called.
+    /// package has a function of that name that cannot be one (see
+    /// `GoLibraryValue.function`): it can only be called.
     func libraryFunctionValueMessage(_ packageName: String, _ name: String) -> String? {
         guard !isProbing,
             let path = importedPaths.first(where: {
@@ -864,6 +865,19 @@ private struct FunctionChecker {
         else { return nil }
         return "\(packageName).\(name) is a function of the run-time library, which can only be called: "
             + "wrap the call in a function literal to pass it"
+    }
+
+    /// The type of `package.name` where a value is expected and the package
+    /// has a function of that name that can be one: the function's type.
+    func libraryFunctionType(_ packageName: String, _ name: String) -> GoType? {
+        GoLibraryValue.function(package: packageName, member: name)?.type
+    }
+
+    /// The type of `value.name` where `value` is of a type of the run-time
+    /// library and `name` one of its methods: a function that has its
+    /// receiver, like a method value of a type of the program.
+    func libraryMethodType(of type: GoType, named name: String) -> GoType? {
+        GoLibraryValue.method(of: type, named: name)?.type
     }
 
     /// The type of `T.m` or `(*T).m`, a method expression: the method as a
@@ -2221,10 +2235,7 @@ private struct FunctionChecker {
         {
             // Called, they are typed where calls are; this is the name
             // alone, where a value is wanted.
-            if let message = libraryFunctionValueMessage(packageName, name) {
-                throw GoDiagnostic(position: position, message: message)
-            }
-            return .void
+            return libraryFunctionType(packageName, name) ?? .void
         }
         if case .identifier("os", _) = base,
             importedPaths.contains("os"),
@@ -2240,6 +2251,8 @@ private struct FunctionChecker {
             return GoPredeclared.filePointer
         }
         if let packageName = importedPackage(named: base) {
+            // A function of the package is a value of its type.
+            if let function = libraryFunctionType(packageName, name) { return function }
             // Nothing above knows the member of the package.
             throw GoDiagnostic(
                 position: position,
@@ -2263,6 +2276,8 @@ private struct FunctionChecker {
             {
                 return .function(parameters: method.parameters, results: method.results)
             }
+            // And a method of a type of the run-time library.
+            if let method = libraryMethodType(of: baseType, named: name) { return method }
             throw GoDiagnostic(
                 position: position,
                 message: "\(baseType) has no field or method \(name)")

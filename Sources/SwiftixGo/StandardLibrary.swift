@@ -129,6 +129,8 @@ struct GoNativeFunction: Sendable, Equatable {
 extension GoStandardLibrary {
     /// Native functions reached as `package.Member(...)`.
     static func nativeFunction(package: String, member: String) -> GoNativeFunction? {
+        // A reserved call of the library's own Go text.
+        if member.hasPrefix("$") { return GoSourceLibrary.native(package: package, member: member) }
         let file = GoPredeclared.filePointer
         let bytes = GoType.slice(GoPredeclared.byte)
         let failure = GoPredeclared.errorType
@@ -355,6 +357,7 @@ extension GoStandardLibrary {
     private static let nativeCallNames: Set<String> = Set(
         GoBitwiseOperator.allCases.map(\.nativeName)
             + GoPredeclared.conversionCallNames
+            + GoSourceLibrary.nativeCallNames
             + [
                 GoPredeclared.copyElements, GoPredeclared.appendElements,
                 GoPredeclared.newVariable, GoPredeclared.clearElements,

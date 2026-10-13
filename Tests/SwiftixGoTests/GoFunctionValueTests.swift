@@ -778,20 +778,6 @@ struct GoFunctionValueTests: GoTestHarness {
                 fmt.Println(f())
                 """)
                 == "cannot use string as int value in return statement")
-        #expect(
-            goMainDiagnostic(
-                """
-                f := fmt.Sprint
-                fmt.Println(f(1))
-                """)
-                == "fmt.Sprint is a function of the run-time library, which can only be called: wrap the call in a function literal to pass it")
-        #expect(
-            goMainDiagnostic(
-                """
-                f := fmt.Println
-                f("x")
-                """)
-                == "fmt.Println is a function of the run-time library, which can only be called: wrap the call in a function literal to pass it")
     }
 
     /// The handler is a function of the two parameters Go gives it, by name

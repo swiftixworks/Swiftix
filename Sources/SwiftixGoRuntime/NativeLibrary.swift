@@ -62,6 +62,35 @@ enum GoNative {
         "$time.Duration.Abs": 1,
     ]
 
+    /// Reserved call names of the natives the library's own Go text calls
+    /// for a slice of any element type, with their operand counts: the
+    /// length of the slice an `any` holds, and the exchange of two of its
+    /// elements.
+    static let sliceArgumentCounts: [String: Int] = [
+        "$sort.length": 2,
+        "$sort.swap": 3,
+    ]
+
+    /// Go's name for the kind of `type`, as `reflect` puts it in a panic:
+    /// `int`, `struct`, `ptr`. A value without a type is the zero `Value`.
+    static func kindName(of type: GoRuntimeType?) -> String {
+        switch type {
+        case nil: return "zero"
+        case .integer?: return "int"
+        case .byte?: return "uint8"
+        case .string?: return "string"
+        case .boolean?: return "bool"
+        case .error?, .interface?: return "interface"
+        case .slice?: return "slice"
+        case .array?: return "array"
+        case .map?: return "map"
+        case .pointer?: return "ptr"
+        case .channel?: return "chan"
+        case .structure?, .named?: return "struct"
+        case .other(let text)?: return text.hasPrefix("func") ? "func" : "struct"
+        }
+    }
+
     /// Result of the `time` native `name` when the current instant is `now`,
     /// or nil when `name` is not one. Arithmetic wraps like Go's `int64`, and
     /// seconds and milliseconds round toward negative infinity, as Go's do for
