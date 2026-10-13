@@ -2,8 +2,7 @@
 
 public enum GoParser {
     public static func parse(_ source: GoSourceFile) throws -> GoFile {
-        var parser = Parser(tokens: try GoLexer.tokenize(source), path: source.path)
-        return try parser.parseFile()
+        try Parser.parsed(source).file
     }
 
     /// Parses `source` and also reports where it has parentheses around an
@@ -12,9 +11,7 @@ public enum GoParser {
     static func parseRecordingParentheses(
         _ source: GoSourceFile
     ) throws -> (file: GoFile, parentheses: GoParentheses) {
-        var parser = Parser(tokens: try GoLexer.tokenize(source), path: source.path)
-        let file = try parser.parseFile()
-        return (file, parser.parentheses)
+        try Parser.parsed(source)
     }
 }
 
@@ -57,10 +54,69 @@ private struct Parser {
     var parentheses = GoParentheses()
     /// Whether a function body declared a type.
     var declaresLocalTypes = false
+    /// How many blocks are open, the package being the first, and the
+    /// outermost of them that declares something named `iota`, or 0. Such a
+    /// declaration hides the constant generator from the `const`
+    /// declarations in its scope. Two small numbers beside a flag: every
+    /// frame of the parser holds the parser.
+    var scopeDepth: UInt16 = 1
+    var iotaDepth: UInt16 = 0
     /// The names of each declaration of several names, which the tree keeps
     /// as text. For a function: its name, the end of its body, and the names
     /// of its results.
     var namePositions: [Int: [GoSourcePosition]] = [:]
+
+    /// The file `source` holds, and where it has parentheses.
+    ///
+    /// A declaration of the package reaches the whole file, the lines above
+    /// it too, so a file that declares `iota` at package level is parsed
+    /// again knowing that: only then is no `iota` of it a generator.
+    static func parsed(_ source: GoSourceFile) throws -> (file: GoFile, parentheses: GoParentheses) {
+        let tokens = try GoLexer.tokenize(source)
+        var parser = Parser(tokens: tokens, path: source.path)
+        var file = try parser.parseFile()
+        if parser.iotaDepth == 1 {
+            parser = Parser(tokens: tokens, path: source.path)
+            parser.iotaDepth = 1
+            file = try parser.parseFile()
+        }
+        return (file, parser.parentheses)
+    }
+
+    /// Whether `iota` is a name of the program where the parser stands.
+    var isIotaHidden: Bool { iotaDepth != 0 }
+
+    /// The block that is open declares `name`.
+    mutating func declare(_ name: String) {
+        if name == GoIota.name, iotaDepth == 0 { iotaDepth = scopeDepth }
+    }
+
+    mutating func declare(_ names: [String]) {
+        for name in names { declare(name) }
+    }
+
+    /// A block opens, and closes. A parse that fails is given up, so
+    /// nothing closes the blocks an error leaves open.
+    mutating func openScope() { scopeDepth += 1 }
+    mutating func closeScope() {
+        if iotaDepth == scopeDepth { iotaDepth = 0 }
+        scopeDepth -= 1
+    }
+
+    /// A call of what is in parentheses, `(*T)(nil)`, begins at the
+    /// parenthesis, which the tree does not keep: noted by where the call
+    /// is, at the `(` of its arguments, when one follows the `)`.
+    mutating func noteCallStart(_ position: GoSourcePosition) {
+        if check(.leftParen) { namePositions[current.position.offset] = [position] }
+    }
+
+    /// The names of a `:=` and then the `:=` itself, which the parser has
+    /// just passed: Go reports a list that declares nothing there.
+    mutating func noteShortDeclaration(
+        at position: GoSourcePosition, names: [GoSourcePosition]
+    ) {
+        namePositions[position.offset] = names + [tokens[index - 1].position]
+    }
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -211,9 +267,12 @@ private struct Parser {
                 forKey: specification.position.offset)
             specification = ValueSpecification(
                 names: specification.names, type: specification.type,
-                values: isConstant
+                values: isConstant && !isIotaHidden
                     ? specification.values.map { $0.replacingIota(with: 0) } : specification.values,
                 position: keywordPosition)
+            // A name is declared after its specification: `const iota = iota`
+            // still reads the generator.
+            declare(specification.names)
             return (isConstant, [try checked(specification)])
         }
         advance()
@@ -231,8 +290,13 @@ private struct Parser {
                     repeated = specification
                 }
                 let index = list.count
-                specification.values = specification.values.map { $0.replacingIota(with: index) }
+                if !isIotaHidden {
+                    specification.values = specification.values.map {
+                        $0.replacingIota(with: index)
+                    }
+                }
             }
+            declare(specification.names)
             list.append(try checked(specification))
             if check(.semicolon) {
                 skipSemicolons()
@@ -250,19 +314,16 @@ private struct Parser {
         let specifications = try parseValueSpecifications()
         var declarations: [GoGlobalDeclaration] = []
         for specification in specifications.list {
-            guard specification.values.isEmpty
-                || specification.values.count == specification.names.count
-            else {
-                // One call for several package-level variables has no single
-                // declaration to stand for it.
-                throw GoDiagnostic(
-                    position: specification.position,
-                    message:
-                        "assignment mismatch: \(specification.names.count) variables but 1 value")
+            if specification.values.count == 1, specification.names.count > 1 {
+                declarations.append(contentsOf: try groupedGlobalDeclarations(specification))
+                continue
             }
             for (index, name) in specification.names.enumerated() {
                 // A blank constant only takes its place in the count of `iota`.
-                if specifications.isConstant, name == GoValueList.blank { continue }
+                if specifications.isConstant, name == GoValueList.blank {
+                    forgetBlankConstant(of: specification)
+                    continue
+                }
                 declarations.append(
                     GoGlobalDeclaration(
                         name: name,
@@ -274,6 +335,38 @@ private struct Parser {
             }
         }
         return declarations
+    }
+
+    /// The places of the names of a specification are those of the
+    /// declarations it leaves, in their order: a blank constant leaves none.
+    mutating func forgetBlankConstant(of specification: ValueSpecification) {
+        let offset = specification.position.offset
+        guard let positions = namePositions[offset], positions.count == specification.names.count
+        else { return }
+        namePositions[offset] = zip(specification.names, positions)
+            .filter { $0.0 != GoValueList.blank }.map(\.1)
+    }
+
+    /// `var a, b = f()` at package level: a declaration for each name, whose
+    /// value is its place among the values the one expression yields.
+    func groupedGlobalDeclarations(
+        _ specification: ValueSpecification
+    ) throws -> [GoGlobalDeclaration] {
+        let names = specification.names
+        switch specification.values[0] {
+        case .call, .index, .typeAssertion, .unary(.receive, _, _): break
+        default:
+            throw GoDiagnostic(
+                position: specification.position,
+                message: "assignment mismatch: \(names.count) variables but 1 value")
+        }
+        return names.indices.map { index in
+            GoGlobalDeclaration(
+                name: names[index],
+                explicitType: specification.type,
+                expression: .groupedResult(index, of: names.count, specification.values[0]),
+                position: specification.position)
+        }
     }
 
     /// `type name T`, or a group `type ( a T; b U )`.
@@ -306,6 +399,7 @@ private struct Parser {
     /// `Name T`, a new type, or `Name = T`, another name for `T`.
     mutating func parseTypeSpecification(position: GoSourcePosition) throws -> GoTypeDeclaration {
         let name = try expectIdentifier(message: "expected type name")
+        declare(name)
         let isAlias = check(.assign)
         if isAlias { advance() }
         return GoTypeDeclaration(
@@ -476,20 +570,29 @@ private struct Parser {
         var receiver: GoParameter?
         if check(.leftParen) {
             advance()
-            let receiverPosition = current.position
-            let receiverName = try expectIdentifier(message: "expected receiver name")
-            receiver = GoParameter(
-                name: receiverName,
-                type: try parseTypeExpression(),
-                position: receiverPosition)
-            try expect(.rightParen, message: "expected ')' after receiver")
+            // A receiver is written like a parameter list of one: `(t T)`,
+            // `(T)`, `(*T)`, `(_ T)`. Go reports another number where the
+            // name of the method is.
+            let receivers = try parseParameters()
+            guard let first = receivers.first else { throw diagnostic("method has no receiver") }
+            guard receivers.count == 1 else { throw diagnostic("method has multiple receivers") }
+            receiver = first
         }
         let namePosition = current.position
         let name = try expectIdentifier(message: "expected function name")
+        // The name of a function is the package's; what follows is its own.
+        if receiver == nil { declare(name) }
+        openScope()
         try expect(.leftParen, message: "expected '('")
         let parameters = try parseParameters()
         let results = try parseResults()
+        if check(.semicolon) || check(.eof) {
+            throw GoDiagnostic(position: namePosition, message: "missing function body")
+        }
+        declare((receiver.map { [$0] } ?? []).map(\.name) + parameters.map(\.name))
+        declare(results.names.compactMap { $0 })
         let body = try parseBlock()
+        closeScope()
         // Go reports a function by its name, and a return it lacks where
         // its body ends.
         namePositions[position.offset] =
@@ -505,41 +608,111 @@ private struct Parser {
     }
 
     /// The parameters of a function, after their `(` and with their `)`:
-    /// each a name and a type, or several names that share one.
+    /// each a name and a type, several names that share one, or types
+    /// alone. A parameter without a name is one the blank identifier names.
     mutating func parseParameters() throws -> [GoParameter] {
-        var parameters: [GoParameter] = []
-        while !check(.rightParen) {
-            var names: [(String, GoSourcePosition)] = []
-            let firstPosition = current.position
-            names.append(
-                (
-                    try expectIdentifier(message: "expected parameter name"),
-                    firstPosition
-                ))
-            while check(.comma), case .identifier = lookahead(1).kind {
-                advance()
-                let namePosition = current.position
-                names.append(
-                    (
-                        try expectIdentifier(message: "expected parameter name"),
-                        namePosition
-                    ))
-            }
-            let type = try parseParameterType()
-            parameters.append(
-                contentsOf: names.map {
-                    GoParameter(name: $0.0, type: type, position: $0.1)
-                })
-            if check(.comma) {
-                advance()
-                if check(.rightParen) { break }
-            } else if !check(.rightParen) {
-                throw diagnostic("expected ',' or ')' in parameter list")
-            }
+        let parameters = try parseSignatureList(listName: " in parameter list").map {
+            GoParameter(name: $0.name ?? GoValueList.blank, type: $0.type, position: $0.position)
         }
-        advance()
         try requireFinalVariadic(parameters)
         return parameters
+    }
+
+    /// One entry of a parameter or result list: its type, the name written
+    /// before it if any, and where the entry is.
+    typealias SignatureEntry = (name: String?, type: GoTypeExpression, position: GoSourcePosition)
+
+    /// The entries of a parameter or result list, after its `(` and with
+    /// its `)`.
+    ///
+    /// Go reads such a list as it stands and decides afterwards what it
+    /// was: when no entry has a name and a type, every entry is a type, and
+    /// an identifier alone names one; otherwise every entry must have a
+    /// name, and an identifier alone is a name of the type that follows it
+    /// (`a, b int`). This is Go's own procedure, with its two reports: an
+    /// identifier that no type follows is `missing parameter type`, at the
+    /// `)`, and a type where a name must be is `missing parameter name`.
+    mutating func parseSignatureList(listName: String) throws -> [SignatureEntry] {
+        var names: [String?] = []
+        var types: [GoTypeExpression?] = []
+        var positions: [GoSourcePosition] = []
+        // Where the type of each entry begins, for an entry that has one.
+        var typePositions: [GoSourcePosition] = []
+        while !check(.rightParen) {
+            guard !check(.eof) else { throw diagnostic("expected ')'") }
+            let position = current.position
+            var name: String?
+            var type: GoTypeExpression?
+            if case .identifier(let word) = current.kind,
+                !GoBitwiseOperator.isOperatorSpelling(word)
+            {
+                advance()
+                if check(.period), case .identifier(let member) = lookahead(1).kind {
+                    // A qualified name is a type: `fmt.Stringer`.
+                    advance()
+                    advance()
+                    type = .named(word + "." + member, position: position)
+                } else {
+                    name = word
+                }
+            }
+            let typePosition = type == nil ? current.position : position
+            if type == nil, startsParameterType(current.kind) { type = try parseParameterType() }
+            guard name != nil || type != nil else { throw diagnostic("expected type") }
+            names.append(name)
+            types.append(type)
+            positions.append(position)
+            typePositions.append(typePosition)
+            if check(.comma) {
+                advance()
+            } else if !check(.rightParen) {
+                throw diagnostic("expected ',' or ')'" + listName)
+            }
+        }
+        let end = current.position
+        advance()
+
+        let named = zip(names, types).filter { $0 != nil && $1 != nil }.count
+        guard named > 0 else {
+            // Types alone: an identifier by itself is the name of one.
+            return names.indices.map { index in
+                (nil, types[index] ?? .named(names[index] ?? "", position: positions[index]),
+                    positions[index])
+            }
+        }
+        // Names throughout: from the right, each name takes the type that
+        // follows it.
+        var entries: [SignatureEntry] = []
+        var shared: GoTypeExpression?
+        var misplaced: GoSourcePosition?
+        for index in names.indices.reversed() {
+            if let type = types[index] {
+                shared = type
+                if names[index] == nil { misplaced = typePositions[index] }
+            } else if shared == nil {
+                misplaced = positions[index]
+            }
+            guard let type = shared else { continue }
+            entries.append((names[index] ?? GoValueList.blank, type, positions[index]))
+        }
+        if let misplaced {
+            // Every entry with a type has a name, so what is missing is a
+            // type, at the end; otherwise a name, where its type stands.
+            let typed = types.filter { $0 != nil }.count
+            throw named == typed
+                ? GoDiagnostic(position: end, message: "syntax error: missing parameter type")
+                : GoDiagnostic(position: misplaced, message: "syntax error: missing parameter name")
+        }
+        return entries.reversed()
+    }
+
+    /// Whether the type of a parameter can begin with a token of this kind,
+    /// `...` included.
+    func startsParameterType(_ kind: GoTokenKind) -> Bool {
+        if case .identifier(let word) = kind {
+            return word == GoSpread.spelling || !GoBitwiseOperator.isOperatorSpelling(word)
+        }
+        return isTypeStart(kind)
     }
 
     /// The results of a function, when it has any: one type, or a list in
@@ -552,25 +725,12 @@ private struct Parser {
         var positions: [GoSourcePosition] = []
         if check(.leftParen) {
             advance()
-            while !check(.rightParen) {
-                guard !check(.eof) else { throw diagnostic("expected ')'") }
-                if let group = namedResultGroup() {
-                    // `x, y int`: one type, written once, for each name.
-                    let type = try parseTypeExpression()
-                    resultTypes.append(contentsOf: Array(repeating: type, count: group.names.count))
-                    resultNames.append(contentsOf: group.names.map(Optional.some))
-                    positions.append(contentsOf: group.positions)
-                } else {
-                    resultTypes.append(try parseTypeExpression())
-                    resultNames.append(nil)
-                }
-                if check(.comma) {
-                    advance()
-                } else if !check(.rightParen) {
-                    throw diagnostic("expected ',' or ')' in result type list")
-                }
+            // Written like parameters: `(int, error)`, or `(n int, err error)`.
+            for result in try parseSignatureList(listName: " in result type list") {
+                resultTypes.append(result.type)
+                resultNames.append(result.name)
+                if result.name != nil { positions.append(result.position) }
             }
-            advance()
         } else if startsResultType(current.kind) {
             resultTypes.append(try parseTypeExpression())
             resultNames.append(nil)
@@ -587,29 +747,6 @@ private struct Parser {
         return isTypeStart(kind)
     }
 
-    /// Returns and consumes a named result group when the upcoming tokens have
-    /// the `name[, name] type` shape. A plain `(int, string)` result list is
-    /// deliberately left to `parseTypeExpression`.
-    mutating func namedResultGroup() -> (names: [String], positions: [GoSourcePosition])? {
-        guard case .identifier(let first) = current.kind else { return nil }
-        var names = [first]
-        var cursor = 1
-        while lookahead(cursor).kind == .comma,
-            case .identifier(let name) = lookahead(cursor + 1).kind
-        {
-            names.append(name)
-            cursor += 2
-        }
-        guard isTypeStart(lookahead(cursor).kind) else { return nil }
-        var positions: [GoSourcePosition] = []
-        for _ in names.indices {
-            positions.append(current.position)
-            advance()
-            if names.count > 1, check(.comma) { advance() }
-        }
-        return (names, positions)
-    }
-
     func isTypeStart(_ kind: GoTokenKind) -> Bool {
         switch kind {
         case .identifier, .star, .leftBracket, .mapKeyword, .interfaceKeyword, .structKeyword,
@@ -623,6 +760,7 @@ private struct Parser {
     mutating func parseBlock() throws -> GoBlock {
         let position = current.position
         try expect(.leftBrace, message: "expected '{'")
+        openScope()
         var statements: [GoStatement] = []
         skipSemicolons()
         while !check(.rightBrace) {
@@ -635,6 +773,7 @@ private struct Parser {
             }
         }
         advance()
+        closeScope()
         return GoBlock(statements: statements, position: position)
     }
 
@@ -654,10 +793,9 @@ private struct Parser {
 
     mutating func parseStatement() throws -> GoStatement {
         if check(.return) { return try parseReturn() }
-        if check(.if) { return try parseIf() }
-        if check(.for) { return try parseFor() }
-        if check(.switchKeyword) { return try parseSwitch() }
-        if check(.selectKeyword) { return try parseSelect() }
+        if check(.if) || check(.for) || check(.switchKeyword) || check(.selectKeyword) {
+            return try parseHeaderStatement()
+        }
         if check(.breakKeyword) {
             let position = current.position
             advance()
@@ -686,6 +824,24 @@ private struct Parser {
                 position: position)
         }
         return try parseSimpleStatement()
+    }
+
+    /// An `if`, `for`, `switch`, or `select`. What its header declares
+    /// lasts for the statement, which is a block around its own.
+    mutating func parseHeaderStatement() throws -> GoStatement {
+        openScope()
+        let statement: GoStatement
+        if check(.if) {
+            statement = try parseIf()
+        } else if check(.for) {
+            statement = try parseFor()
+        } else if check(.switchKeyword) {
+            statement = try parseSwitch()
+        } else {
+            statement = try parseSelect()
+        }
+        closeScope()
+        return statement
     }
 
     /// A `var` or `const` in a function, alone or in a group: a statement
@@ -815,6 +971,7 @@ private struct Parser {
                     advance()
                     let collection = try parseExpression(allowCompositeLiteral: false)
                     namePositions[position.offset] = [firstPosition]
+                    declare(firstName)
                     return .forRangeStatement(
                         indexName: firstName,
                         valueName: nil,
@@ -836,6 +993,8 @@ private struct Parser {
                             advance()
                             let collection = try parseExpression(allowCompositeLiteral: false)
                             namePositions[position.offset] = [firstPosition, secondPosition]
+                            declare(firstName)
+                            declare(secondName)
                             return .forRangeStatement(
                                 indexName: firstName,
                                 valueName: secondName,
@@ -923,6 +1082,7 @@ private struct Parser {
             }
             try expect(.colon, message: "expected ':' after switch case")
 
+            openScope()
             var statements: [GoStatement] = []
             skipSemicolons()
             while !check(.caseKeyword) && !check(.defaultKeyword) && !check(.rightBrace) {
@@ -940,6 +1100,7 @@ private struct Parser {
                     body: GoBlock(statements: statements, position: casePosition),
                     isDefault: isDefault,
                     position: casePosition))
+            closeScope()
         }
         advance()
         let statement = GoStatement.switchStatement(
@@ -958,6 +1119,7 @@ private struct Parser {
         while !check(.rightBrace) {
             guard !check(.eof) else { throw diagnostic("expected '}'") }
             let casePosition = current.position
+            openScope()
             let communication: GoStatement?
             if check(.caseKeyword) {
                 advance()
@@ -985,6 +1147,7 @@ private struct Parser {
                 communication: communication,
                 body: GoBlock(statements: statements, position: casePosition),
                 position: casePosition))
+            closeScope()
         }
         advance()
         return .selectStatement(cases: cases, position: position)
@@ -1044,11 +1207,10 @@ private struct Parser {
                     }
                     return name
                 }
-                namePositions[position.offset] = targets.map(\.position)
-                return .multiDeclaration(
-                    names: names,
-                    expression: try parseValues(allowCompositeLiteral: allowCompositeLiteral),
-                    position: position)
+                noteShortDeclaration(at: position, names: targets.map(\.position))
+                let values = try parseValues(allowCompositeLiteral: allowCompositeLiteral)
+                declare(names)
+                return .multiDeclaration(names: names, expression: values, position: position)
             }
             if check(.assign) {
                 advance()
@@ -1071,11 +1233,11 @@ private struct Parser {
                 throw GoDiagnostic(position: position, message: "non-name on left side of :=")
             }
             advance()
+            noteShortDeclaration(at: position, names: [position])
+            let value = try parseSingleValue(allowCompositeLiteral: allowCompositeLiteral)
+            declare(name)
             return .declaration(
-                name: name,
-                explicitType: nil,
-                expression: try parseSingleValue(allowCompositeLiteral: allowCompositeLiteral),
-                isConstant: false,
+                name: name, explicitType: nil, expression: value, isConstant: false,
                 position: position)
         }
         if check(.assign) {
@@ -1331,6 +1493,7 @@ private struct Parser {
             let close = current.position.offset
             try expect(.rightParen, message: "expected ')'")
             parentheses.record(around: expression, open: token.position.offset, close: close)
+            noteCallStart(token.position)
             return expression
         case .leftBracket:
             let type = try parseTypeExpression()
@@ -1357,37 +1520,7 @@ private struct Parser {
     /// and with the `)`. The list may name what it lists, `(key string)` or
     /// `(a, b int)`; a method of an interface keeps the types.
     mutating func parseSignatureTypes() throws -> [GoTypeExpression] {
-        var types: [GoTypeExpression] = []
-        // The entries that are one identifier: types, unless a later entry
-        // has a name and a type, which makes them names of that type.
-        var bare: [Int] = []
-        while !check(.rightParen) {
-            guard !check(.eof) else { throw diagnostic("expected ')'") }
-            if case .identifier(let word) = current.kind, word != GoSpread.spelling,
-                !GoBitwiseOperator.isOperatorSpelling(word), isTypeStart(lookahead(1).kind)
-            {
-                advance()
-                let type = try parseParameterType()
-                for index in bare { types[index] = type }
-                bare = []
-                types.append(type)
-            } else {
-                let type = try parseParameterType()
-                if case .named(let name, _) = type, !name.contains(".") {
-                    bare.append(types.count)
-                } else {
-                    bare = []
-                }
-                types.append(type)
-            }
-            if check(.comma) {
-                advance()
-            } else if !check(.rightParen) {
-                throw diagnostic("expected ',' or ')'")
-            }
-        }
-        advance()
-        return types
+        try parseSignatureList(listName: "").map(\.type)
     }
 
     mutating func parseParameterType() throws -> GoTypeExpression {
@@ -1434,10 +1567,13 @@ private struct Parser {
     mutating func parseFunctionLiteral() throws -> GoExpression {
         let position = current.position
         advance()
+        openScope()
         try expect(.leftParen, message: "expected '(' after func")
         let parameters = try parseParameters()
         let results = try parseResults()
+        declare(parameters.map(\.name) + results.names.compactMap { $0 })
         let body = try parseBlock()
+        closeScope()
         // As for a declared function: where it is, and where its body ends.
         namePositions[position.offset] = [position, tokens[index - 1].position]
         return .functionLiteral(

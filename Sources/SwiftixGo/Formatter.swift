@@ -1475,7 +1475,9 @@ private struct FormatPrinter {
             // Before a type it marks a variadic parameter, `values ...T`;
             // after an argument it spreads a slice, `values...`.
             if next?.kind == .word || next?.text == "[" || next?.text == "*" {
-                ensureSpace()
+                // The first of a list that has no names, `func(...int)`,
+                // stands against its parenthesis.
+                if previous?.text != "(" { ensureSpace() }
             } else {
                 trimTrailingWhitespace()
             }

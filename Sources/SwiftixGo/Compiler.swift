@@ -190,8 +190,13 @@ public enum GoCompiler {
         var initializers: [String] = []
         var globalInitializers: [GoIRFunction] = []
         var functionCursor = 0
+        // The files of a unit as they are after every alias has its type:
+        // name resolution keeps their number and their order.
+        var fileCursor = 0
         for unit in units {
-            let unitGlobals = unit.files.flatMap(\.globalDeclarations)
+            let unitGlobals = files[fileCursor..<(fileCursor + unit.files.count)]
+                .flatMap(\.globalDeclarations)
+            fileCursor += unit.files.count
             if !unitGlobals.isEmpty {
                 var lowerer = IRLowerer(
                     functionReturnCounts: functionReturnCounts,
@@ -819,6 +824,67 @@ private func orderedGlobals(
     }
 
     for declaration in declarations { try visit(declaration) }
+    return initializationOrder(of: declarations, depthFirst: ordered, analyzer: analyzer)
+}
+
+/// The order Go initializes the variables of a package in: again and again
+/// the first variable, as the source declares them, whose value reads no
+/// variable that is still to be initialized, directly or through the
+/// functions it calls.
+///
+/// `depthFirst` has every declaration after what it reads, which is that
+/// order for a package whose variables read only what stands above them, and
+/// for most others. It is kept wherever its variables come as Go has them.
+/// Where they do not — a variable that waits for a later one while an
+/// independent one stands between them — the variables are put in Go's order,
+/// each after the constants it reads; constants have no order of their own.
+private func initializationOrder(
+    of declarations: [GoGlobalDeclaration],
+    depthFirst: [GoGlobalDeclaration],
+    analyzer: PackageDependencyAnalyzer
+) -> [GoGlobalDeclaration] {
+    let variables = Set(declarations.lazy.filter { !$0.isConstant }.map(\.name))
+    guard variables.count > 1 else { return depthFirst }
+    var dependencies: [String: Set<String>] = [:]
+    for declaration in declarations {
+        dependencies[declaration.name] =
+            declaration.expression.map { analyzer.dependencies(of: $0) } ?? []
+    }
+    var waiting = declarations.filter { !$0.isConstant }
+    var initialized: Set<String> = []
+    var sequence: [GoGlobalDeclaration] = []
+    while !waiting.isEmpty {
+        let ready = waiting.firstIndex { declaration in
+            (dependencies[declaration.name] ?? []).allSatisfy {
+                !variables.contains($0) || initialized.contains($0)
+            }
+        }
+        // None is ready only in a cycle, which the first order refuses.
+        guard let ready else { return depthFirst }
+        var group = [waiting.remove(at: ready)]
+        if let shared = group[0].expression?.groupedResult?.value.position {
+            // `var a, b = f()` is one initialization.
+            group += waiting.filter { $0.expression?.groupedResult?.value.position == shared }
+            waiting.removeAll { $0.expression?.groupedResult?.value.position == shared }
+        }
+        sequence += group
+        initialized.formUnion(group.map(\.name))
+    }
+    guard sequence.map(\.name) != depthFirst.filter({ !$0.isConstant }).map(\.name) else {
+        return depthFirst
+    }
+    let byName = Dictionary(declarations.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+    var ordered: [GoGlobalDeclaration] = []
+    var placed: Set<String> = []
+    func place(_ declaration: GoGlobalDeclaration) {
+        guard placed.insert(declaration.name).inserted else { return }
+        for name in (dependencies[declaration.name] ?? []).sorted() {
+            if let dependency = byName[name] { place(dependency) }
+        }
+        ordered.append(declaration)
+    }
+    for declaration in sequence { place(declaration) }
+    for declaration in declarations { place(declaration) }
     return ordered
 }
 
@@ -992,10 +1058,10 @@ private struct PackageDependencyAnalyzer {
         guard visitingFunctions.insert(key).inserted else { return [] }
         defer { visitingFunctions.remove(key) }
 
+        // Parameters without names all have the blank one.
         var localTypes = Dictionary(
-            uniqueKeysWithValues: function.parameters.map {
-                ($0.name, compilerResolve($0.type))
-            })
+            function.parameters.map { ($0.name, compilerResolve($0.type)) },
+            uniquingKeysWith: { first, _ in first })
         if let receiver = function.receiver {
             localTypes[receiver.name] = compilerResolve(receiver.type)
         }
@@ -1683,6 +1749,10 @@ private struct IRLowerer {
                 throw GoDiagnostic(
                     position: declaration.position,
                     message: "undefined: \(declaration.name)")
+            }
+            if let grouped = declaration.expression?.groupedResult {
+                try lowerGroupedGlobals(of: grouped.value, among: declarations)
+                continue
             }
             let value: Int
             if let expression = declaration.expression {
@@ -3639,7 +3709,7 @@ private struct IRLowerer {
                 bound: [try lowerReceiver(of: info, base: base, baseType: baseType)])
         }
         var baseRegister = try lower(base)
-        if case .pointer = try type(of: base) {
+        if try type(of: base).pointee(in: typeDefinitions) != nil {
             let dereferenced = allocateRegister()
             operations.append(.dereference(destination: dereferenced, pointer: baseRegister))
             baseRegister = dereferenced
@@ -3894,7 +3964,7 @@ private struct IRLowerer {
             }
             return .index(base: pinnedBase, index: try pin(index), position: position)
         case .selector(let base, let name, let position):
-            if case .pointer = try type(of: base) {
+            if try type(of: base).pointee(in: typeDefinitions) != nil {
                 return .selector(base: try pin(base), name: name, position: position)
             }
             return .selector(base: try pinned(base), name: name, position: position)
@@ -4033,7 +4103,7 @@ private struct IRLowerer {
         case .selector(let base, let name, _):
             let baseType = try type(of: base)
             let baseValue = try lower(base)
-            if case .pointer = baseType {
+            if baseType.pointee(in: typeDefinitions) != nil {
                 let dereferenced = allocateRegister()
                 operations.append(.dereference(destination: dereferenced, pointer: baseValue))
                 let updated = allocateRegister()
@@ -4156,7 +4226,8 @@ private struct IRLowerer {
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {
         let candidate: GoType
-        if case .pointer(let pointee) = type {
+        // A pointer, or a type that is one underneath (`type ptr *T`).
+        if let pointee = type.pointee(in: typeDefinitions) {
             candidate = pointee
         } else {
             candidate = type
@@ -4300,7 +4371,7 @@ private struct IRLowerer {
             throw GoDiagnostic(position: position, message: "undefined: \(name)")
         case .selector(let base, let name, _):
             let pointer: Int
-            if case .pointer = try type(of: base) {
+            if try type(of: base).pointee(in: typeDefinitions) != nil {
                 pointer = try lower(base)
             } else {
                 pointer = try lowerAddress(of: base)
@@ -4408,8 +4479,7 @@ private struct IRLowerer {
             switch unaryOperator {
             case .address: return .pointer(operandType)
             case .dereference:
-                guard case .pointer(let pointee) = operandType else { return .void }
-                return pointee
+                return operandType.pointee(in: typeDefinitions) ?? .void
             case .receive:
                 guard case .channel(_, let element) = underlying(operandType) else { return .void }
                 return element
@@ -5568,6 +5638,42 @@ private enum BytecodeEmitter {
         case .greaterEqual: return .greaterEqual
         case .logicalAnd: return .logicalAnd
         case .logicalOr: return .logicalOr
+        }
+    }
+}
+
+// MARK: Declarations and names at the edges
+
+extension IRLowerer {
+    /// `var a, b = f()` at package level: `value` is evaluated once, where
+    /// the first of its variables is initialized, and each of them stored.
+    /// The values are those of a declaration of locals no source can name,
+    /// so a call, a map index, a type assertion, and a receive are lowered
+    /// as they are in a function.
+    mutating func lowerGroupedGlobals(
+        of value: GoExpression, among declarations: [GoGlobalDeclaration]
+    ) throws {
+        let prefix = "$global.\(value.position.path).\(value.position.offset)."
+        guard lookup(prefix + "0") == nil else { return }
+        let members = declarations.compactMap { declaration -> (name: String, index: Int)? in
+            guard let grouped = declaration.expression?.groupedResult,
+                grouped.value.position == value.position
+            else { return nil }
+            return (declaration.name, grouped.index)
+        }
+        let count = (members.map(\.index).max() ?? 0) + 1
+        try lower(
+            .multiDeclaration(
+                names: (0..<count).map { prefix + String($0) }, expression: value,
+                position: value.position))
+        for member in members {
+            guard let global = globalInfos[member.name],
+                let local = lookup(prefix + String(member.index))
+            else { continue }
+            operations.append(
+                .storeGlobal(
+                    index: global.index,
+                    source: converted(local.register, from: local.type, to: global.type)))
         }
     }
 }

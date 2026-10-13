@@ -147,9 +147,44 @@ public struct GoFile: Sendable, Equatable {
     /// that a diagnostic can say `f.Printl` as the source does.
     var importRenames: [GoImportRename] = []
 
+    /// Where `namePositions` keeps what the symbols of the file's package
+    /// begin with: at an offset no token has.
+    static let packagePathKey = -1
+
+    /// What the symbols of the file's package begin with, once the linker
+    /// has given them; nil for the root package, whose names stay plain.
+    /// An unexported field or method belongs to the package of its type.
+    /// It travels with `namePositions`, which the checker of each function
+    /// already has: a property of the checker's own would cost every frame
+    /// of it, and those are what limits how deep a program may nest.
+    var packagePath: String? {
+        get { namePositions[Self.packagePathKey]?.first?.path }
+        set {
+            namePositions[Self.packagePathKey] = newValue.map {
+                [GoSourcePosition(path: $0, offset: 0, line: 0, column: 0)]
+            }
+        }
+    }
+
     /// Where Go reports `function`: at its name.
     func namePosition(of function: GoFunctionDeclaration) -> GoSourcePosition {
         namePositions[function.position.offset]?.first ?? function.position
+    }
+
+    /// Where Go reports the package-level variable or constant
+    /// `declaration`: at its name. The declarations of one specification
+    /// share its position, and their names stand in their order.
+    func namePosition(of declaration: GoGlobalDeclaration) -> GoSourcePosition {
+        let position = declaration.position
+        var index = 0
+        for other in globalDeclarations where other.position == position {
+            if other.name == declaration.name { break }
+            index += 1
+        }
+        guard let names = namePositions[position.offset], index < names.count else {
+            return position
+        }
+        return names[index]
     }
 
     /// A file with the same source, after a pass rebuilt its declarations.

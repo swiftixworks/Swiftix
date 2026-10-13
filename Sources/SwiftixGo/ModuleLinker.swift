@@ -125,7 +125,7 @@ enum GoModuleLinker {
                     position: syntheticPosition("<link>"),
                     message: "no Go source files in package \(path)")
             }
-            let files = try GoLocalTypes.hoist(try sources.map(GoParser.parse))
+            let files = try GoLocalTypes.hoist(GoBlankNames.name(try sources.map(GoParser.parse)))
             let name = files[0].packageName
             for file in files where file.packageName != name {
                 throw GoDiagnostic(
@@ -375,12 +375,14 @@ private struct FileRewriter {
                 position: declaration.position,
                 message: "\"\(declaration.path)\" imported and not used")
         }
-        return file.rebuilt(
+        var linked = file.rebuilt(
             packageName: packageName,
             imports: remainingImports,
             typeDeclarations: types,
             globalDeclarations: globals,
             functions: functions)
+        if !isRoot { linked.packagePath = package.symbolPath }
+        return linked
     }
 
     // MARK: Names

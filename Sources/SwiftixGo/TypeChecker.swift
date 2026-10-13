@@ -204,28 +204,26 @@ public enum GoTypeChecker {
             }
             importedPathsByFile.append(importedPaths)
 
+            // What the file declares, each where its name is: Go reports
+            // the one of two that comes second in the source.
+            var declared: [DeclaredName] = []
             for declaration in file.typeDeclarations {
                 guard GoPredeclared.namedType(declaration.name) == nil else {
                     throw GoDiagnostic(
                         position: declaration.position,
                         message: "cannot redeclare predeclared type \(declaration.name)")
                 }
-                try reservePackageName(
-                    declaration.name,
-                    at: declaration.position,
-                    names: &packageNames)
+                declared.append((declaration.name, declaration.position, false))
                 typeSyntax[declaration.name] = declaration
             }
             for declaration in file.globalDeclarations {
-                try reservePackageName(
-                    declaration.name,
-                    at: declaration.position,
-                    names: &packageNames)
+                declared.append((declaration.name, file.namePosition(of: declaration), false))
             }
             for function in file.functions where function.receiver == nil && function.name != "init" {
-                try reservePackageName(
-                    function.name, at: file.namePosition(of: function), names: &packageNames)
+                declared.append((function.name, file.namePosition(of: function), true))
             }
+            try reservePackageNames(
+                declared, isMain: first.packageName == "main", names: &packageNames)
         }
 
         let availableTypes = Set(typeSyntax.keys)
@@ -276,6 +274,15 @@ public enum GoTypeChecker {
                 let identity = try receiverIdentity(
                     receiver.type,
                     availableTypes: availableTypes)
+                try requireMethodReceiver(
+                    identity.baseName, definitions: typeDefinitions, receiver: receiver.type)
+                if case .structure(let fields)? = typeDefinitions[identity.baseName]?.underlying,
+                    fields.contains(where: { $0.name == function.name })
+                {
+                    throw GoDiagnostic(
+                        position: file.namePosition(of: function),
+                        message: "field and method with the same name \(function.name)")
+                }
                 let key = methodKey(
                     baseName: identity.baseName,
                     pointer: identity.isPointer,
@@ -307,9 +314,12 @@ public enum GoTypeChecker {
         let globals = files.flatMap(\.globalDeclarations)
         // A package-level initializer sees the imports of its own file.
         var importedPathsByGlobal: [String: Set<String>] = [:]
+        // And its file knows where its names are, and of what package it is.
+        var fileByGlobal: [String: GoFile] = [:]
         for (file, importedPaths) in zip(files, importedPathsByFile) {
             for declaration in file.globalDeclarations {
                 importedPathsByGlobal[declaration.name] = importedPaths
+                fileByGlobal[declaration.name] = file
             }
         }
         var globalBindings: [String: Binding] = [:]
@@ -323,6 +333,7 @@ public enum GoTypeChecker {
         var unresolved = globals.filter { globalBindings[$0.name] == nil }
         while !unresolved.isEmpty {
             var next: [GoGlobalDeclaration] = []
+            var undefined: [GoDiagnostic] = []
             var madeProgress = false
             for declaration in unresolved {
                 guard let expression = declaration.expression else {
@@ -335,8 +346,9 @@ public enum GoTypeChecker {
                         methodSignatures: methodSignatures,
                         typeDefinitions: typeDefinitions,
                         availableTypes: availableTypes,
-                        globalBindings: globalBindings)
-                    let inferred = try checker.type(of: expression)
+                        globalBindings: globalBindings,
+                        namePositions: fileByGlobal[declaration.name]?.namePositions ?? [:])
+                    let inferred = try checker.initializerType(of: expression)
                     guard inferred != .void, inferred != .nilType else {
                         throw GoDiagnostic(position: expression.position, message: "missing type in declaration")
                     }
@@ -346,9 +358,13 @@ public enum GoTypeChecker {
                         constantValue: declaration.isConstant
                             ? checker.untypedConstantValue(expression) : nil)
                     madeProgress = true
-                } catch let diagnostic as GoDiagnostic where diagnostic.message.hasPrefix("undefined:") {
+                } catch let diagnostic as GoDiagnostic where undeclaredName(in: diagnostic) != nil {
                     next.append(declaration)
+                    undefined.append(diagnostic)
                 }
+            }
+            if !madeProgress, let diagnostic = firstUndeclared(undefined, among: next) {
+                throw diagnostic
             }
             guard madeProgress else {
                 throw GoDiagnostic(
@@ -367,8 +383,10 @@ public enum GoTypeChecker {
                 methodSignatures: methodSignatures,
                 typeDefinitions: typeDefinitions,
                 availableTypes: availableTypes,
-                globalBindings: globalBindings)
-            try checker.require(expression, assignableTo: binding.type)
+                globalBindings: globalBindings,
+                namePositions: fileByGlobal[declaration.name]?.namePositions ?? [:])
+            try checker.requireInitializer(
+                expression, assignableTo: binding.type, isConstant: declaration.isConstant)
         }
 
         if first.packageName == "main", functionSignatures["main"] == nil {
@@ -412,6 +430,26 @@ public enum GoTypeChecker {
             globalTypes: globalBindings.mapValues(\.type))
         package.literalCaptures = literalCaptures
         return package
+    }
+
+    /// A name a file declares at package level, where it is, and whether a
+    /// function has it.
+    private typealias DeclaredName = (name: String, position: GoSourcePosition, isFunction: Bool)
+
+    /// Reserves the names one file declares, in the order of the source.
+    /// `init`, and `main` in the main package, are names of functions only.
+    private static func reservePackageNames(
+        _ declared: [DeclaredName], isMain: Bool, names: inout [String: GoSourcePosition]
+    ) throws {
+        for entry in declared.sorted(by: { $0.position.offset < $1.position.offset }) {
+            // The symbol of a linked package ends in the name it was given.
+            let name = entry.name.split(separator: ".").last.map(String.init) ?? entry.name
+            if !entry.isFunction, name == "init" || (isMain && entry.name == "main") {
+                throw GoDiagnostic(
+                    position: entry.position, message: "cannot declare \(name) - must be func")
+            }
+            try reservePackageName(entry.name, at: entry.position, names: &names)
+        }
     }
 
     private static func reservePackageName(
@@ -560,6 +598,52 @@ public enum GoTypeChecker {
 
     private static func methodKey(baseName: String, pointer: Bool, method: String) -> String {
         "\(pointer ? "*" : "")\(baseName).\(method)"
+    }
+
+    /// The first of `diagnostics`, each an `undefined: name` that kept a
+    /// package-level variable from being typed, whose name is none of the
+    /// variables still waiting: a name nothing declares, and no cycle.
+    private static func firstUndeclared(
+        _ diagnostics: [GoDiagnostic], among waiting: [GoGlobalDeclaration]
+    ) -> GoDiagnostic? {
+        let names = Set(waiting.map(\.name))
+        return diagnostics.first { diagnostic in
+            undeclaredName(in: diagnostic).map { !names.contains($0) } ?? false
+        }
+    }
+
+    /// The name a diagnostic says nothing declares, which a package-level
+    /// variable that is yet to be typed may be: `undefined: name`, and what
+    /// is said of `iota`, which a package may declare like any other name.
+    private static func undeclaredName(in diagnostic: GoDiagnostic) -> String? {
+        if diagnostic.message.hasPrefix("undefined: ") {
+            return String(diagnostic.message.dropFirst("undefined: ".count))
+        }
+        return diagnostic.message == FunctionChecker.undeclaredMessage(GoIota.name)
+            ? GoIota.name : nil
+    }
+
+    /// Go gives no methods to a type that is a pointer or an interface
+    /// underneath: `type ptr *T` selects the fields of `T` and nothing else.
+    private static func requireMethodReceiver(
+        _ name: String, definitions: [String: GoTypeDefinition], receiver: GoTypeExpression
+    ) throws {
+        var underlying = definitions[name]?.underlying
+        var seen: Set<String> = [name]
+        while case .named(let next)? = underlying, seen.insert(next).inserted {
+            underlying = definitions[next]?.underlying
+        }
+        switch underlying {
+        case .pointer?, .interface?:
+            // Reported where the name of the type is, after a `*`.
+            var position = receiver.position
+            if case .pointer(let pointee, _) = receiver { position = pointee.position }
+            throw GoDiagnostic(
+                position: position,
+                message: "invalid receiver type \(name) (pointer or interface type)")
+        default:
+            return
+        }
     }
 
     private static func rejectRecursiveValueType(
@@ -744,6 +828,7 @@ private struct FunctionChecker {
     /// function; nil when it names nothing.
     func uncallableMessage(_ name: String) -> String? {
         if name == "nil" { return "invalid operation: cannot call non-function nil" }
+        if name == GoValueList.blank { return Self.undeclaredMessage(name) }
         guard let binding = lookup(name) else { return nil }
         let kind = binding.isConstant ? "constant" : "variable"
         return "invalid operation: cannot call non-function \(name) (\(kind) of type \(binding.type))"
@@ -775,6 +860,12 @@ private struct FunctionChecker {
         let typeName = receiver.typeName
         let value = methodSignatures[methodKey(baseName: typeName, pointer: false, method: name)]
         let pointer = methodSignatures[methodKey(baseName: typeName, pointer: true, method: name)]
+        if value != nil || pointer != nil, isHidden(name, in: .named(typeName)) {
+            throw GoDiagnostic(
+                position: position,
+                message: "\(GoMethodExpression.spelling(receiver, name)) undefined "
+                    + "(cannot refer to unexported method \(name))")
+        }
         guard let method = value ?? (receiver.pointer ? pointer : nil) else {
             let isField = structFields(of: .named(typeName))?.contains { $0.name == name } == true
             throw GoDiagnostic(
@@ -880,16 +971,8 @@ private struct FunctionChecker {
         namedResultCount = 0
         // A `break` in the literal does not leave a loop around it.
         (breakableDepth, loopDepth) = (0, 0)
-        for (parameter, parameterType) in zip(parameters, parameterTypes) {
-            scopes[scopes.count - 1][parameter.name] = Binding(
-                type: parameterType.parameterType, isConstant: false)
-        }
-        for (name, resultType) in zip(resultNames, resolvedResults) {
-            if let name {
-                scopes[scopes.count - 1][name] = Binding(type: resultType, isConstant: false)
-                namedResultCount += 1
-            }
-        }
+        try bind(parameters, ofTypes: parameterTypes)
+        bind(results: resultNames, ofTypes: resolvedResults)
         try checkBlock(body, createsScope: false)
         endScope()
         if !resolvedResults.isEmpty, !blockTerminates(body) {
@@ -1096,9 +1179,11 @@ private struct FunctionChecker {
                         baseName: identity.baseName,
                         pointer: identity.isPointer,
                         method: function.name)]
-            scopes[scopes.count - 1][receiver.name] = Binding(
-                type: receiverType,
-                isConstant: false)
+            if receiver.name != GoValueList.blank {
+                scopes[scopes.count - 1][receiver.name] = Binding(
+                    type: receiverType,
+                    isConstant: false)
+            }
         } else {
             signature = functionSignatures[function.name]
         }
@@ -1107,6 +1192,9 @@ private struct FunctionChecker {
         }
         expectedResults = signature.results
         for (parameter, parameterType) in zip(function.parameters, signature.parameters) {
+            // A parameter without a name, or with the blank one, is none
+            // the body can use, and any number may be so.
+            if parameter.name == GoValueList.blank { continue }
             guard scopes[scopes.count - 1][parameter.name] == nil else {
                 throw GoDiagnostic(
                     position: parameter.position,
@@ -1118,6 +1206,11 @@ private struct FunctionChecker {
         }
         for (index, (name, resultType)) in zip(function.resultNames, signature.results).enumerated() {
             guard let name else { continue }
+            if name == GoValueList.blank {
+                // Named, so a bare `return` will do; nothing reads it.
+                namedResultCount += 1
+                continue
+            }
             guard scopes[scopes.count - 1][name] == nil else {
                 // The names of the results follow the two places above.
                 let named = function.resultNames.prefix(index).compactMap { $0 }.count + 2
@@ -1239,17 +1332,16 @@ private struct FunctionChecker {
         guard case .declaration(let name, let explicitType, let expression, let isConstant, let position) = statement else {
             return
         }
-        guard scopes[scopes.count - 1][name] == nil else {
-            throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
-        }
+        try requireUndeclared(statement)
         if let expression { try requireSingleValue(expression, at: position) }
         let declared = try explicitType.map { try declaredType($0) }
         let expressionType = try expression.map { try type(of: $0) }
+        if isConstant { try requireConstant(expression, ofType: expressionType) }
         if let declared, let expression, let expressionType,
             !(try isAssignable(expression, ofType: expressionType, to: declared))
         {
             throw GoDiagnostic(
-                position: expression.position,
+                position: Self.start(of: expression, in: namePositions),
                 message: "cannot use \(expressionType) as \(declared) value")
         }
         guard let bindingType = declared ?? expressionType else {
@@ -1260,6 +1352,8 @@ private struct FunctionChecker {
                 position: expression?.position ?? position,
                 message: "no value used as value")
         }
+        // `var _ = v` checks and evaluates `v` and declares nothing.
+        if name == GoValueList.blank { return }
         scopes[scopes.count - 1][name] = Binding(
             type: bindingType,
             isConstant: isConstant,
@@ -1310,11 +1404,14 @@ private struct FunctionChecker {
                 names, type: variables.type, values: variables.values, position: position)
             return
         }
+        try requireNewVariables(names, at: position)
         if let values = expression.valueList {
             try checkParallelDeclaration(names, values: values, position: position)
             return
         }
-        if names.allSatisfy({ $0 == GoValueList.blank || scopes[scopes.count - 1][$0] != nil }) {
+        if !isVariableDeclaration(names, at: position),
+            names.allSatisfy({ $0 == GoValueList.blank || scopes[scopes.count - 1][$0] != nil })
+        {
             throw GoDiagnostic(
                 position: position, message: "no new variables on left side of :=")
         }
@@ -1852,7 +1949,7 @@ private struct FunctionChecker {
             throw GoDiagnostic(
                 position: position,
                 message: isPackage
-                    ? GoImportName.misuse(ofPackage: name) : "undefined: \(name)")
+                    ? GoImportName.misuse(ofPackage: name) : Self.undeclaredMessage(name))
         }
         use(name)
         return binding.type
@@ -1916,6 +2013,7 @@ private struct FunctionChecker {
             return method
         }
         let baseType = try type(of: base)
+        try requireVisible(name, in: baseType, at: position)
         guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
             // A method selected and not called is a function that has
             // its receiver.
@@ -1956,6 +2054,7 @@ private struct FunctionChecker {
                             position: element.position,
                             message: "unknown field \(element.key ?? "") in struct literal of type \(literalType)")
                     }
+                    try requireVisibleKey(element, in: literalType)
                     guard seen.insert(key).inserted else {
                         throw GoDiagnostic(
                             position: element.position,
@@ -1966,6 +2065,7 @@ private struct FunctionChecker {
             } else if !elements.isEmpty {
                 // `T{}` is the zero value; a literal without field names
                 // gives every field.
+                try requireVisibleFields(fields, of: literalType, for: elements)
                 guard elements.count == fields.count else {
                     throw GoDiagnostic(
                         position: position,
@@ -2078,7 +2178,7 @@ private struct FunctionChecker {
             return .pointer(try assignableType(of: operand))
         case .dereference:
             let operandType = try type(of: operand)
-            guard case .pointer(let pointee) = operandType else {
+            guard let pointee = operandType.pointee(in: typeDefinitions) else {
                 throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
             }
             try rejectOpaqueFile(pointee, at: position)
@@ -2102,7 +2202,7 @@ private struct FunctionChecker {
         var leftType = try type(of: left)
         var rightType = try type(of: right)
         if leftType != rightType,
-            let common = try commonIntegerType(
+            let common = try commonOperandType(
                 left: left, leftType: leftType, right: right, rightType: rightType)
         {
             leftType = common
@@ -2817,6 +2917,7 @@ private struct FunctionChecker {
                 position: callee.position, message: "undefined: \(packageName).\(name)")
         }
         let baseType = try type(of: base)
+        try requireVisible(name, in: baseType, at: callee.position)
         let candidates: [String]
         switch baseType {
         case .named(let baseName):
@@ -2889,7 +2990,7 @@ private struct FunctionChecker {
         switch expression {
         case .identifier(let name, let position):
             guard let binding = lookup(name) else {
-                throw GoDiagnostic(position: position, message: "undefined: \(name)")
+                throw GoDiagnostic(position: position, message: Self.undeclaredMessage(name))
             }
             guard !binding.isConstant else {
                 throw GoDiagnostic(position: position, message: "cannot assign to \(name)")
@@ -2906,6 +3007,7 @@ private struct FunctionChecker {
             return binding.type
         case .selector(let base, let name, let position):
             let baseType = try assignableType(of: base)
+            try requireVisible(name, in: baseType, at: position)
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 throw GoDiagnostic(
                     position: position,
@@ -2914,7 +3016,7 @@ private struct FunctionChecker {
             return field.type
         case .unary(.dereference, let operand, let position):
             let operandType = try type(of: operand)
-            guard case .pointer(let pointee) = operandType else {
+            guard let pointee = operandType.pointee(in: typeDefinitions) else {
                 throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
             }
             try rejectOpaqueFile(pointee, at: position)
@@ -3259,9 +3361,13 @@ private struct FunctionChecker {
     ) throws {
         let declared = try type.map { try declaredType($0) }
         var seen: Set<String> = []
-        for name in names where name != GoValueList.blank {
+        for (index, name) in names.enumerated() where name != GoValueList.blank {
             guard scopes[scopes.count - 1][name] == nil, seen.insert(name).inserted else {
-                throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
+                // Go reports a name declared twice where the name is.
+                let places = namePositions[position.offset] ?? []
+                throw GoDiagnostic(
+                    position: index < places.count ? places[index] : position,
+                    message: "\(name) redeclared in this block")
             }
         }
         if values.isEmpty {
@@ -3827,7 +3933,9 @@ private struct FunctionChecker {
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {
         let candidate: GoType
-        if case .pointer(let pointee) = type {
+        // A pointer, or a type that is one underneath (`type ptr *T`),
+        // selects the fields of what it points to.
+        if let pointee = type.pointee(in: typeDefinitions) {
             candidate = pointee
         } else {
             candidate = type
@@ -3881,8 +3989,7 @@ private struct FunctionChecker {
     func isBool(_ type: GoType) -> Bool { underlying(type) == .bool }
 
     func isPointer(_ type: GoType) -> Bool {
-        if case .pointer = type { return true }
-        return false
+        type.pointee(in: typeDefinitions) != nil
     }
 
     func isSlice(_ type: GoType) -> Bool {
@@ -4290,6 +4397,7 @@ private struct FunctionChecker {
                     position: callee.position, message: "undefined: \(packageName).\(name)")
             }
             let baseType = try type(of: base)
+            try requireVisible(name, in: baseType, at: callee.position)
             let candidates: [String]
             switch baseType {
             case .named(let baseName):
@@ -4428,5 +4536,346 @@ private struct FunctionChecker {
             }
         }
         return false
+    }
+}
+
+// MARK: Declarations and names at the edges
+
+/// The checks of this section that a statement or an expression asks for
+/// are `mutating`, though they change nothing: a caller that is being
+/// changed passes itself to such a function, and would hand any other a
+/// copy of the whole checker, which an unoptimized build keeps in the
+/// caller's frame for each place that asks. Those frames are what limits how
+/// deep a program may nest.
+extension FunctionChecker {
+    /// What Go says of `name` where nothing declares it. The blank
+    /// identifier names no value, and `iota` is one only in a `const`.
+    static func undeclaredMessage(_ name: String) -> String {
+        switch name {
+        case GoValueList.blank: return "cannot use _ as value or type"
+        case GoIota.name: return "cannot use iota outside constant declaration"
+        default: return "undefined: \(name)"
+        }
+    }
+
+    /// Where `expression` begins, which is where Go reports a value that
+    /// does not fit its declaration. A node of the tree is where its own
+    /// token is: a call at its `(`, an operation at its operator, a
+    /// selection at the selected name. `positions` are the file's, where
+    /// the parser notes a call that begins with a parenthesis.
+    static func start(
+        of expression: GoExpression, in positions: [Int: [GoSourcePosition]]
+    ) -> GoSourcePosition {
+        switch expression {
+        case .call(let callee, let arguments, let position):
+            if let grouped = expression.groupedResult { return start(of: grouped.value, in: positions) }
+            if let operation = expression.bitwiseOperation {
+                return operation.operator.isUnary
+                    ? position : start(of: operation.operands[0], in: positions)
+            }
+            if case .identifier(let name, _) = callee, name.hasPrefix("$") {
+                return arguments.first.map { start(of: $0, in: positions) } ?? position
+            }
+            return positions[position.offset]?.first ?? start(of: callee, in: positions)
+        case .selector(let base, _, _), .typeAssertion(let base, _, _),
+            .index(let base, _, _), .slicing(let base, _, _, _):
+            return start(of: base, in: positions)
+        case .binary(let left, _, _, _):
+            return start(of: left, in: positions)
+        default:
+            return expression.position
+        }
+    }
+
+    // MARK: Parameters of a function literal
+
+    /// Declares the parameters of a literal in the scope that is its own.
+    /// One without a name, or with the blank one, is none the body can
+    /// use, and any number may be so.
+    mutating func bind(_ parameters: [GoParameter], ofTypes types: [GoType]) throws {
+        for (parameter, parameterType) in zip(parameters, types)
+        where parameter.name != GoValueList.blank {
+            guard scopes[scopes.count - 1][parameter.name] == nil else {
+                throw GoDiagnostic(
+                    position: parameter.position,
+                    message: "\(parameter.name) redeclared in this block")
+            }
+            scopes[scopes.count - 1][parameter.name] = Binding(
+                type: parameterType.parameterType, isConstant: false)
+        }
+    }
+
+    /// Declares the results of a literal that have names. A blank one
+    /// counts as named, so a bare `return` will do, and nothing reads it.
+    mutating func bind(results names: [String?], ofTypes types: [GoType]) {
+        for (name, resultType) in zip(names, types) {
+            guard let name else { continue }
+            if name != GoValueList.blank {
+                scopes[scopes.count - 1][name] = Binding(type: resultType, isConstant: false)
+            }
+            namedResultCount += 1
+        }
+    }
+
+    // MARK: Short declarations
+
+    /// The name `statement` declares is new to its block. A `:=` that
+    /// names a variable of the block is Go's `no new variables`; a `var` or
+    /// `const` that does is a redeclaration, reported where the name is.
+    mutating func requireUndeclared(_ statement: GoStatement) throws {
+        guard case .declaration(let name, let explicitType, _, let isConstant, let position) = statement
+        else { return }
+        if explicitType == nil, !isConstant { try requireNewVariables([name], at: position) }
+        guard scopes[scopes.count - 1][name] == nil else {
+            throw GoDiagnostic(
+                position: namePositions[position.offset]?.first ?? position,
+                message: "\(name) redeclared in this block")
+        }
+    }
+
+    /// Whether the declaration of `names` at `position` is a `var`, whose
+    /// names are all new or the blank one: the parser recorded their places
+    /// and none for a `:=`.
+    mutating func isVariableDeclaration(_ names: [String], at position: GoSourcePosition) -> Bool {
+        namePositions[position.offset]?.count == names.count
+    }
+
+    /// A `:=` declares at least one variable: Go refuses one whose names
+    /// the block all has already, at the `:=`, a name written twice, at
+    /// its second place, and a name that is a constant of the block, which
+    /// cannot be assigned. Nothing is asked of a `var`, whose names the
+    /// parser recorded without a place for a `:=`.
+    mutating func requireNewVariables(_ names: [String], at position: GoSourcePosition) throws {
+        guard let positions = namePositions[position.offset], positions.count == names.count + 1
+        else { return }
+        var seen: Set<String> = []
+        var declaresOne = false
+        for (name, namePosition) in zip(names, positions) where name != GoValueList.blank {
+            guard seen.insert(name).inserted else {
+                throw GoDiagnostic(
+                    position: namePosition, message: "\(name) repeated on left side of :=")
+            }
+            guard let existing = scopes[scopes.count - 1][name] else {
+                declaresOne = true
+                continue
+            }
+            if existing.isConstant {
+                throw GoDiagnostic(position: namePosition, message: "cannot assign to \(name)")
+            }
+        }
+        if !declaresOne {
+            throw GoDiagnostic(
+                position: positions[names.count], message: "no new variables on left side of :=")
+        }
+    }
+
+    // MARK: Constants
+
+    /// Whether `expression` is surely no constant: it names a variable or
+    /// a function, calls one, or builds a value at run time. What this
+    /// cannot tell — a member of a package, an operation the parser encodes
+    /// in a way of its own — counts as constant, as every initializer did
+    /// before there was this check.
+    func isNotConstant(_ expression: GoExpression) -> Bool {
+        switch expression {
+        case .integer, .string, .typeExpression:
+            return false
+        case .identifier(let name, _):
+            if let binding = lookup(name) { return !binding.isConstant }
+            return functionSignatures[name] != nil
+        case .unary(let unaryOperator, let operand, _):
+            switch unaryOperator {
+            case .plus, .minus, .not: return isNotConstant(operand)
+            case .address, .dereference, .receive: return true
+            }
+        case .binary(let left, _, let right, _):
+            return isNotConstant(left) || isNotConstant(right)
+        case .selector(let base, _, _):
+            return importedPackage(named: base) == nil
+        case .call(let callee, let arguments, _):
+            if case .identifier(let name, _) = callee {
+                if name.hasPrefix("$") { return arguments.contains { isNotConstant($0) } }
+                if name == "len" || name == "cap", lookup(name) == nil,
+                    functionSignatures[name] == nil
+                {
+                    return arguments.contains { hasNoConstantLength($0) }
+                }
+            }
+            guard let target = try? conversionTarget(callee) else { return true }
+            switch underlying(target) {
+            case .int, .string, .bool: return arguments.contains { isNotConstant($0) }
+            default: return true
+            }
+        case .compositeLiteral, .functionLiteral, .index, .slicing, .typeAssertion:
+            return true
+        }
+    }
+
+    /// Whether `len(operand)` is surely no constant. The length of a
+    /// constant string is one, and so is that of an array, whatever holds
+    /// it; what may be an array counts as one.
+    func hasNoConstantLength(_ operand: GoExpression) -> Bool {
+        switch operand {
+        case .identifier(let name, _):
+            guard let binding = lookup(name), !binding.isConstant else { return false }
+            if case .array = underlying(binding.type) { return false }
+            return true
+        case .selector, .index, .unary(.dereference, _, _):
+            return false
+        default:
+            return isNotConstant(operand)
+        }
+    }
+
+    /// The value of a constant must be one: Go's report names a variable
+    /// that is none, and says of any other expression what type its value
+    /// has, where the expression begins.
+    mutating func requireConstant(_ expression: GoExpression?, ofType type: GoType?) throws {
+        guard let expression, let type, isNotConstant(expression) else { return }
+        var subject = "value of type \(type)"
+        if case .identifier(let name, _) = expression {
+            subject = "\(name) (\(lookup(name) == nil ? "value" : "variable") of type \(type))"
+        }
+        throw GoDiagnostic(
+            position: Self.start(of: expression, in: namePositions),
+            message: subject + " is not constant")
+    }
+
+    // MARK: Package-level variables
+
+    /// The value of a package-level variable must fit its type, and the
+    /// value of a constant be one. Reported where the value begins.
+    mutating func requireInitializer(
+        _ expression: GoExpression, assignableTo expected: GoType, isConstant: Bool
+    ) throws {
+        let actual = try initializerType(of: expression)
+        if isConstant { try requireConstant(expression, ofType: actual) }
+        guard try isAssignable(expression, ofType: actual, to: expected) else {
+            throw GoDiagnostic(
+                position: Self.start(of: expression, in: namePositions),
+                message: "cannot use \(actual) as \(expected) value")
+        }
+    }
+
+    /// The type of the value of a package-level variable: of the
+    /// expression, or of its place among the values of one that several
+    /// variables share, `var a, b = f()` and `var v, ok = m[k]`.
+    /// Only a declaration of the package has such a value, so the question
+    /// is asked here and not of every call.
+    mutating func initializerType(of expression: GoExpression) throws -> GoType {
+        guard let (index, count, value) = expression.groupedResult else {
+            return try type(of: expression)
+        }
+        // Go reports a number of values that does not match where they begin.
+        let names = Self.start(of: value, in: namePositions)
+        var types: [GoType] = []
+        switch value {
+        case .call(let callee, let arguments, let position):
+            types = try callResultTypes(callee: callee, arguments: arguments, position: position)
+            guard types.count == count else {
+                throw GoDiagnostic(
+                    position: names,
+                    message:
+                        "assignment mismatch: \(count) variables but function returns \(types.count) values")
+            }
+        case .index(let base, let key, _):
+            guard case .map(let keyType, let valueType) = underlying(try type(of: base)) else {
+                break
+            }
+            try require(key, assignableTo: keyType)
+            types = [valueType, .bool]
+        case .typeAssertion(_, let assertedType, _):
+            _ = try type(of: value)
+            types = [try declaredType(assertedType), .bool]
+        case .unary(.receive, _, _):
+            types = [try type(of: value), .bool]
+        default:
+            break
+        }
+        guard types.count == count, index < count else {
+            throw GoDiagnostic(position: names, message: Self.mismatch(variables: count, values: 1))
+        }
+        return types[index]
+    }
+
+    // MARK: Pointers with a name
+
+    /// The type two operands of different types are compared or combined
+    /// as: an integer type for an untyped constant beside it, and for two
+    /// pointer types of which one has a name and the other is what it
+    /// stands for, `ptr` and `*T` after `type ptr *T`, the first. Go
+    /// compares those two as it assigns one to the other.
+    func commonOperandType(
+        left: GoExpression, leftType: GoType, right: GoExpression, rightType: GoType
+    ) throws -> GoType? {
+        if let common = try commonIntegerType(
+            left: left, leftType: leftType, right: right, rightType: rightType)
+        {
+            return common
+        }
+        guard isPointer(leftType), isPointer(rightType),
+            isAssignable(leftType, to: rightType) || isAssignable(rightType, to: leftType)
+        else { return nil }
+        return leftType
+    }
+
+    // MARK: Unexported fields and methods
+
+    /// Whether the field or method `name` of a value of `type` is hidden
+    /// from the package being checked: its name is not exported, and the
+    /// type is one another package declares. A type's symbol begins with
+    /// its package's path, and the root package's names have none.
+    func isHidden(_ name: String, in type: GoType) -> Bool {
+        guard !GoModuleLinker.isExported(name) else { return false }
+        let owner = type.pointee(in: typeDefinitions) ?? type
+        guard case .named(let typeName) = owner, typeDefinitions[typeName] != nil else {
+            return false
+        }
+        // The file's package came with the places of its names.
+        return typeName.lastIndex(of: ".").map { String(typeName[..<$0]) }
+            != namePositions[GoFile.packagePathKey]?.first?.path
+    }
+
+    /// Refuses the selection of a hidden field or method, as Go does where
+    /// the name is. A name the type does not have at all is left to the
+    /// report that says so.
+    mutating func requireVisible(_ name: String, in type: GoType, at position: GoSourcePosition) throws {
+        guard isHidden(name, in: type) else { return }
+        let kind: String
+        if structFields(of: type)?.contains(where: { $0.name == name }) == true {
+            kind = "field"
+        } else if methodSignature(of: type, named: name) != nil {
+            kind = "method"
+        } else if case .interface(let methods) = underlying(type),
+            methods.contains(where: { $0.name == name })
+        {
+            kind = "method"
+        } else {
+            return
+        }
+        throw GoDiagnostic(
+            position: position, message: "cannot refer to unexported \(kind) \(name)")
+    }
+
+    /// A struct literal may not name a field that is hidden.
+    mutating func requireVisibleKey(_ element: GoCompositeElement, in type: GoType) throws {
+        guard let key = element.key, isHidden(key, in: type) else { return }
+        throw GoDiagnostic(
+            position: element.position,
+            message: "cannot refer to unexported field \(key) in struct literal of type \(type)")
+    }
+
+    /// A struct literal without field names gives every field in turn, and
+    /// may not give one that is hidden. Go checks each value as it comes,
+    /// before it counts them.
+    mutating func requireVisibleFields(
+        _ fields: [GoStructFieldType], of type: GoType, for elements: [GoCompositeElement]
+    ) throws {
+        for (element, field) in zip(elements, fields) where isHidden(field.name, in: type) {
+            throw GoDiagnostic(
+                position: element.position,
+                message:
+                    "implicit assignment to unexported field \(field.name) in struct literal of type \(type)")
+        }
     }
 }

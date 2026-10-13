@@ -180,7 +180,12 @@ public enum GoSourceRewriter {
         }
 
         for declaration in file.globalDeclarations {
-            if let expression = declaration.expression { consider(expression) }
+            if let grouped = declaration.expression?.groupedResult {
+                // `var a, b = f()`: the source holds the expression once.
+                if grouped.index == 0 { consider(grouped.value) }
+            } else if let expression = declaration.expression {
+                consider(expression)
+            }
         }
         for function in file.functions {
             visit(function.body, consider: consider)

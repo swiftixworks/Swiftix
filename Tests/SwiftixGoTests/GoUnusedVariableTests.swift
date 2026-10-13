@@ -60,7 +60,8 @@ struct GoUnusedVariableTests: GoTestHarness {
                 return nil
             }
         }
-        #expect(statements.map(columns) == [[2, 6], [6, 9], [6, 9], [6]])
+        // After the names of a `:=` comes the `:=` itself.
+        #expect(statements.map(columns) == [[2, 6, 8], [6, 9], [6, 9], [6]])
     }
 
     @Test func aProgramWithoutUnusedVariablesCompilesToWhatItDid() throws {
