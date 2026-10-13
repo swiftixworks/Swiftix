@@ -115,6 +115,12 @@ struct GoNativeFunction: Sendable, Equatable {
     /// Accepts any number of further arguments of any type (`...any`).
     var isVariadic = false
     var results: [GoType] = []
+    /// Go returns `(n, err)`; this dialect supports the call as a statement
+    /// only.
+    var isStatementOnly = false
+    /// The variadic arguments are operands of `fmt` verbs, so a `[]byte`
+    /// among them is boxed with its type for `%s` and `%x`.
+    var formatsOperands = false
 }
 
 extension GoStandardLibrary {
@@ -141,11 +147,27 @@ extension GoStandardLibrary {
         case ("fmt", "Fprint"):
             return GoNativeFunction(
                 symbol: "$fmt.Fprint", goName: "fmt.Fprint", parameters: [file],
-                isVariadic: true)
+                isVariadic: true, isStatementOnly: true)
         case ("fmt", "Fprintln"):
             return GoNativeFunction(
                 symbol: "$fmt.Fprintln", goName: "fmt.Fprintln", parameters: [file],
-                isVariadic: true)
+                isVariadic: true, isStatementOnly: true)
+        case ("fmt", "Sprintf"):
+            return GoNativeFunction(
+                symbol: "$fmt.Sprintf", goName: "fmt.Sprintf", parameters: [.string],
+                isVariadic: true, results: [.string], formatsOperands: true)
+        case ("fmt", "Errorf"):
+            return GoNativeFunction(
+                symbol: "$fmt.Errorf", goName: "fmt.Errorf", parameters: [.string],
+                isVariadic: true, results: [failure], formatsOperands: true)
+        case ("fmt", "Printf"):
+            return GoNativeFunction(
+                symbol: "$fmt.Printf", goName: "fmt.Printf", parameters: [.string],
+                isVariadic: true, isStatementOnly: true, formatsOperands: true)
+        case ("fmt", "Fprintf"):
+            return GoNativeFunction(
+                symbol: "$fmt.Fprintf", goName: "fmt.Fprintf", parameters: [file, .string],
+                isVariadic: true, isStatementOnly: true, formatsOperands: true)
         case ("os", "ReadFile"):
             return GoNativeFunction(
                 symbol: "$os.ReadFile", goName: "os.ReadFile", parameters: [.string],
@@ -283,9 +305,10 @@ extension GoStandardLibrary {
         GoBitwiseOperator.allCases.map(\.nativeName)
             + GoPredeclared.conversionCallNames
             + [
-                GoPredeclared.copyElements,
+                GoPredeclared.copyElements, GoPredeclared.appendElements,
                 "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
                 "$fmt.Fprint", "$fmt.Fprintln",
+                "$fmt.Sprintf", "$fmt.Errorf", "$fmt.Printf", "$fmt.Fprintf",
                 "$os.File.Write", "$os.File.WriteString", "$os.File.Read",
                 "$os.ReadFile", "$os.WriteFile",
                 "$os.Open", "$os.Create", "$os.OpenFile", "$os.Remove", "$os.Rename", "$os.Mkdir",
@@ -316,8 +339,15 @@ enum GoPredeclared {
     static let runeToString = "$conv.runeToString"
     static let conversionCallNames = [bytesToString, stringToBytes, runeToString]
 
+    /// Dynamic type name a `[]byte` operand of a `fmt` verb is boxed with.
+    static let byteSliceTypeName = "[]uint8"
+
     /// Native call the builtin `copy` lowers to.
     static let copyElements = "$copy"
+
+    /// Native call `append(slice, source...)` lowers to, with the element
+    /// zero value as its third operand.
+    static let appendElements = "$append"
 
     /// Method the compiler synthesizes so `err.Error()` works on the runtime's
     /// native error values, whose dynamic type name is `error`.

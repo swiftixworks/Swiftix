@@ -183,6 +183,7 @@ public enum GoSourceRewriter {
 
     private static func children(of expression: GoExpression) -> [GoExpression] {
         if let operation = expression.bitwiseOperation { return operation.operands }
+        if let operand = expression.spreadOperand { return [operand] }
         switch expression {
         case .selector(let base, _, _): return [base]
         case .typeAssertion(let base, _, _): return [base]
@@ -226,6 +227,11 @@ public enum GoSourceRewriter {
                 source: source,
                 captures: &captures)
         }
+        // A spread is call-shaped too, and matches only another spread.
+        if let patternOperand = pattern.spreadOperand {
+            guard let targetOperand = target.spreadOperand else { return false }
+            return matches(patternOperand, targetOperand, source: source, captures: &captures)
+        }
         if case .identifier(let name, _) = pattern, !literalIdentifiers.contains(name) {
             guard let range = expressionRange(target, bytes: source) else { return false }
             let text = String(decoding: source[range], as: UTF8.self)
@@ -234,7 +240,7 @@ public enum GoSourceRewriter {
             return true
         }
         // An operator is never an ordinary call, whatever the pattern's callee.
-        if target.bitwiseOperation != nil { return false }
+        if target.bitwiseOperation != nil || target.spreadOperand != nil { return false }
         switch (pattern, target) {
         case (.integer(let lhs, _), .integer(let rhs, _)): return lhs == rhs
         case (.string(let lhs, _), .string(let rhs, _)): return lhs == rhs
@@ -332,6 +338,12 @@ public enum GoSourceRewriter {
             }
             guard let firstRange = expressionRange(first, bytes: bytes) else { return nil }
             return firstRange.lowerBound..<lastRange.upperBound
+        }
+        if let operand = expression.spreadOperand {
+            // The node's position is the `...` after its operand.
+            guard let operandRange = expressionRange(operand, bytes: bytes) else { return nil }
+            return operandRange.lowerBound..<(
+                expression.position.offset + GoSpread.spelling.utf8.count)
         }
         switch expression {
         case .integer(let value, let position):
@@ -492,6 +504,9 @@ public enum GoSourceRewriter {
             }
             return operand(0, minimumPrecedence: level) + " " + operation.operator.spelling
                 + " " + operand(1, minimumPrecedence: level + 1)
+        }
+        if let operand = expression.spreadOperand {
+            return render(operand, captures: captures) + GoSpread.spelling
         }
         switch expression {
         case .integer(let value, _): return String(value)

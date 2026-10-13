@@ -291,6 +291,10 @@ private struct Scanner {
         case 0x5B: kind = .leftBracket
         case 0x5D: kind = .rightBracket
         case 0x2C: kind = .comma
+        case 0x2E where peek(1) == 0x2E && peek(2) == 0x2E:
+            kind = .identifier(GoSpread.spelling)
+            advance()
+            advance()
         case 0x2E: kind = .period
         case 0x3A where peek(1) == 0x3D:
             kind = .declare

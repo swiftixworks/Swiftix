@@ -1336,6 +1336,11 @@ private struct FunctionChecker {
                 return try bitwiseResultType(
                     operation.operator, operands: operation.operands, position: position)
             }
+            if expression.spreadOperand != nil {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "can only use ... with the final argument of append")
+            }
             if let target = try conversionTarget(callee) {
                 return try conversionResultType(target, arguments: arguments, position: position)
             }
@@ -1348,7 +1353,7 @@ private struct FunctionChecker {
                         message: "multiple-value \(native.goName)() in single-value context")
                 }
                 guard let result = native.results.first else {
-                    if native.goName.hasPrefix("fmt.Fprint") {
+                    if native.isStatementOnly {
                         throw GoDiagnostic(
                             position: position,
                             message: "\(native.goName) results are not supported; call it as a statement")
@@ -1384,6 +1389,15 @@ private struct FunctionChecker {
                     guard case .slice(let elementType) = underlying(sliceType) else {
                         throw GoDiagnostic(
                             position: arguments[0].position, message: "first argument to append must be slice")
+                    }
+                    if arguments.count == 2, let source = arguments[1].spreadOperand {
+                        let sourceType = try type(of: source)
+                        guard isElementSource(sourceType, of: elementType) else {
+                            throw GoDiagnostic(
+                                position: source.position,
+                                message: "cannot use \(sourceType) as \(sliceType) value in append")
+                        }
+                        return sliceType
                     }
                     for argument in arguments.dropFirst() {
                         try require(argument, assignableTo: elementType)
@@ -1467,18 +1481,8 @@ private struct FunctionChecker {
                             position: arguments[0].position,
                             message: "first argument to copy must be slice")
                     }
-                    // A string is a source of bytes; any other source is a
-                    // slice of the destination's element type.
                     let sourceType = try type(of: arguments[1])
-                    let sourceMatches: Bool
-                    if isString(sourceType) {
-                        sourceMatches = isByte(element)
-                    } else if case .slice(let sourceElement) = underlying(sourceType) {
-                        sourceMatches = sourceElement == element
-                    } else {
-                        sourceMatches = false
-                    }
-                    guard sourceMatches else {
+                    guard isElementSource(sourceType, of: element) else {
                         throw GoDiagnostic(
                             position: arguments[1].position,
                             message: "cannot copy \(sourceType) into \(destinationType)")
@@ -2491,6 +2495,15 @@ private struct FunctionChecker {
         return fields
     }
 
+    /// Whether a value of `source` supplies elements for a slice of `element`
+    /// in `copy` and in `append(slice, source...)`: a slice of the same
+    /// element type, or a string as a source of bytes.
+    func isElementSource(_ source: GoType, of element: GoType) -> Bool {
+        if isString(source) { return isByte(element) }
+        if case .slice(let sourceElement) = underlying(source) { return sourceElement == element }
+        return false
+    }
+
     func isInteger(_ type: GoType) -> Bool { underlying(type) == .int }
     func isString(_ type: GoType) -> Bool { underlying(type) == .string }
     func isBool(_ type: GoType) -> Bool { underlying(type) == .bool }
@@ -2731,7 +2744,7 @@ private struct FunctionChecker {
             return [try type(of: .call(callee: callee, arguments: arguments, position: position))]
         }
         if let native = try nativeCall(callee: callee, arguments: arguments, position: position) {
-            if native.results.isEmpty, native.goName.hasPrefix("fmt.Fprint") {
+            if native.results.isEmpty, native.isStatementOnly {
                 throw GoDiagnostic(
                     position: position,
                     message: "\(native.goName) results are not supported; call it as a statement")

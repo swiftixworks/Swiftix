@@ -2132,6 +2132,15 @@ private struct IRLowerer {
                 else { return nil }
                 var slice = try lower(first)
                 let zero = try zeroValue(for: elementType, position: first.position)
+                if arguments.count == 2, let source = arguments[1].spreadOperand {
+                    let destination = allocateRegister()
+                    operations.append(
+                        .call(
+                            function: GoPredeclared.appendElements,
+                            arguments: [slice, try lower(source), zero],
+                            destinations: [destination]))
+                    return destination
+                }
                 for argument in arguments.dropFirst() {
                     let destination = allocateRegister()
                     operations.append(
@@ -3634,12 +3643,31 @@ private struct IRLowerer {
 
     /// Lowers the receiver and arguments of a native call in evaluation order.
     mutating func lowerNativeOperands(
+        _ function: GoNativeFunction,
         receiver: GoExpression?,
         arguments: [GoExpression]
     ) throws -> [Int] {
         var registers: [Int] = []
         if let receiver { registers.append(try lower(receiver)) }
-        for argument in arguments { registers.append(try lower(argument)) }
+        let fixedCount = function.parameters.count - registers.count
+        for (index, argument) in arguments.enumerated() {
+            var register = try lower(argument)
+            // The VM cannot tell a `[]byte` from a slice of integers, which
+            // `%s` and `%x` print differently.
+            if function.formatsOperands, index >= fixedCount,
+                case .slice(let element) = underlying(try type(of: argument)),
+                GoPredeclared.isByte(element, definitions: typeDefinitions)
+            {
+                let boxed = allocateRegister()
+                operations.append(
+                    .makeInterface(
+                        destination: boxed,
+                        source: register,
+                        typeName: GoPredeclared.byteSliceTypeName))
+                register = boxed
+            }
+            registers.append(register)
+        }
         return registers
     }
 
@@ -3650,7 +3678,8 @@ private struct IRLowerer {
         arguments: [GoExpression]
     ) throws -> [Int]? {
         guard let native = nativeFunction(for: callee) else { return nil }
-        let registers = try lowerNativeOperands(receiver: native.receiver, arguments: arguments)
+        let registers = try lowerNativeOperands(
+            native.function, receiver: native.receiver, arguments: arguments)
         let destinations = native.function.results.map { _ in allocateRegister() }
         operations.append(
             .call(
@@ -3668,7 +3697,8 @@ private struct IRLowerer {
         arguments: [GoExpression]
     ) throws -> (name: String, registers: [Int])? {
         guard let native = nativeFunction(for: callee) else { return nil }
-        let registers = try lowerNativeOperands(receiver: native.receiver, arguments: arguments)
+        let registers = try lowerNativeOperands(
+            native.function, receiver: native.receiver, arguments: arguments)
         let count = registers.count
         let resultCount = native.function.results.count
         let name = "$native.\(wrapperNamespace).\(native.function.symbol).\(count)"

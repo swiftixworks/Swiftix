@@ -8,6 +8,9 @@
 /// compiler, formatter, and rewriter decode that shape through
 /// `GoExpression.bitwiseOperation`; the VM executes the same name natively.
 ///
+/// The spread `values...` of an `append` argument is encoded the same way; see
+/// `GoSpread`.
+///
 /// Compound assignment (`x += y`, `x <<= y`, ...) uses the same token trick:
 /// the lexer emits the operator as an `.identifier` token carrying its
 /// spelling and the parser rewrites the statement to `x = x op y`, reusing the
@@ -76,6 +79,7 @@ enum GoBitwiseOperator: Sendable, Equatable, CaseIterable {
     /// Whether an `.identifier` token holds an operator instead of a name.
     static func isOperatorSpelling(_ text: String) -> Bool {
         text == "|" || text == "^" || text == "&^" || text == "<<" || text == ">>"
+            || text == GoSpread.spelling
             || GoCompoundAssignment(spelling: text) != nil
     }
 
@@ -122,6 +126,34 @@ extension GoExpression {
             arguments.count == (bitwiseOperator.isUnary ? 1 : 2)
         else { return nil }
         return (bitwiseOperator, arguments)
+    }
+}
+
+/// The `...` that spreads a slice over the final argument of `append`, in the
+/// existing token and AST shapes like the operators above: the lexer emits it
+/// as an `.identifier` token carrying its spelling, and the parser represents
+/// `values...` as a `.call` whose callee is the reserved identifier `$spread`.
+/// The node's position is the `...`, which follows its operand.
+enum GoSpread {
+    static let spelling = "..."
+    static let calleeName = "$spread"
+}
+
+extension GoExpression {
+    /// Builds the call-shaped node for `operand...`.
+    static func spread(_ operand: GoExpression, position: GoSourcePosition) -> GoExpression {
+        .call(
+            callee: .identifier(GoSpread.calleeName, position: position),
+            arguments: [operand],
+            position: position)
+    }
+
+    /// The operand when this node encodes `operand...`.
+    var spreadOperand: GoExpression? {
+        guard case .call(.identifier(GoSpread.calleeName, _), let arguments, _) = self,
+            arguments.count == 1
+        else { return nil }
+        return arguments[0]
     }
 }
 

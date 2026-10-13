@@ -16,6 +16,13 @@ format, behavior and platform changes are recorded here.
   `time.Time` methods `Unix`, `UnixMilli`, `UnixNano`, `Sub`, `Add`, `Before`,
   `After`, and `Equal`.
 - Swiftix Go `errors.New`, and the builtin `copy`, which runs natively.
+- Swiftix Go `fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, and `fmt.Fprintf` with
+  Go's verbs, flags, width, precision, and markers for a mistake. `%#v`, `%T`,
+  `%p`, and argument indexes are not implemented and render as Go's bad-verb
+  markers; see "Formatting" in `docs/go-toolchain.md`.
+- `append(slice, values...)`: a slice, or a string for a `[]byte`, as the
+  final argument of `append`, appended natively. `gofmt` and `gofmt -r` print
+  and match the spread.
 - A multi-value `:=` may reuse variables of the same block when one name is
   new (`n, err := f()` after an earlier `err`).
 - `GoMapStorage.count`.

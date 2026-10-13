@@ -885,11 +885,11 @@ private struct Parser {
                 advance()
                 var arguments: [GoExpression] = []
                 if !check(.rightParen) {
-                    arguments.append(try parseExpression())
+                    arguments.append(try parseArgument())
                     while check(.comma) {
                         advance()
                         if check(.rightParen) { break }
-                        arguments.append(try parseExpression())
+                        arguments.append(try parseArgument())
                     }
                 }
                 try expect(.rightParen, message: "expected ')'")
@@ -1004,6 +1004,16 @@ private struct Parser {
         default:
             throw diagnostic("expected expression")
         }
+    }
+
+    /// One call argument. A trailing `...` makes it a spread node; the type
+    /// checker decides where one is allowed.
+    mutating func parseArgument() throws -> GoExpression {
+        let argument = try parseExpression()
+        guard case .identifier(GoSpread.spelling) = current.kind else { return argument }
+        let position = current.position
+        advance()
+        return .spread(argument, position: position)
     }
 
     mutating func parseFunctionLiteral() throws -> GoExpression {

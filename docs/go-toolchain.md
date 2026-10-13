@@ -41,12 +41,13 @@ go build -o hello .
 | Conversions | `int(x)`; `byte(x)`/`uint8(x)` (truncating); `string(x)` for an integer code point; `string(b)` and `[]byte(s)`; a named type to and from its underlying non-struct type |
 | Functions | Multiple and named returns, `return f()` forwarding of a multi-result call, function literals in `go` and `defer`, panic/recover, and methods |
 | Short declarations | A multi-value `:=` may reuse variables the same block already declares when at least one name is new (`n, err := f()` after an earlier `err`): the old variable is assigned, not shadowed |
-| Builtins | `len`, `cap`, `append`, `make`, `delete`, `close`, `panic`, `recover`, and `copy`. `copy(dst, src)` takes a slice or, for a `[]byte` destination, a string; it handles overlapping ranges and costs one VM instruction whatever the length |
+| Builtins | `len`, `cap`, `append`, `make`, `delete`, `close`, `panic`, `recover`, and `copy`. `copy(dst, src)` and `append(dst, src...)` take a slice or, for a `[]byte` destination, a string; they handle overlapping ranges and cost one VM instruction whatever the length |
 | Concurrency | Goroutines, buffered/unbuffered channels, select, and minimal Mutex/WaitGroup |
 | Runtime | Independent call stacks, managed heap, precise roots, and synchronous mark-sweep GC |
 | Maps | Hash-indexed: lookup, insertion, and `delete` are O(1) amortized. `range` visits entries in insertion order, so output never depends on a hash seed; a key that is deleted and set again moves to the end |
 | Tools | version/env/help, mod init, fmt, run, test, build, install, and clean -cache |
 | Standard library | fmt/errors/io/os, strings/strconv/sort, basic collections, testing/sync/time/context, and parts of net/net/http |
+| Formatting | `fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, and `fmt.Fprintf`, one VM instruction per call. See [Formatting](#formatting) |
 | Errors | `errors.New`; `io.EOF`; every library call that can fail returns an `error`, which a program can return, compare with `nil` or `io.EOF`, and read with `Error()`. A failed system call reads like Go's `*PathError`: `open /data/kv.aof: no such file or directory` |
 | `strings` | Native `Contains`, `Count`, `HasPrefix`, `HasSuffix`, `Index`, `Join`, `LastIndex`, `Repeat`, `Split`, and `TrimSpace` with Go semantics; each call costs a few VM instructions regardless of length |
 | `sort`, `strconv` | Native `sort.Strings` and `sort.Ints` (in place, byte order for strings, one VM instruction each) and `strconv.Itoa`/`Atoi` |
@@ -62,7 +63,7 @@ go build -o hello .
 - A single-value `x := v` and a multi-value `:=` without a new name are redeclarations, reported as `x redeclared in this block`.
 - Errors compare by message: two `errors.New` values with the same text are equal, where Go compares their identity.
 - Function values are limited to literals invoked by `go` and `defer`: there is no function type syntax, a function or a function-valued variable cannot be called through a variable, and a literal does not capture the locals of its enclosing function (pass them as arguments). These limits are the same inside one package and across packages.
-- Call results cannot be spread into another call's arguments (`f(g())` with a multi-result `g`), variadic functions and `iota` are not implemented, the blank identifier is accepted only in `:=` and `range`, an empty struct literal (`T{}`) and the address of a composite literal (`&T{...}`) are rejected, an interface method lists parameter types without names, and imports are written one per line (no parenthesized group).
+- Call results cannot be spread into another call's arguments (`f(g())` with a multi-result `g`), variadic functions and `iota` are not implemented (`values...` is accepted only as the final argument of `append`, after exactly one slice), the blank identifier is accepted only in `:=` and `range`, an empty struct literal (`T{}`) and the address of a composite literal (`&T{...}`) are rejected, an interface method lists parameter types without names, and imports are written one per line (no parenthesized group).
 - Unexported struct fields and methods of an imported package's type are not hidden from the importing package; only package-level names are checked for export. An unused import of a runtime package (`fmt`, `strings`, ...) is not diagnosed, although an unused import of a local package is.
 - Guest strings are always valid UTF-8, so `string(b)` for a `[]byte` repairs each invalid sequence to U+FFFD instead of keeping the bytes; `[]byte(s)` yields the exact UTF-8 bytes.
 - Constants are integers only. An untyped constant keeps adapting to `byte` and named integer types, but a constant shift such as `1 << n` has type `int`, and a `range` over a string yields `int` code points.
@@ -77,7 +78,8 @@ go build -o hello .
 
 - Generics, reflect, cgo, assembler, plugins, the host C ABI, and native machine-code linking.
 - Numeric types other than `int`, `byte`, and `uint8`: `int8`...`int64`, `uint`, `uint16`...`uint64`, `uintptr`, `rune`, floating-point, and complex types are rejected by name.
-- The `(n, err)` results of `fmt.Fprint`/`fmt.Fprintln`, and dereferencing an `os.File`.
+- The `(n, err)` results of `fmt.Fprint`/`fmt.Fprintln`/`fmt.Printf`/`fmt.Fprintf`, and dereferencing an `os.File`.
+- `fmt.Sprint`, `fmt.Sprintln`, `fmt.Sscanf` and the other scanning functions.
 - Benchmarking, coverage, profiling, `go vet`, `go work`, `go.sum`, and direct `GOPROXY` access.
 - `crypto/*`, `compress/*`, `archive/*`, and `math/big`.
 - Go binaries for other platforms or any path that bypasses Swiftix to access host files, processes, or networking.
@@ -198,7 +200,30 @@ SwiftixGoHost      host-file adapter and CLI
   restores cooked mode before its next prompt.
 - Exceeding a boundary must return a stable error rather than causing a host trap, infinite recursion, or unbounded allocation.
 
-The executable-image format and ABI have exact versions (format 10, ABI 10). Incompatible, corrupt, or incorrectly targeted images are rejected before launch. Module linking, compound assignment, short-declaration reuse, and the integer literal forms are compile-time features: they add no opcode and change neither version. The file, wall-clock, `errors`, and `copy` natives are reserved call names, so they change neither version as well; an image that calls one needs a runtime that provides it.
+The executable-image format and ABI have exact versions (format 10, ABI 10). Incompatible, corrupt, or incorrectly targeted images are rejected before launch. Module linking, compound assignment, short-declaration reuse, the `append` spread, and the integer literal forms are compile-time features: they add no opcode and change neither version. The file, wall-clock, `errors`, formatting, `copy`, and `append`-spread natives are reserved call names, so they change neither version as well; an image that calls one needs a runtime that provides it.
+
+### Formatting
+
+`fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, and `fmt.Fprintf` follow Go's `fmt` for the forms below. The cases in `GoFormatVerbTests` were run through Go 1.24.5 as well and print the same bytes.
+
+| Part | Supported |
+| --- | --- |
+| Verbs | `%v` `%+v` `%d` `%b` `%o` `%O` `%x` `%X` `%c` `%q` `%U` `%s` `%t` `%%`, and `%w` in `fmt.Errorf` |
+| Flags | `-`, `+`, `#` (with `x`, `X`, `o`, `b`, `q`, `U`), space, and `0` |
+| Width, precision | Decimal or `*` from an operand, capped at 1,000,000 as in Go; width counts code points |
+| Operands | Integers and bytes, strings, bools, `nil`, library errors (their message), `[]byte` (as text for `%s`, `%x`, `%q`), and slices, arrays, structs, and maps, to whose elements the verb is applied |
+| Mistakes | Go's markers: `%!d(string=hi)`, `%!d(MISSING)`, `%!(EXTRA int=1)`, `%!(NOVERB)`, `%!(BADWIDTH)`, `%!(BADPREC)` |
+
+What differs from Go:
+
+- `%#v`, `%T`, `%p`, and argument indexes (`%[1]d`) are not implemented. They render as Go's markers (`%!v(int=5)`, `%!T(int=5)`, `%!d(BADINDEX)`) instead of an approximation.
+- A program type's `String()` or `Error()` method is not called: the value prints by its fields. Library errors (`errors.New`, `fmt.Errorf`, failed calls) print their message.
+- `%w` formats like `%v`; there is no `errors.Unwrap`, `errors.Is`, or `errors.As`.
+- A map prints in insertion order, where Go sorts its keys, and a nil slice or map prints `<nil>`, as with `fmt.Println`. A pointer prints `&<pointer>`.
+- A byte is an `int` at run time, so a marker names it `int` where Go says `uint8`. A `[]byte` is text for `%s`, `%x`, and `%q` when the argument's static type is a byte slice; one stored in an interface variable first is formatted element by element.
+- `fmt.Printf` and `fmt.Fprintf` are statements; their `(n, err)` results are not available.
+
+A result is bounded by the string limit, and printed text by the run's output budget.
 
 ### Files
 

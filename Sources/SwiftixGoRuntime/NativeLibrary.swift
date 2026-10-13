@@ -26,6 +26,7 @@ enum GoNative {
         "$strconv.Itoa": 1,
         "$errors.New": 1,
         "$copy": 2,
+        "$append": 3,
     ]
 
     /// Reserved call names of the `time` natives, with their operand counts.

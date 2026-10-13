@@ -2019,6 +2019,201 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// Format `value` under one `fmt` directive. Slices, arrays, structs,
+        /// and maps apply the directive to each element, as Go does, so a
+        /// width pads every element and a wrong verb is marked per element.
+        /// `typeName` is the dynamic type an interface carried, and `limit`
+        /// bounds the text of one operand.
+        func formatOperand(
+            _ value: GoValue,
+            _ directive: GoFormat.Directive,
+            typeName: String? = nil,
+            limit: Int,
+            overflow: GoRuntimeError,
+            depth: Int = 0
+        ) throws -> String {
+            guard depth <= resourceLimits.maximumPointerDepth else { throw overflow }
+            /// The `%v` text of `value`, for a marker.
+            func plain() throws -> String {
+                try describe(value, heap: heap, maximumBytes: limit)
+            }
+            /// `prefix`, the formatted elements separated by spaces, `suffix`.
+            func aggregate(
+                _ prefix: String,
+                _ count: Int,
+                _ suffix: String,
+                element: (Int) throws -> String
+            ) throws -> String {
+                var parts = [prefix]
+                var byteCount = prefix.utf8.count + suffix.utf8.count
+                for index in 0..<count {
+                    let part = (index > 0 ? " " : "") + (try element(index))
+                    guard part.utf8.count <= limit - byteCount else { throw overflow }
+                    byteCount += part.utf8.count
+                    parts.append(part)
+                }
+                parts.append(suffix)
+                return parts.joined()
+            }
+            func nested(_ element: GoValue) throws -> String {
+                try formatOperand(
+                    element, directive, limit: limit, overflow: overflow, depth: depth + 1)
+            }
+            // `%#v` is not implemented; Go's bad-verb marker says so.
+            if directive.goSyntax {
+                if value == .nilValue { return GoFormat.badVerb(directive) }
+                return GoFormat.badVerb(
+                    directive,
+                    typeName: typeName ?? runtimeConcreteTypeName(value) ?? "value",
+                    value: try plain())
+            }
+
+            switch value {
+            case .interface(let boxed):
+                if boxed.typeName == GoFormat.byteSliceTypeName {
+                    let bytes = try sliceBytes(boxed.value)
+                    if let text = GoFormat.bytes(bytes, directive) { return text }
+                    return try aggregate("[", bytes.count, "]") { index in
+                        try nested(.int(Int64(bytes[index])))
+                    }
+                }
+                if boxed.typeName == "error", case .string(let message) = boxed.value {
+                    if let text = GoFormat.string(message, directive) { return text }
+                    // `%w` outside `fmt.Errorf` is a bad verb for the error
+                    // itself. Any other verb that is not for text reaches the
+                    // pointer to a struct that the error is: `&{...}`.
+                    if directive.verb == "w" {
+                        return GoFormat.badVerb(
+                            directive, typeName: "*errors.errorString", value: "&{\(message)}")
+                    }
+                    return "&{" + GoFormat.badVerb(directive, typeName: "string", value: message)
+                        + "}"
+                }
+                return try formatOperand(
+                    boxed.value, directive, typeName: boxed.typeName, limit: limit,
+                    overflow: overflow, depth: depth + 1)
+            case .int(let integer):
+                return GoFormat.integer(integer, directive)
+                    ?? GoFormat.badVerb(
+                        directive, typeName: typeName ?? "int", value: String(integer))
+            case .string(let text):
+                return GoFormat.string(text, directive)
+                    ?? GoFormat.badVerb(directive, typeName: typeName ?? "string", value: text)
+            case .bool(let flag):
+                return GoFormat.boolean(flag, directive)
+                    ?? GoFormat.badVerb(
+                        directive, typeName: typeName ?? "bool", value: flag ? "true" : "false")
+            case .nilValue:
+                return directive.verb == "v"
+                    ? GoFormat.pad("<nil>", directive) : GoFormat.badVerb(directive)
+            case .array(let elements):
+                return try aggregate("[", elements.count, "]") { try nested(elements[$0]) }
+            case .slice:
+                let elements = Array(try sliceElements(value))
+                return try aggregate("[", elements.count, "]") { try nested(elements[$0]) }
+            case .structure(let structure):
+                return try aggregate("{", structure.fields.count, "}") { index in
+                    let field = structure.fields[index]
+                    return (directive.labelsFields ? field.name + ":" : "")
+                        + (try nested(field.value))
+                }
+            case .map(let mapValue):
+                guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                else { throw GoRuntimeError.typeMismatch }
+                let entries = storage.entries
+                return try aggregate("map[", entries.count, "]") { index in
+                    (try nested(entries[index].key)) + ":" + (try nested(entries[index].value))
+                }
+            default:
+                // Pointers, channels, and library handles have one spelling.
+                guard directive.verb == "v" else {
+                    return GoFormat.badVerb(
+                        directive,
+                        typeName: typeName ?? runtimeConcreteTypeName(value) ?? "value",
+                        value: try plain())
+                }
+                return GoFormat.pad(try plain(), directive)
+            }
+        }
+
+        /// Run `fmt.Sprintf`, `fmt.Errorf`, `fmt.Printf`, or `fmt.Fprintf`.
+        /// The format follows the fixed operands, and its verbs consume the
+        /// rest. Returns `false` when `name` is not such a function.
+        func executeFormatNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let fixedCount = GoFormat.fixedArgumentCounts[name] else { return false }
+            guard argumentCount >= fixedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: fixedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            guard case .string(let format) = operands[fixedCount - 1] else {
+                throw GoRuntimeError.typeMismatch
+            }
+            let values = Array(operands[fixedCount...])
+
+            // A string result is bounded like any string, and printed text by
+            // what is left of the run's output budget.
+            let returnsText = name == "$fmt.Sprintf" || name == "$fmt.Errorf"
+            let limit: Int
+            let overflow: GoRuntimeError
+            if returnsText {
+                limit = resourceLimits.maximumStringBytes
+                overflow = .resourceLimitExceeded("string bytes")
+            } else {
+                limit = max(0, resourceLimits.maximumOutputBytes - outputBytesWritten)
+                overflow = .resourceLimitExceeded("output bytes")
+            }
+            let text = try GoFormat.render(
+                format,
+                operands: GoFormat.Operands(
+                    count: values.count,
+                    integer: { index in
+                        if case .int(let integer) = values[index] { return integer }
+                        return nil
+                    },
+                    format: { index, directive in
+                        try formatOperand(
+                            values[index], directive, limit: limit, overflow: overflow)
+                    },
+                    describe: { index in
+                        let value = values[index]
+                        if value == .nilValue { return "<nil>" }
+                        let text = try formatOperand(
+                            value, GoFormat.Directive(verb: "v"), limit: limit,
+                            overflow: overflow)
+                        var typeName = runtimeConcreteTypeName(value) ?? "value"
+                        if typeName == "error" { typeName = "*errors.errorString" }
+                        return typeName + "=" + text
+                    }),
+                wrapsErrors: name == "$fmt.Errorf",
+                limit: limit,
+                overflow: overflow)
+
+            switch name {
+            case "$fmt.Sprintf":
+                stack.append(.string(text))
+            case "$fmt.Errorf":
+                stack.append(errorValue(text))
+            case "$fmt.Printf":
+                try emit(text)
+            default:
+                var opened = false
+                if case .int(let handle) = operands[0], handle >= GoFiles.firstHandle {
+                    // Like `fmt.Fprint`, a closed file takes no output.
+                    guard openFiles[handle] != nil else { break }
+                    opened = true
+                }
+                guard let file = try resolveFile(operands[0]) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                try writeDescriptor(file.descriptor, text, opened: opened)
+            }
+            return true
+        }
+
         /// Run a `time` native. Operands and results are integers and bools.
         /// Returns `false` when `name` is not such a function.
         func executeTimeNative(_ name: String, argumentCount: Int) throws -> Bool {
@@ -2494,6 +2689,24 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
             }
+            /// The elements a `copy` or `append(slice, source...)` source
+            /// supplies, in an array of their own: reading them first makes an
+            /// overlapping move behave like Go's, in either direction.
+            func sourceElements(_ source: GoValue) throws -> [GoValue] {
+                switch source {
+                case .string(let text):
+                    return text.utf8.map { .int(Int64($0)) }
+                case .nilValue:
+                    return []
+                case .slice(let slice):
+                    let range = try validatedSliceRange(slice)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    return Array(backing[range])
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
+            }
             switch name {
             case "$bits.not":
                 guard case .int(let value) = try pop(&stack) else {
@@ -2546,25 +2759,72 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 stack.append(errorValue(message))
+            case "$append":
+                var zero = try pop(&stack)
+                let values = try sourceElements(try pop(&stack))
+                let base = try pop(&stack)
+                var elements: [GoValue] = []
+                var capacity = 0
+                if case .slice(let slice) = base {
+                    let range = try validatedSliceRange(slice)
+                    if values.isEmpty {
+                        // Nothing to add: the slice itself, as in Go.
+                        stack.append(base)
+                        break
+                    }
+                    let newLength = try checkedAdd(
+                        slice.length, values.count, resource: "slice elements")
+                    try requireCollectionCount(newLength, resource: "slice elements")
+                    if newLength <= slice.capacity {
+                        // The spare capacity is a window of the same backing
+                        // array, so other slices of it see the new elements.
+                        try storeElements(
+                            values,
+                            into: GoSliceValue(
+                                backing: slice.backing,
+                                start: range.upperBound,
+                                length: values.count,
+                                capacity: slice.capacity - slice.length,
+                                zeroValue: slice.zeroValue))
+                        stack.append(
+                            .slice(
+                                GoSliceValue(
+                                    backing: slice.backing, start: slice.start,
+                                    length: newLength, capacity: slice.capacity,
+                                    zeroValue: slice.zeroValue)))
+                        break
+                    }
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    elements = Array(backing[range])
+                    capacity = slice.capacity
+                    zero = slice.zeroValue
+                } else if base != .nilValue {
+                    throw GoRuntimeError.typeMismatch
+                } else if values.isEmpty {
+                    stack.append(.nilValue)
+                    break
+                }
+                elements.append(contentsOf: values)
+                let newLength = elements.count
+                try requireCollectionCount(newLength, resource: "slice elements")
+                // Double like a one-element append, but never past the
+                // collection limit while the new length still fits it.
+                let (doubled, overflow) = capacity.multipliedReportingOverflow(by: 2)
+                let newCapacity = max(
+                    newLength,
+                    min(overflow ? Int.max : doubled, resourceLimits.maximumCollectionElements))
+                elements.append(contentsOf: repeatElement(zero, count: newCapacity - newLength))
+                let cell = try heap.allocate(.array(elements))
+                stack.append(
+                    .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell), start: 0, length: newLength,
+                            capacity: newCapacity, zeroValue: zero)))
             case "$copy":
                 let source = try pop(&stack)
                 let destination = try pop(&stack)
-                // Reading the source into its own array first makes an
-                // overlapping copy behave like Go's, in either direction.
-                var values: [GoValue]
-                switch source {
-                case .string(let text):
-                    values = text.utf8.map { .int(Int64($0)) }
-                case .nilValue:
-                    values = []
-                case .slice(let slice):
-                    let range = try validatedSliceRange(slice)
-                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
-                    else { throw GoRuntimeError.typeMismatch }
-                    values = Array(backing[range])
-                default:
-                    throw GoRuntimeError.typeMismatch
-                }
+                var values = try sourceElements(source)
                 var copied = 0
                 if case .slice(let target) = destination {
                     copied = min(values.count, try validatedSliceRange(target).count)
@@ -2832,6 +3092,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeHostNative(name, argumentCount: argumentCount)
                                 || executeFileNative(name, argumentCount: argumentCount)
                                 || executeTimeNative(name, argumentCount: argumentCount)
+                                || executeFormatNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }
