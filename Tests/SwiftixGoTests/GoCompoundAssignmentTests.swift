@@ -152,11 +152,11 @@ struct GoCompoundAssignmentTests: GoTestHarness {
                 "f()",
                 declarations: one + "func three() (int, int, int) { return 1, 2, 3 }\nfunc f() (int, int) { return three() }")
                 == "too many return values")
-        // Results still cannot be spread into an argument list.
+        // As the arguments of a call they must match its parameters.
         #expect(
             goMainDiagnostic(
                 "fmt.Println(sum(two()))",
-                declarations: one + "func sum(a int, b int) int { return a + b }")
+                declarations: one + "func sum(a int, b int, c int) int { return a + b + c }")
                 == "not enough arguments in call to sum")
     }
 

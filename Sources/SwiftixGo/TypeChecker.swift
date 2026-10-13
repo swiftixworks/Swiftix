@@ -1220,17 +1220,12 @@ private struct FunctionChecker {
             .goStatement(let expression, let position):
             let keyword: String
             if case .deferStatement = statement { keyword = "defer" } else { keyword = "go" }
-            guard case .call(let callee, let arguments, let callPosition) = expression,
-                !(try isOperatorOrConversion(expression))
-            else {
+            guard case .call = expression, !(try isOperatorOrConversion(expression)) else {
                 throw GoDiagnostic(
                     position: position,
                     message: "expression in \(keyword) must be function call")
             }
-            if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
-                return
-            }
-            _ = try type(of: expression)
+            try checkCallStatement(expression)
         case .sendStatement: try checkSendStatement(statement)
         case .ifStatement: try checkIfStatement(statement)
         case .forStatement: try checkForStatement(statement)
@@ -1528,7 +1523,7 @@ private struct FunctionChecker {
         guard case .expression(let expression) = statement else {
             return
         }
-        guard case .call(let callee, let arguments, let callPosition) = expression else {
+        guard case .call = expression else {
             if case .unary(.receive, _, _) = expression {
                 _ = try type(of: expression)
                 return
@@ -1543,11 +1538,7 @@ private struct FunctionChecker {
                 position: expression.position,
                 message: "expression evaluated but not used")
         }
-        // A native call may discard all of its results as a statement.
-        if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
-            return
-        }
-        _ = try type(of: expression)
+        try checkCallStatement(expression)
     }
 
     private mutating func checkReturnValuesStatement(_ statement: GoStatement) throws {
@@ -1590,6 +1581,7 @@ private struct FunctionChecker {
         guard values.count <= expectedResults.count else {
             throw GoDiagnostic(position: position, message: "too many return values")
         }
+        if values.count == 1 { try rejectSeveralReturnValues(values[0]) }
         for (value, expected) in zip(values, expectedResults) {
             let actual = try type(of: value)
             guard try isAssignable(value, ofType: actual, to: expected) else {
@@ -1835,6 +1827,7 @@ private struct FunctionChecker {
             // Typed in functions of their own. This one calls itself for
             // every operand, so its frame is what each level of a nested
             // expression costs, and the cases of a call are most of it.
+            try requireSingleResult(of: expression)
             return try callType(
                 of: expression, callee: callee, arguments: arguments, position: position)
         case .unary: return try typeOfUnary(expression)
@@ -2180,6 +2173,9 @@ private struct FunctionChecker {
         of expression: GoExpression, callee: GoExpression, arguments: [GoExpression],
         position: GoSourcePosition
     ) throws -> GoType {
+        if try forwardsResults(arguments, to: callee) {
+            return try forwardedCallType(callee: callee, arguments: arguments)
+        }
         if case .functionLiteral = callee,
             case .function(let parameters, let results) = try type(of: callee)
         {
@@ -2993,6 +2989,260 @@ private struct FunctionChecker {
             throw GoDiagnostic(
                 position: expression.position, message: "use of untyped nil in assignment")
         }
+    }
+
+    // MARK: Calls of several results
+
+    /// Refuses the call `expression` where one value is wanted (an operand,
+    /// an element, an index, a condition, one value of a list) when it has
+    /// several results. Go does; to take the first would drop the others
+    /// without a word.
+    ///
+    /// This returns before the call is typed, so a call inside a call costs
+    /// the stack no frame for it.
+    mutating func requireSingleResult(of expression: GoExpression) throws {
+        guard case .call(let callee, let arguments, let position) = expression,
+            let results = severalResults(of: expression)
+        else { return }
+        // What is wrong with the call itself comes first, and a call that
+        // gives nothing is reported by what wanted its value.
+        guard
+            try callType(of: expression, callee: callee, arguments: arguments, position: position)
+                != .void
+        else { return }
+        throw GoDiagnostic(
+            position: expression.start,
+            message: "multiple-value \(calledName(callee))() (value of type "
+                + "(\(results.map(\.description).joined(separator: ", ")))) in single-value context")
+    }
+
+    /// `return f()` in a function of one result, where `f` has several: Go
+    /// counts the values, as it does for a list of them.
+    mutating func rejectSeveralReturnValues(_ value: GoExpression) throws {
+        guard case .call(let callee, let arguments, let position) = value,
+            severalResults(of: value) != nil
+        else { return }
+        // What is wrong with the call itself comes first.
+        _ = try callType(of: value, callee: callee, arguments: arguments, position: position)
+        throw GoDiagnostic(position: value.start, message: "too many return values")
+    }
+
+    /// The results of the call `expression` when it has several.
+    mutating func severalResults(of expression: GoExpression) -> [GoType]? {
+        guard case .call(let callee, _, _) = expression, let results = calleeResults(callee),
+            results.count > 1
+        else { return nil }
+        return results
+    }
+
+    /// The results of a call of `callee`, told from the callee alone, or nil
+    /// where it is nothing that says them: a builtin, a conversion, and most
+    /// of the library, which give one value or none. The arguments are not
+    /// looked at, so asking costs no second check of them.
+    mutating func calleeResults(_ callee: GoExpression) -> [GoType]? {
+        switch callee {
+        case .identifier(let name, _):
+            if let binding = lookup(name) { return functionResults(binding.type) }
+            return functionSignatures[name]?.results
+        case .selector(let base, let name, _):
+            return selectedResults(base: base, name: name, callee: callee)
+        case .functionLiteral(_, _, let resultTypes, _, _):
+            return try? resultTypes.map { try declaredType($0) }
+        default:
+            // What an index, a call, or an assertion gives may be a function.
+            return calledType(callee).flatMap { functionResults($0) }
+        }
+    }
+
+    /// The results of `base.name(...)`, in the order `callType` looks: a
+    /// function of a package, a method expression, then a method or a field
+    /// of the value `base` is.
+    mutating func selectedResults(
+        base: GoExpression, name: String, callee: GoExpression
+    ) -> [GoType]? {
+        if case .identifier(let packageName, _) = base, lookup(packageName) == nil {
+            if importedPaths.contains(packageName),
+                let native = GoStandardLibrary.nativeFunction(package: packageName, member: name)
+            {
+                return native.results
+            }
+            if importedPackage(named: base) != nil,
+                let function = GoStandardLibrary.resolve(package: packageName, member: name)
+            {
+                return function.severalResults
+            }
+            if let function = resolvePackageExport(packageName)?.functions[name] {
+                return function.results
+            }
+        }
+        if let method = try? methodExpressionType(base: base, name: name, position: callee.position) {
+            return functionResults(method)
+        }
+        guard let baseType = calledType(base) else { return nil }
+        if let native = GoStandardLibrary.method(of: baseType, named: name) {
+            return native.results
+        }
+        switch (baseType, name) {
+        case (.named("net.Conn"), "Read"), (.named("net.Conn"), "Write"):
+            return [.int, GoPredeclared.errorType]
+        case (.named("net.Listener"), "Accept"):
+            return [.named("net.Conn"), GoPredeclared.errorType]
+        default:
+            break
+        }
+        if let signature = methodSignature(of: baseType, named: name) { return signature.results }
+        if case .interface(let methods) = underlying(baseType),
+            let method = methods.first(where: { $0.name == name })
+        {
+            return method.results
+        }
+        return structFields(of: baseType)?.first { $0.name == name }
+            .flatMap { functionResults($0.type) }
+    }
+
+    func functionResults(_ type: GoType) -> [GoType]? {
+        guard case .function(_, let results) = underlying(type) else { return nil }
+        return results
+    }
+
+    /// The type of `expression` where a call selects from it or calls it.
+    /// When it is a call itself, of something that says its results, the
+    /// first of them is its type: the call was checked where it stands, and
+    /// to check it once more for each link of `a.b(x).c(y).d(z)` would cost
+    /// twice as much with every link.
+    mutating func calledType(_ expression: GoExpression) -> GoType? {
+        if case .call(let callee, _, _) = expression, let results = calleeResults(callee) {
+            return results.first
+        }
+        return try? type(of: expression)
+    }
+
+    /// How a message names a call of `callee`: by what is called, where Go
+    /// prints the call as the source has it.
+    func calledName(_ callee: GoExpression) -> String {
+        switch callee {
+        case .identifier(let name, _):
+            return name
+        case .selector(let base, let name, _):
+            if let packageName = importedPackage(named: base) { return packageName + "." + name }
+            if let receiver = GoMethodExpression.receiver(of: base),
+                lookup(receiver.typeName) == nil, typeDefinitions[receiver.typeName] != nil
+            {
+                return GoMethodExpression.spelling(receiver, name)
+            }
+            return name
+        default:
+            return "function"
+        }
+    }
+
+    /// Whether a call of `callee` with `arguments` passes on the results of
+    /// its only argument: a call of several results, which Go passes in
+    /// order. `f(g()...)` is neither that nor a slice to spread.
+    mutating func forwardsResults(
+        _ arguments: [GoExpression], to callee: GoExpression
+    ) throws -> Bool {
+        guard arguments.count == 1 else { return false }
+        if let operand = arguments[0].spreadOperand, case .call(let inner, _, _) = operand,
+            let results = severalResults(of: operand)
+        {
+            throw GoDiagnostic(
+                position: callee.start,
+                message: "cannot use ... with \(results.count)-valued \(calledName(inner))()")
+        }
+        return try GoForwardedResults.call(in: arguments, of: callee) != nil
+            && severalResults(of: arguments[0]) != nil && conversionTarget(callee) == nil
+    }
+
+    /// The arguments of a call that passes on the results of its only
+    /// argument, `arguments[0]`. The inner call is checked here, once, and
+    /// each result is a name in a scope this pushes, which the caller pops
+    /// when it has checked the call.
+    ///
+    /// `position` is where Go reports results that do not fit in number: at
+    /// the inner call, or at the builtin that was given them.
+    mutating func forwardedArguments(
+        _ arguments: [GoExpression], to callee: GoExpression
+    ) throws -> (arguments: [GoExpression], position: GoSourcePosition) {
+        guard let inner = GoForwardedResults.call(in: arguments, of: callee) else {
+            // No such call: the arguments as they are, in a scope to pop.
+            scopes.append([:])
+            return (arguments, callee.position)
+        }
+        let operands = pushForwarded(
+            try callResultTypes(
+                callee: inner.callee, arguments: inner.arguments, position: inner.position),
+            at: arguments[0].start)
+        if case .identifier(let name, let namePosition) = callee, lookup(name) == nil,
+            functionSignatures[name] == nil
+        {
+            return (operands, namePosition)
+        }
+        return (operands, arguments[0].start)
+    }
+
+    /// Pushes a scope that names each of `results`, and returns the names
+    /// as operands at `position`. They are variables, not constants: a
+    /// result has the type its function gave it.
+    mutating func pushForwarded(
+        _ results: [GoType], at position: GoSourcePosition
+    ) -> [GoExpression] {
+        var scope: [String: Binding] = [:]
+        var operands: [GoExpression] = []
+        for (index, result) in results.enumerated() {
+            let name = GoForwardedResults.name(index)
+            scope[name] = Binding(type: result, isConstant: false)
+            operands.append(.identifier(name, position: position))
+        }
+        scopes.append(scope)
+        return operands
+    }
+
+    /// `callType` of a call that passes on the results of its only argument.
+    mutating func forwardedCallType(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> GoType {
+        let forwarded = try forwardedArguments(arguments, to: callee)
+        defer { scopes.removeLast() }
+        return try callType(
+            of: .call(callee: callee, arguments: forwarded.arguments, position: forwarded.position),
+            callee: callee, arguments: forwarded.arguments, position: forwarded.position)
+    }
+
+    /// `callResultTypes` of such a call.
+    mutating func forwardedCallResults(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> [GoType] {
+        let forwarded = try forwardedArguments(arguments, to: callee)
+        defer { scopes.removeLast() }
+        return try callResultTypes(
+            callee: callee, arguments: forwarded.arguments, position: forwarded.position)
+    }
+
+    /// A call that is a statement, or what a `go` or a `defer` starts: its
+    /// results are dropped, however many there are.
+    mutating func checkCallStatement(_ expression: GoExpression) throws {
+        guard case .call(let callee, let arguments, let position) = expression else { return }
+        if try forwardsResults(arguments, to: callee) {
+            try checkForwardedCallStatement(callee: callee, arguments: arguments)
+            return
+        }
+        // A native call may discard all of its results as a statement.
+        if try nativeCall(callee: callee, arguments: arguments, position: position) != nil {
+            return
+        }
+        _ = try callType(of: expression, callee: callee, arguments: arguments, position: position)
+    }
+
+    /// `checkCallStatement` of a call that passes on the results of its only
+    /// argument.
+    mutating func checkForwardedCallStatement(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws {
+        let forwarded = try forwardedArguments(arguments, to: callee)
+        defer { scopes.removeLast() }
+        try checkCallStatement(
+            .call(callee: callee, arguments: forwarded.arguments, position: forwarded.position))
     }
 
     static func mismatch(variables: Int, values: Int) -> String {
@@ -3857,6 +4107,9 @@ private struct FunctionChecker {
         arguments: [GoExpression],
         position: GoSourcePosition
     ) throws -> [GoType] {
+        if try forwardsResults(arguments, to: callee) {
+            return try forwardedCallResults(callee: callee, arguments: arguments)
+        }
         if case .identifier(let name, let namePosition) = callee {
             if let binding = lookup(name),
                 let results = try resultsOfCall(

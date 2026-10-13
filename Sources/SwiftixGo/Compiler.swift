@@ -2049,8 +2049,18 @@ private struct IRLowerer {
 
     mutating func lowerDeferStatement(_ statement: GoStatement) throws {
         guard case .deferStatement(let expression, let position) = statement else { return }
-        guard case .call(let callee, let arguments, _) = expression else {
+        guard case .call(let callee, let arguments, let callPosition) = expression else {
             throw GoDiagnostic(position: position, message: "defer requires function call")
+        }
+        if let forwarded = try forwardedCall(callee: callee, arguments: arguments) {
+            // The inner call is made now; its results wait with the call.
+            try lowerDeferStatement(
+                .deferStatement(
+                    expression: .call(
+                        callee: forwarded.callee, arguments: forwarded.arguments,
+                        position: callPosition),
+                    position: position))
+            return
         }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.deferCall(
@@ -2135,8 +2145,17 @@ private struct IRLowerer {
 
     mutating func lowerGoStatement(_ statement: GoStatement) throws {
         guard case .goStatement(let expression, let position) = statement else { return }
-        guard case .call(let callee, let arguments, _) = expression else {
+        guard case .call(let callee, let arguments, let callPosition) = expression else {
             throw GoDiagnostic(position: position, message: "go requires function call")
+        }
+        if let forwarded = try forwardedCall(callee: callee, arguments: arguments) {
+            try lowerGoStatement(
+                .goStatement(
+                    expression: .call(
+                        callee: forwarded.callee, arguments: forwarded.arguments,
+                        position: callPosition),
+                    position: position))
+            return
         }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.spawn(
@@ -2568,7 +2587,14 @@ private struct IRLowerer {
     }
 
     mutating func lowerExpressionStatement(_ expression: GoExpression) throws {
-        if case .call(let callee, let arguments, _) = expression {
+        if case .call(let callee, let arguments, let position) = expression {
+            if let forwarded = try forwardedCall(callee: callee, arguments: arguments) {
+                try lowerExpressionStatement(
+                    .call(
+                        callee: forwarded.callee, arguments: forwarded.arguments,
+                        position: position))
+                return
+            }
             if let native = nativeFunction(for: callee),
                 let symbol = native.function.statementSymbol
             {
@@ -2595,6 +2621,9 @@ private struct IRLowerer {
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> Int? {
+        if let forwarded = try lowerForwardingCall(callee: callee, arguments: arguments) {
+            return forwarded
+        }
         if let operation = GoExpression.call(
             callee: callee, arguments: arguments, position: callee.position
         ).bitwiseOperation {
@@ -3206,6 +3235,11 @@ private struct IRLowerer {
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> [Int]? {
+        if let forwarded = try lowerForwardingMultiReturnCall(
+            callee: callee, arguments: arguments)
+        {
+            return forwarded
+        }
         if let results = try lowerNativeCall(callee: callee, arguments: arguments) {
             return results
         }
@@ -3884,6 +3918,102 @@ private struct IRLowerer {
         let name = "$pinned.\(temporary)"
         scopes[scopes.count - 1][name] = LoweredBinding(register: temporary, type: valueType)
         return .identifier(name, position: expression.position)
+    }
+
+    // MARK: Call results as arguments
+
+    /// The call to lower in place of `callee(arguments)` when its only
+    /// argument is a call of several results, which Go passes in order: the
+    /// inner call is made here, and its results are the arguments, by name.
+    /// Nil for every other call. See `GoForwardedResults`.
+    ///
+    /// Go makes the calls of an expression in the order the source has
+    /// them, so the calls `callee` is made of come first. What else it reads
+    /// (the variable that holds the function, a receiver, an element) it
+    /// reads when the call is made, after the inner call has run.
+    mutating func forwardedCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> (callee: GoExpression, arguments: [GoExpression])? {
+        guard let inner = GoForwardedResults.call(in: arguments, of: callee),
+            conversionTarget(callee) == nil
+        else { return nil }
+        let types = multiReturnTypes(callee: inner.callee)
+        guard types.count > 1 else { return nil }
+        let function = try pinningCalls(in: callee)
+        guard
+            let results = try lowerMultiReturnCall(
+                callee: inner.callee, arguments: inner.arguments),
+            results.count == types.count
+        else {
+            throw GoDiagnostic(
+                position: inner.position, message: "function does not return multiple values")
+        }
+        var operands: [GoExpression] = []
+        for (register, type) in zip(results, types) {
+            // As `pin` names a value: the register is the name's own.
+            let name = "$pinned.\(register)"
+            scopes[scopes.count - 1][name] = LoweredBinding(register: register, type: type)
+            operands.append(.identifier(name, position: inner.position))
+        }
+        return (function, operands)
+    }
+
+    /// What `lowerCall` gives for such a call, or nil for any other.
+    mutating func lowerForwardingCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> Int?? {
+        guard let forwarded = try forwardedCall(callee: callee, arguments: arguments) else {
+            return nil
+        }
+        return .some(try lowerCall(callee: forwarded.callee, arguments: forwarded.arguments))
+    }
+
+    /// What `lowerMultiReturnCall` gives for such a call, or nil for any
+    /// other.
+    mutating func lowerForwardingMultiReturnCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> [Int]?? {
+        guard let forwarded = try forwardedCall(callee: callee, arguments: arguments) else {
+            return nil
+        }
+        return .some(
+            try lowerMultiReturnCall(callee: forwarded.callee, arguments: forwarded.arguments))
+    }
+
+    /// `callee` with the calls and channel receives it is made of made now,
+    /// each a name for what it gave. A variable, a field, and an element
+    /// stay as they are written, to be read when the call is made.
+    mutating func pinningCalls(in callee: GoExpression) throws -> GoExpression {
+        switch callee {
+        case .selector(let base, let name, let position):
+            return .selector(base: try pinningCalls(in: base), name: name, position: position)
+        case .index(let base, let index, let position):
+            return .index(
+                base: try pinningCalls(in: base), index: try pinningCalls(in: index),
+                position: position)
+        case .typeAssertion(let base, let type, let position):
+            return .typeAssertion(base: try pinningCalls(in: base), type: type, position: position)
+        case .unary(.receive, _, _), .compositeLiteral, .unary(.address, .compositeLiteral, _):
+            // `&T{...}` is a new variable each time, and stays one.
+            return try pin(callee)
+        case .unary(let unaryOperator, let operand, let position):
+            return .unary(
+                operator: unaryOperator, operand: try pinningCalls(in: operand), position: position)
+        case .call(let function, let operands, let position):
+            // An operator and a conversion are written as calls and call
+            // nothing themselves.
+            guard callee.bitwiseOperation != nil || conversionTarget(function) != nil else {
+                return try pin(callee)
+            }
+            return .call(
+                callee: function, arguments: try operands.map { try pinningCalls(in: $0) },
+                position: position)
+        case .binary, .slicing:
+            // `&&` and `||` decide what is evaluated: one value for the lot.
+            return callee.isRepeatable ? callee : try pin(callee)
+        default:
+            return callee
+        }
     }
 
     mutating func store(_ value: Int, to target: GoExpression) throws {

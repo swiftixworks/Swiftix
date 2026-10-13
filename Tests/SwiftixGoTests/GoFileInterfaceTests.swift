@@ -222,7 +222,7 @@ struct GoFileInterfaceTests: GoTestHarness {
             diagnostic("n := os.Stdout.Write([]byte(\"x\"))\nfmt.Println(n)")
                 == "multiple-value Write() in single-value context")
         #expect(
-            diagnostic("fmt.Println(os.Stdout.WriteString(\"x\"))")
+            diagnostic("fmt.Println(1 + os.Stdout.WriteString(\"x\"))")
                 == "multiple-value os.File.WriteString() in single-value context")
         #expect(diagnostic("os.Stdout.Write(\"x\")") == "cannot use string as []byte value")
         #expect(diagnostic("os.Stdout.Write([]int{1})") == "cannot use []int as []byte value")
