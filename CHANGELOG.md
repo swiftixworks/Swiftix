@@ -133,6 +133,25 @@ format, behavior and platform changes are recorded here.
 - `(*T)(x)`, the conversion to a pointer type, and the conversion of `nil` to
   a slice, map, or pointer type (`[]int(nil)`, `map[string]int(nil)`,
   `(*T)(nil)`).
+- Swiftix Go `time.Duration`: the named integer type of Go, in declarations,
+  fields, parameters, results, maps, slices, and channels, with `String` in
+  Go's format (`1.5s`, `2m0s`, `1h0m0s`, `150ms`, `1.5µs`, `0s`),
+  `Nanoseconds`, `Microseconds`, `Milliseconds`, `Round`, `Truncate`, and
+  `Abs`, on a value or a pointer and as method values. `var d time.Duration`
+  was `undefined: time.Duration`.
+- `time.Minute` and `time.Hour`, `time.Until`, and `time.ParseDuration` with
+  Go's errors.
+- A duration held by an interface keeps its type: it asserts as
+  `time.Duration`, implements the interfaces its methods satisfy, and a panic
+  with one prints its text.
+- The results of a call are the arguments of another, `f(g())`, where `g()`
+  is the only argument: for a function, a method, a method of an interface
+  value, a function value, a literal called in place, a method value and a
+  method expression, a variadic parameter, the `fmt` printers
+  (`fmt.Printf(format())`), the other functions of the library, and `append`,
+  `copy`, and `delete`; in `go`, `defer`, declarations, `return`, and nested.
+  The inner call runs once, in Go's order. `g(f())` was refused with `not
+  enough arguments in call to g`.
 
 
 ### Changed
@@ -276,6 +295,24 @@ format, behavior and platform changes are recorded here.
   written in. An unoptimized build used more than a tenth of a 512 KB thread's
   stack for every nested statement; twenty nested statements and twelve nested
   literals now compile there.
+- The units of `time`, `time.Since`, and `t.Sub` are durations, and
+  `time.Sleep`, `time.After`, `time.Tick`, `t.Add`, and `context.WithTimeout`
+  take one. An untyped constant still becomes a duration (`time.Sleep(100)`,
+  `d * 2`); an `int` does not, as in Go. `n := 3; time.Sleep(n)` compiled and
+  ran and is now `cannot use int as time.Duration value in argument to
+  time.Sleep`; `var timeout int = 5 * time.Second` is now `cannot use
+  time.Duration as int value`; `time.Sleep(n * time.Millisecond)` is now
+  `mismatched types int and time.Duration`. Write `time.Duration(n) *
+  time.Millisecond`, which compiles to the same instructions.
+- `fmt` prints a duration as Go does: `fmt.Printf("%T %v %d\n", time.Second,
+  time.Second, time.Second)` printed `int 1000000000 1000000000` and prints
+  `time.Duration 1s 1000000000`. A program that prints a duration or converts
+  one to an interface compiles to a different image; every other program
+  compiles to the image it had. An interface value holding `time.Second` no
+  longer asserts as an `int`.
+- Results that do not fit the parameters of the call they are passed to are
+  reported at the inner call, where Go reports them. `g(f())` with `func g(n
+  int)` and a `f` of two results compiled and printed with the first.
 
 
 ### Fixed
@@ -349,6 +386,20 @@ format, behavior and platform changes are recorded here.
   and function types are assignable the same way.
 - `[]int(nil)` was `cannot convert nil to type []int`, and `(*T)(x)` was
   `unsupported function call`.
+- `fmt.Println(f())` prints every result of `f`: it printed `1` where Go
+  prints `1 a`, `fmt.Printf(two())` printed `%!d(MISSING)`, `sum(f())` with
+  `func sum(xs ...int)` summed the first result alone, and
+  `fmt.Println(strconv.Atoi("12"))` printed `12` without the error.
+- A call of several results where one value is wanted is refused with
+  `multiple-value f() (value of type (int, string)) in single-value context`,
+  as Go refuses it. It compiled with the first result: `f() + 1`, `[]int{f()}`,
+  `m[f()]`, `if f() == 1`, `return f(), 1`, `n = f()`, a package-level `var n
+  = f()`, and `strconv.Atoi("5") + 1` all ran. `return f()` in a function of
+  one result is `too many return values`, and `v(f()...)` is `cannot use ...
+  with 2-valued f()`.
+- A library type named where a value is wanted says `time.Time (type) is not
+  an expression`, as Go does, instead of calling it a function of the run-time
+  library.
 
 
 ## 0.13.1 — 2026-10-08
