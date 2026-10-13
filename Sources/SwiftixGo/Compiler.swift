@@ -1389,803 +1389,875 @@ private struct IRLowerer {
     }
 
     mutating func lower(_ statement: GoStatement) throws {
+        // Each kind of statement is lowered by a function of its own. In
+        // one function, an unoptimized build keeps the locals of every
+        // case in every frame, and each nested statement cost the stack of
+        // all of them: four levels of nesting filled a 512 KB thread.
         switch statement {
-        case .declaration(let name, let explicitType, let expression, _, let position):
-            let variable = allocateRegister()
-            let value: Int
-            if let expression {
-                value = try lowerConverted(expression, to: explicitType.map(resolve))
-            } else if let explicitType {
-                value = try zeroValue(
-                    for: resolve(explicitType),
-                    position: position)
-            } else {
-                throw GoDiagnostic(position: position, message: "missing variable type or initialization")
-            }
-            let variableType = try explicitType.map(resolve) ?? expression.map { try type(of: $0) }
-            guard let variableType else {
-                throw GoDiagnostic(position: position, message: "missing variable type or initialization")
-            }
-            startVariable(variable, named: name, type: variableType)
-            operations.append(.copy(destination: variable, source: value))
-            scopes[scopes.count - 1][name] = LoweredBinding(
-                register: variable,
-                type: variableType)
-
-        case .assignment(let target, let expression, _):
-            if target.isBlank {
-                _ = try lower(expression)
-                return
-            }
-            let value = try lowerConverted(expression, to: try? type(of: target))
-            try store(value, to: target)
-
-        case .multiDeclaration(let names, let expression, let position):
-            if let variables = expression.variables {
-                if variables.isConstant {
-                    for (name, value) in zip(names, variables.values) {
-                        try lower(
-                            .declaration(
-                                name: name, explicitType: variables.type, expression: value,
-                                isConstant: true, position: position))
-                    }
-                    return
-                }
-                try lowerVariables(
-                    names, type: variables.type, values: variables.values, position: position)
-                return
-            }
-            if let values = expression.valueList {
-                // Every value is read before a name is bound or assigned, so
-                // `a, b := b, a` sees the old values.
-                var temporaries: [(register: Int, type: GoType)] = []
-                for (name, value) in zip(names, values) {
-                    let existing = name == GoValueList.blank ? nil : scopes[scopes.count - 1][name]
-                    let temporary = allocateRegister()
-                    let source = try lowerConverted(value, to: existing?.type)
-                    let valueType = try existing?.type ?? type(of: value)
-                    // A new name's temporary becomes its variable.
-                    if existing == nil { startVariable(temporary, named: name, type: valueType) }
-                    operations.append(.copy(destination: temporary, source: source))
-                    temporaries.append((temporary, valueType))
-                }
-                for (name, temporary) in zip(names, temporaries) where name != GoValueList.blank {
-                    if let existing = scopes[scopes.count - 1][name] {
-                        operations.append(
-                            .copy(destination: existing.register, source: temporary.register))
-                    } else {
-                        scopes[scopes.count - 1][name] = LoweredBinding(
-                            register: temporary.register, type: temporary.type)
-                    }
-                }
-                return
-            }
-            if let statements = GoStatement.redeclaration(
-                names: names, expression: expression, position: position,
-                declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
-            {
-                for statement in statements { try lower(statement) }
-                return
-            }
-            if case .unary(.receive, let channel, _) = expression,
-                case .channel(_, let elementType) = underlying(try type(of: channel))
-            {
-                guard names.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "channel receive returns two values")
-                }
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: elementType, position: expression.position)
-                operations.append(.receiveChannel(
-                    destination: value,
-                    okDestination: ok,
-                    channel: try lower(channel),
-                    zero: zero))
-                let registers = [value, ok]
-                let types = [elementType, GoType.bool]
-                for index in names.indices {
-                    let name = names[index]
-                    let variable = allocateRegister()
-                    startVariable(variable, named: name, type: types[index])
-                    operations.append(.copy(destination: variable, source: registers[index]))
-                    scopes[scopes.count - 1][name] = LoweredBinding(
-                        register: variable, type: types[index])
-                }
-                return
-            }
-            if case .index(let base, let key, _) = expression,
-                case .map(_, let valueType) = underlying(try type(of: base))
-            {
-                guard names.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "map index returns two values")
-                }
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: valueType, position: expression.position)
-                operations.append(.getMapIndex(
-                    destination: value, okDestination: ok,
-                    base: try lower(base), key: try lower(key), zero: zero))
-                let registers = [value, ok]
-                let types: [GoType] = [valueType, .bool]
-                for index in names.indices {
-                    let variable = allocateRegister()
-                    startVariable(variable, named: names[index], type: types[index])
-                    operations.append(.copy(destination: variable, source: registers[index]))
-                    scopes[scopes.count - 1][names[index]] = LoweredBinding(
-                        register: variable, type: types[index])
-                }
-                return
-            }
-            if case .typeAssertion(let base, let assertedType, _) = expression {
-                guard names.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "type assertion returns two values")
-                }
-                let type = resolve(assertedType)
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: type, position: assertedType.position)
-                guard let targetName = assertedTypeName(type) else {
-                    throw GoDiagnostic(position: position, message: "unsupported asserted type")
-                }
-                operations.append(.typeAssert(
-                    destination: value, okDestination: ok, source: try lower(base),
-                    targetName: targetName, zero: zero))
-                let registers = [value, ok]
-                let bindingTypes: [GoType] = [type, .bool]
-                for index in names.indices {
-                    let name = names[index]
-                    let variable = allocateRegister()
-                    startVariable(variable, named: name, type: bindingTypes[index])
-                    operations.append(.copy(destination: variable, source: registers[index]))
-                    scopes[scopes.count - 1][name] = LoweredBinding(
-                        register: variable, type: bindingTypes[index])
-                }
-                return
-            }
-            guard case .call(let callee, let arguments, _) = expression else {
-                throw GoDiagnostic(position: position, message: "multi-value requires function call")
-            }
-            guard let results = try lowerMultiReturnCall(callee: callee, arguments: arguments) else {
-                throw GoDiagnostic(position: position, message: "function does not return multiple values")
-            }
-            let resultTypes = multiReturnTypes(callee: callee)
-            for (index, (name, register)) in zip(names, results).enumerated() {
-                let variable = allocateRegister()
-                let bindingType = index < resultTypes.count ? resultTypes[index] : .void
-                startVariable(variable, named: name, type: bindingType)
-                operations.append(.copy(destination: variable, source: register))
-                scopes[scopes.count - 1][name] = LoweredBinding(
-                    register: variable,
-                    type: bindingType)
-            }
-
-        case .multiAssignment(let targets, let expression, let position):
-            if let values = expression.valueList {
-                // Go reads the index and pointer operands on the left and
-                // every value on the right first, then assigns in order.
-                let pinnedTargets = try targets.map { try pinned($0) }
-                var temporaries: [Int] = []
-                for (target, value) in zip(targets, values) {
-                    let temporary = allocateRegister()
-                    operations.append(
-                        .copy(
-                            destination: temporary,
-                            source: try lowerConverted(
-                                value, to: target.isBlank ? nil : try? type(of: target))))
-                    temporaries.append(temporary)
-                }
-                for (target, temporary) in zip(pinnedTargets, temporaries) {
-                    try store(temporary, to: target)
-                }
-                return
-            }
-            if case .unary(.receive, let channel, _) = expression,
-                case .channel(_, let elementType) = underlying(try type(of: channel))
-            {
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "channel receive returns two values")
-                }
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: elementType, position: expression.position)
-                operations.append(.receiveChannel(
-                    destination: value,
-                    okDestination: ok,
-                    channel: try lower(channel),
-                    zero: zero))
-                for (target, register) in zip(targets, [value, ok]) {
-                    try store(register, to: target)
-                }
-                return
-            }
-            if case .index(let base, let key, _) = expression,
-                case .map(_, let valueType) = underlying(try type(of: base))
-            {
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "map index returns two values")
-                }
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: valueType, position: expression.position)
-                operations.append(.getMapIndex(
-                    destination: value, okDestination: ok,
-                    base: try lower(base), key: try lower(key), zero: zero))
-                for (target, register) in zip(targets, [value, ok]) {
-                    try store(register, to: target)
-                }
-                return
-            }
-            if case .typeAssertion(let base, let assertedType, _) = expression {
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(position: position, message: "type assertion returns two values")
-                }
-                let type = resolve(assertedType)
-                let value = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: type, position: assertedType.position)
-                guard let targetName = assertedTypeName(type) else {
-                    throw GoDiagnostic(position: position, message: "unsupported asserted type")
-                }
-                operations.append(.typeAssert(
-                    destination: value, okDestination: ok, source: try lower(base),
-                    targetName: targetName, zero: zero))
-                for (target, register) in zip(targets, [value, ok]) {
-                    try store(register, to: target)
-                }
-                return
-            }
-            guard case .call(let callee, let arguments, _) = expression else {
-                throw GoDiagnostic(position: position, message: "multi-value requires function call")
-            }
-            guard let results = try lowerMultiReturnCall(callee: callee, arguments: arguments) else {
-                throw GoDiagnostic(position: position, message: "function does not return multiple values")
-            }
-            let types = multiReturnTypes(callee: callee)
-            for (index, (target, register)) in zip(targets, results).enumerated() {
-                try store(
-                    converted(
-                        register, from: index < types.count ? types[index] : nil,
-                        to: try? type(of: target)),
-                    to: target)
-            }
-
-        case .increment(let target, let incrementOperator, _):
-            let current = try lower(target)
-            let one = constant(.int(1))
-            let result = allocateRegister()
-            operations.append(
-                .binary(
-                    destination: result,
-                    operator: incrementOperator == .increment ? .add : .subtract,
-                    left: current,
-                    right: one))
-            try store(wrapByte(result, type: try? type(of: target)), to: target)
-
+        case .declaration: try lowerDeclaration(statement)
+        case .assignment: try lowerAssignment(statement)
+        case .multiDeclaration: try lowerMultiDeclaration(statement)
+        case .multiAssignment: try lowerMultiAssignment(statement)
+        case .increment: try lowerIncrement(statement)
         case .expression(let expression):
             try lowerExpressionStatement(expression)
-
-        case .returnValues(let values, _):
-            if values.isEmpty {
-                if resultRegisters.isEmpty {
-                    operations.append(.return)
-                } else {
-                    operations.append(.returnValues(sources: resultRegisters))
-                }
-            } else if values.count == 1, resultRegisters.count > 1,
-                case .call(let callee, let arguments, _) = values[0],
-                let results = try lowerMultiReturnCall(callee: callee, arguments: arguments)
-            {
-                // `return f()` forwards every result of a multi-result call.
-                operations.append(.returnValues(sources: results))
-            } else {
-                let sources = try values.enumerated().map { index, value in
-                    try lowerConverted(
-                        value, to: index < resultTypes.count ? resultTypes[index] : nil)
-                }
-                operations.append(.returnValues(sources: sources))
-            }
-
+        case .returnValues: try lowerReturnValues(statement)
         case .breakStatement(let position):
             guard let target = breakLabels.last else {
                 throw GoDiagnostic(position: position, message: "break is not in a loop or switch")
             }
             operations.append(.jump(target: target))
-
         case .continueStatement(let position):
             guard let target = continueLabels.last else {
                 throw GoDiagnostic(position: position, message: "continue is not in a loop")
             }
             operations.append(.jump(target: target))
+        case .deferStatement: try lowerDeferStatement(statement)
+        case .goStatement: try lowerGoStatement(statement)
+        case .sendStatement: try lowerSendStatement(statement)
+        case .ifStatement: try lowerIfStatement(statement)
+        case .forStatement: try lowerForStatement(statement)
+        case .forRangeStatement: try lowerForRangeStatement(statement)
+        case .switchStatement: try lowerSwitchStatement(statement)
+        case .selectStatement: try lowerSelectStatement(statement)
+        }
+    }
 
-        case .deferStatement(let expression, let position):
-            guard case .call(let callee, let arguments, _) = expression else {
-                throw GoDiagnostic(position: position, message: "defer requires function call")
-            }
-            if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
-                operations.append(.deferCall(
-                    function: wrapper.name, arguments: wrapper.registers))
-            } else if case .identifier(let functionName, _) = callee {
-                let registers = try lowerArguments(
-                    arguments, parameters: functionParameterTypes[functionName])
-                operations.append(.deferCall(
-                    function: functionSymbolNames[functionName] ?? functionName,
-                    arguments: registers))
-            } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
-                let name = runtimeLiteralName(literalPosition)
-                let registers = try arguments.map { try lower($0) }
-                operations.append(.deferCall(
-                    function: functionSymbolNames[name] ?? name,
-                    arguments: registers))
-            } else if case .selector(let base, let member, _) = callee,
-                case .identifier(let packageName, _) = base,
-                lookup(packageName) == nil,
-                globalInfos[packageName] == nil
-            {
-                if let newline = printCall(callee) {
-                    let registers = try lowerFormatOperands(arguments)
-                    operations.append(
-                        .deferCall(
-                            function: printWrapper(newline: newline, operandCount: registers.count),
-                            arguments: registers))
-                } else {
-                    let registers = try arguments.map { try lower($0) }
-                    operations.append(
-                        .deferCall(function: "\(packageName).\(member)", arguments: registers))
-                }
-            } else if case .selector(let base, let member, _) = callee,
-                let receiverType = try? type(of: base),
-                let receiverName = syncReceiverName(receiverType)
-            {
-                var receiver = try lower(base)
-                if case .pointer = receiverType {
-                    let dereferenced = allocateRegister()
-                    operations.append(.dereference(destination: dereferenced, pointer: receiver))
-                    receiver = dereferenced
-                }
-                operations.append(.deferCall(
-                    function: "$\(receiverName).\(member)",
-                    arguments: [receiver] + (try arguments.map { try lower($0) })))
-            } else if case .selector(let base, let member, _) = callee,
-                let info = try methodInfo(base: base, name: member)
-            {
-                let baseType = try type(of: base)
-                let receiver: Int
-                if case .pointer = info.receiverType {
-                    receiver = if case .pointer = baseType {
-                        try lower(base)
-                    } else {
-                        try lowerAddress(of: base)
-                    }
-                } else if case .pointer = baseType {
-                    let pointer = try lower(base)
-                    let value = allocateRegister()
-                    operations.append(.dereference(destination: value, pointer: pointer))
-                    receiver = value
-                } else {
-                    receiver = try lower(base)
-                }
-                let registers =
-                    [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
-                operations.append(.deferCall(
-                    function: info.functionName,
-                    arguments: registers))
-            } else {
-                throw GoDiagnostic(position: position, message: "unsupported defer expression")
-            }
+    mutating func lowerDeclaration(_ statement: GoStatement) throws {
+        guard case .declaration(let name, let explicitType, let expression, _, let position) = statement else {
+            return
+        }
+        let variable = allocateRegister()
+        let value: Int
+        if let expression {
+            value = try lowerConverted(expression, to: explicitType.map(resolve))
+        } else if let explicitType {
+            value = try zeroValue(
+                for: resolve(explicitType),
+                position: position)
+        } else {
+            throw GoDiagnostic(position: position, message: "missing variable type or initialization")
+        }
+        let variableType = try explicitType.map(resolve) ?? expression.map { try type(of: $0) }
+        guard let variableType else {
+            throw GoDiagnostic(position: position, message: "missing variable type or initialization")
+        }
+        startVariable(variable, named: name, type: variableType)
+        operations.append(.copy(destination: variable, source: value))
+        scopes[scopes.count - 1][name] = LoweredBinding(
+            register: variable,
+            type: variableType)
+    }
 
-        case .goStatement(let expression, let position):
-            guard case .call(let callee, let arguments, _) = expression else {
-                throw GoDiagnostic(position: position, message: "go requires function call")
-            }
-            if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
-                operations.append(.spawn(
-                    function: wrapper.name, arguments: wrapper.registers))
-            } else if case .identifier(let functionName, _) = callee {
-                operations.append(.spawn(
-                    function: functionSymbolNames[functionName] ?? functionName,
-                    arguments: try lowerArguments(
-                        arguments, parameters: functionParameterTypes[functionName])))
-            } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
-                let name = runtimeLiteralName(literalPosition)
-                operations.append(.spawn(
-                    function: functionSymbolNames[name] ?? name,
-                    arguments: try arguments.map { try lower($0) }))
-            } else if case .selector(let base, let member, _) = callee,
-                case .identifier(let packageName, _) = base,
-                lookup(packageName) == nil,
-                globalInfos[packageName] == nil
-            {
-                if let newline = printCall(callee) {
-                    let registers = try lowerFormatOperands(arguments)
-                    operations.append(
-                        .spawn(
-                            function: printWrapper(newline: newline, operandCount: registers.count),
-                            arguments: registers))
-                } else {
-                    operations.append(.spawn(
-                        function: "\(packageName).\(member)",
-                        arguments: try arguments.map { try lower($0) }))
-                }
-            } else if case .selector(let base, let member, _) = callee,
-                let receiverType = try? type(of: base),
-                let receiverName = syncReceiverName(receiverType)
-            {
-                var receiver = try lower(base)
-                if case .pointer = receiverType {
-                    let dereferenced = allocateRegister()
-                    operations.append(.dereference(destination: dereferenced, pointer: receiver))
-                    receiver = dereferenced
-                }
-                operations.append(.spawn(
-                    function: "$\(receiverName).\(member)",
-                    arguments: [receiver] + (try arguments.map { try lower($0) })))
-            } else if case .selector(let base, let member, _) = callee,
-                let info = try methodInfo(base: base, name: member)
-            {
-                let baseType = try type(of: base)
-                let receiver: Int
-                if case .pointer = info.receiverType {
-                    receiver = if case .pointer = baseType {
-                        try lower(base)
-                    } else {
-                        try lowerAddress(of: base)
-                    }
-                } else if case .pointer = baseType {
-                    let pointer = try lower(base)
-                    let value = allocateRegister()
-                    operations.append(.dereference(destination: value, pointer: pointer))
-                    receiver = value
-                } else {
-                    receiver = try lower(base)
-                }
-                operations.append(.spawn(
-                    function: info.functionName,
-                    arguments: [receiver]
-                        + (try lowerArguments(arguments, parameters: info.parameterTypes))))
-            } else {
-                throw GoDiagnostic(position: position, message: "unsupported go expression")
-            }
+    mutating func lowerAssignment(_ statement: GoStatement) throws {
+        guard case .assignment(let target, let expression, _) = statement else {
+            return
+        }
+        if target.isBlank {
+            _ = try lower(expression)
+            return
+        }
+        let value = try lowerConverted(expression, to: try? type(of: target))
+        try store(value, to: target)
+    }
 
-        case .sendStatement(let channel, let value, _):
-            var elementType: GoType?
-            if case .channel(_, let element)? = (try? type(of: channel)).map({ underlying($0) }) {
-                elementType = element
-            }
-            operations.append(.sendChannel(
-                channel: try lower(channel),
-                value: try lowerConverted(value, to: elementType)))
-
-        case .ifStatement(let condition, let thenBlock, let elseBlock, _):
-            let falseLabel = allocateLabel()
-            let conditionRegister = try lower(condition)
-            operations.append(.jumpIfFalse(condition: conditionRegister, target: falseLabel))
-            try lower(thenBlock)
-            if let elseBlock {
-                let endLabel = allocateLabel()
-                operations.append(.jump(target: endLabel))
-                operations.append(.label(falseLabel))
-                try lower(elseBlock)
-                operations.append(.label(endLabel))
-            } else {
-                operations.append(.label(falseLabel))
-            }
-
-        case .forStatement(let initializer, let condition, let post, let body, _):
-            scopes.append([:])
-            defer { scopes.removeLast() }
-            if let scoped = statement.initialized {
-                // An `if` or `switch` with an initializer runs once, and a
-                // `break` or `continue` inside it belongs to what encloses it.
-                try lower(scoped.initializer)
-                try lower(scoped.statement)
-                break
-            }
-            if let block = statement.block {
-                try lower(block)
-                break
-            }
-            if let initializer { try lower(initializer) }
-            // The variables of the clause, which each iteration has anew.
-            let iterationVariables = scopes[scopes.count - 1]
-                .filter { mayBeAddressed($0.key, type: $0.value.type) }
-                .sorted { $0.value.register < $1.value.register }
-            let conditionLabel = allocateLabel()
-            let postLabel = allocateLabel()
-            let endLabel = allocateLabel()
-            operations.append(.label(conditionLabel))
-            if let condition {
-                let conditionRegister = try lower(condition)
-                operations.append(.jumpIfFalse(condition: conditionRegister, target: endLabel))
-            }
-            breakLabels.append(endLabel)
-            continueLabels.append(postLabel)
-            try lower(body)
-            breakLabels.removeLast()
-            continueLabels.removeLast()
-            operations.append(.label(postLabel))
-            for variable in iterationVariables {
-                // Go copies each one before the post statement, so a pointer
-                // taken in the body keeps the value the iteration ended with.
-                let carried = allocateRegister()
-                operations.append(.copy(destination: carried, source: variable.value.register))
-                renewVariable(variable.value.register)
-                operations.append(.copy(destination: variable.value.register, source: carried))
-            }
-            if let post { try lower(post) }
-            operations.append(.jump(target: conditionLabel))
-            operations.append(.label(endLabel))
-
-        case .forRangeStatement(let indexName, let valueName, let collection, let body, _):
-            scopes.append([:])
-            defer { scopes.removeLast() }
-
-            // Evaluate the collection once. The VM snapshots its keys so map
-            // iteration and UTF-8 string offsets use Go-compatible values.
-            let collectionRegister = try lower(collection)
-            let collectionType = underlying(try type(of: collection))
-            if case .channel(_, let elementType) = collectionType {
-                let receiveLabel = allocateLabel()
-                let endLabel = allocateLabel()
-                operations.append(.label(receiveLabel))
-                let received = allocateRegister()
-                let ok = allocateRegister()
-                let zero = try zeroValue(for: elementType, position: collection.position)
-                if let indexName, mayBeAddressed(indexName, type: elementType) {
-                    renewVariable(received)
+    mutating func lowerMultiDeclaration(_ statement: GoStatement) throws {
+        guard case .multiDeclaration(let names, let expression, let position) = statement else {
+            return
+        }
+        if let variables = expression.variables {
+            if variables.isConstant {
+                for (name, value) in zip(names, variables.values) {
+                    try lower(
+                        .declaration(
+                            name: name, explicitType: variables.type, expression: value,
+                            isConstant: true, position: position))
                 }
-                operations.append(.receiveChannel(
-                    destination: received,
-                    okDestination: ok,
-                    channel: collectionRegister,
-                    zero: zero))
-                operations.append(.jumpIfFalse(condition: ok, target: endLabel))
-                if let indexName {
-                    scopes[scopes.count - 1][indexName] = LoweredBinding(
-                        register: received,
-                        type: elementType)
-                }
-                breakLabels.append(endLabel)
-                continueLabels.append(receiveLabel)
-                try lower(body)
-                breakLabels.removeLast()
-                continueLabels.removeLast()
-                operations.append(.jump(target: receiveLabel))
-                operations.append(.label(endLabel))
                 return
             }
-            let keysRegister = allocateRegister()
-            operations.append(.rangeKeys(destination: keysRegister, base: collectionRegister))
-            let lengthRegister = allocateRegister()
-            operations.append(.length(destination: lengthRegister, base: keysRegister))
-
-            // Create the index variable (always int, always starts at 0)
-            let indexRegister = allocateRegister()
-            let zero = constant(.int(0))
-            operations.append(.copy(destination: indexRegister, source: zero))
-
-            // Loop structure: conditionLabel → body → postLabel → jump conditionLabel → endLabel
-            let conditionLabel = allocateLabel()
-            let postLabel = allocateLabel()
-            let endLabel = allocateLabel()
-
-            operations.append(.label(conditionLabel))
-            // Condition: index < length
-            let conditionRegister = allocateRegister()
-            operations.append(
-                .binary(
-                    destination: conditionRegister,
-                    operator: .less,
-                    left: indexRegister,
-                    right: lengthRegister))
-            operations.append(.jumpIfFalse(condition: conditionRegister, target: endLabel))
-
-            let keyRegister = allocateRegister()
-            let keyType: GoType
-            if case .map(let mapKey, _) = collectionType { keyType = mapKey } else { keyType = .int }
-            if let indexName, mayBeAddressed(indexName, type: keyType) {
-                renewVariable(keyRegister)
+            try lowerVariables(
+                names, type: variables.type, values: variables.values, position: position)
+            return
+        }
+        if let values = expression.valueList {
+            // Every value is read before a name is bound or assigned, so
+            // `a, b := b, a` sees the old values.
+            var temporaries: [(register: Int, type: GoType)] = []
+            for (name, value) in zip(names, values) {
+                let existing = name == GoValueList.blank ? nil : scopes[scopes.count - 1][name]
+                let temporary = allocateRegister()
+                let source = try lowerConverted(value, to: existing?.type)
+                let valueType = try existing?.type ?? type(of: value)
+                // A new name's temporary becomes its variable.
+                if existing == nil { startVariable(temporary, named: name, type: valueType) }
+                operations.append(.copy(destination: temporary, source: source))
+                temporaries.append((temporary, valueType))
             }
-            operations.append(.getIndex(
-                destination: keyRegister, base: keysRegister, index: indexRegister))
+            for (name, temporary) in zip(names, temporaries) where name != GoValueList.blank {
+                if let existing = scopes[scopes.count - 1][name] {
+                    operations.append(
+                        .copy(destination: existing.register, source: temporary.register))
+                } else {
+                    scopes[scopes.count - 1][name] = LoweredBinding(
+                        register: temporary.register, type: temporary.type)
+                }
+            }
+            return
+        }
+        if let statements = GoStatement.redeclaration(
+            names: names, expression: expression, position: position,
+            declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
+        {
+            for statement in statements { try lower(statement) }
+            return
+        }
+        if case .unary(.receive, let channel, _) = expression,
+            case .channel(_, let elementType) = underlying(try type(of: channel))
+        {
+            guard names.count == 2 else {
+                throw GoDiagnostic(position: position, message: "channel receive returns two values")
+            }
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: elementType, position: expression.position)
+            operations.append(.receiveChannel(
+                destination: value,
+                okDestination: ok,
+                channel: try lower(channel),
+                zero: zero))
+            let registers = [value, ok]
+            let types = [elementType, GoType.bool]
+            for index in names.indices {
+                let name = names[index]
+                let variable = allocateRegister()
+                startVariable(variable, named: name, type: types[index])
+                operations.append(.copy(destination: variable, source: registers[index]))
+                scopes[scopes.count - 1][name] = LoweredBinding(
+                    register: variable, type: types[index])
+            }
+            return
+        }
+        if case .index(let base, let key, _) = expression,
+            case .map(_, let valueType) = underlying(try type(of: base))
+        {
+            guard names.count == 2 else {
+                throw GoDiagnostic(position: position, message: "map index returns two values")
+            }
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: valueType, position: expression.position)
+            operations.append(.getMapIndex(
+                destination: value, okDestination: ok,
+                base: try lower(base), key: try lower(key), zero: zero))
+            let registers = [value, ok]
+            let types: [GoType] = [valueType, .bool]
+            for index in names.indices {
+                let variable = allocateRegister()
+                startVariable(variable, named: names[index], type: types[index])
+                operations.append(.copy(destination: variable, source: registers[index]))
+                scopes[scopes.count - 1][names[index]] = LoweredBinding(
+                    register: variable, type: types[index])
+            }
+            return
+        }
+        if case .typeAssertion(let base, let assertedType, _) = expression {
+            guard names.count == 2 else {
+                throw GoDiagnostic(position: position, message: "type assertion returns two values")
+            }
+            let type = resolve(assertedType)
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: type, position: assertedType.position)
+            guard let targetName = assertedTypeName(type) else {
+                throw GoDiagnostic(position: position, message: "unsupported asserted type")
+            }
+            operations.append(.typeAssert(
+                destination: value, okDestination: ok, source: try lower(base),
+                targetName: targetName, zero: zero))
+            let registers = [value, ok]
+            let bindingTypes: [GoType] = [type, .bool]
+            for index in names.indices {
+                let name = names[index]
+                let variable = allocateRegister()
+                startVariable(variable, named: name, type: bindingTypes[index])
+                operations.append(.copy(destination: variable, source: registers[index]))
+                scopes[scopes.count - 1][name] = LoweredBinding(
+                    register: variable, type: bindingTypes[index])
+            }
+            return
+        }
+        guard case .call(let callee, let arguments, _) = expression else {
+            throw GoDiagnostic(position: position, message: "multi-value requires function call")
+        }
+        guard let results = try lowerMultiReturnCall(callee: callee, arguments: arguments) else {
+            throw GoDiagnostic(position: position, message: "function does not return multiple values")
+        }
+        let resultTypes = multiReturnTypes(callee: callee)
+        for (index, (name, register)) in zip(names, results).enumerated() {
+            let variable = allocateRegister()
+            let bindingType = index < resultTypes.count ? resultTypes[index] : .void
+            startVariable(variable, named: name, type: bindingType)
+            operations.append(.copy(destination: variable, source: register))
+            scopes[scopes.count - 1][name] = LoweredBinding(
+                register: variable,
+                type: bindingType)
+        }
+    }
+
+    mutating func lowerMultiAssignment(_ statement: GoStatement) throws {
+        guard case .multiAssignment(let targets, let expression, let position) = statement else {
+            return
+        }
+        if let values = expression.valueList {
+            // Go reads the index and pointer operands on the left and
+            // every value on the right first, then assigns in order.
+            let pinnedTargets = try targets.map { try pinned($0) }
+            var temporaries: [Int] = []
+            for (target, value) in zip(targets, values) {
+                let temporary = allocateRegister()
+                operations.append(
+                    .copy(
+                        destination: temporary,
+                        source: try lowerConverted(
+                            value, to: target.isBlank ? nil : try? type(of: target))))
+                temporaries.append(temporary)
+            }
+            for (target, temporary) in zip(pinnedTargets, temporaries) {
+                try store(temporary, to: target)
+            }
+            return
+        }
+        if case .unary(.receive, let channel, _) = expression,
+            case .channel(_, let elementType) = underlying(try type(of: channel))
+        {
+            guard targets.count == 2 else {
+                throw GoDiagnostic(position: position, message: "channel receive returns two values")
+            }
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: elementType, position: expression.position)
+            operations.append(.receiveChannel(
+                destination: value,
+                okDestination: ok,
+                channel: try lower(channel),
+                zero: zero))
+            for (target, register) in zip(targets, [value, ok]) {
+                try store(register, to: target)
+            }
+            return
+        }
+        if case .index(let base, let key, _) = expression,
+            case .map(_, let valueType) = underlying(try type(of: base))
+        {
+            guard targets.count == 2 else {
+                throw GoDiagnostic(position: position, message: "map index returns two values")
+            }
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: valueType, position: expression.position)
+            operations.append(.getMapIndex(
+                destination: value, okDestination: ok,
+                base: try lower(base), key: try lower(key), zero: zero))
+            for (target, register) in zip(targets, [value, ok]) {
+                try store(register, to: target)
+            }
+            return
+        }
+        if case .typeAssertion(let base, let assertedType, _) = expression {
+            guard targets.count == 2 else {
+                throw GoDiagnostic(position: position, message: "type assertion returns two values")
+            }
+            let type = resolve(assertedType)
+            let value = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: type, position: assertedType.position)
+            guard let targetName = assertedTypeName(type) else {
+                throw GoDiagnostic(position: position, message: "unsupported asserted type")
+            }
+            operations.append(.typeAssert(
+                destination: value, okDestination: ok, source: try lower(base),
+                targetName: targetName, zero: zero))
+            for (target, register) in zip(targets, [value, ok]) {
+                try store(register, to: target)
+            }
+            return
+        }
+        guard case .call(let callee, let arguments, _) = expression else {
+            throw GoDiagnostic(position: position, message: "multi-value requires function call")
+        }
+        guard let results = try lowerMultiReturnCall(callee: callee, arguments: arguments) else {
+            throw GoDiagnostic(position: position, message: "function does not return multiple values")
+        }
+        let types = multiReturnTypes(callee: callee)
+        for (index, (target, register)) in zip(targets, results).enumerated() {
+            try store(
+                converted(
+                    register, from: index < types.count ? types[index] : nil,
+                    to: try? type(of: target)),
+                to: target)
+        }
+    }
+
+    mutating func lowerIncrement(_ statement: GoStatement) throws {
+        guard case .increment(let target, let incrementOperator, _) = statement else {
+            return
+        }
+        let current = try lower(target)
+        let one = constant(.int(1))
+        let result = allocateRegister()
+        operations.append(
+            .binary(
+                destination: result,
+                operator: incrementOperator == .increment ? .add : .subtract,
+                left: current,
+                right: one))
+        try store(wrapByte(result, type: try? type(of: target)), to: target)
+    }
+
+    mutating func lowerReturnValues(_ statement: GoStatement) throws {
+        guard case .returnValues(let values, _) = statement else {
+            return
+        }
+        if values.isEmpty {
+            if resultRegisters.isEmpty {
+                operations.append(.return)
+            } else {
+                operations.append(.returnValues(sources: resultRegisters))
+            }
+        } else if values.count == 1, resultRegisters.count > 1,
+            case .call(let callee, let arguments, _) = values[0],
+            let results = try lowerMultiReturnCall(callee: callee, arguments: arguments)
+        {
+            // `return f()` forwards every result of a multi-result call.
+            operations.append(.returnValues(sources: results))
+        } else {
+            let sources = try values.enumerated().map { index, value in
+                try lowerConverted(
+                    value, to: index < resultTypes.count ? resultTypes[index] : nil)
+            }
+            operations.append(.returnValues(sources: sources))
+        }
+    }
+
+    mutating func lowerDeferStatement(_ statement: GoStatement) throws {
+        guard case .deferStatement(let expression, let position) = statement else {
+            return
+        }
+        guard case .call(let callee, let arguments, _) = expression else {
+            throw GoDiagnostic(position: position, message: "defer requires function call")
+        }
+        if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
+            operations.append(.deferCall(
+                function: wrapper.name, arguments: wrapper.registers))
+        } else if case .identifier(let functionName, _) = callee {
+            let registers = try lowerArguments(
+                arguments, parameters: functionParameterTypes[functionName])
+            operations.append(.deferCall(
+                function: functionSymbolNames[functionName] ?? functionName,
+                arguments: registers))
+        } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
+            let name = runtimeLiteralName(literalPosition)
+            let registers = try arguments.map { try lower($0) }
+            operations.append(.deferCall(
+                function: functionSymbolNames[name] ?? name,
+                arguments: registers))
+        } else if case .selector(let base, let member, _) = callee,
+            case .identifier(let packageName, _) = base,
+            lookup(packageName) == nil,
+            globalInfos[packageName] == nil
+        {
+            if let newline = printCall(callee) {
+                let registers = try lowerFormatOperands(arguments)
+                operations.append(
+                    .deferCall(
+                        function: printWrapper(newline: newline, operandCount: registers.count),
+                        arguments: registers))
+            } else {
+                let registers = try arguments.map { try lower($0) }
+                operations.append(
+                    .deferCall(function: "\(packageName).\(member)", arguments: registers))
+            }
+        } else if case .selector(let base, let member, _) = callee,
+            let receiverType = try? type(of: base),
+            let receiverName = syncReceiverName(receiverType)
+        {
+            var receiver = try lower(base)
+            if case .pointer = receiverType {
+                let dereferenced = allocateRegister()
+                operations.append(.dereference(destination: dereferenced, pointer: receiver))
+                receiver = dereferenced
+            }
+            operations.append(.deferCall(
+                function: "$\(receiverName).\(member)",
+                arguments: [receiver] + (try arguments.map { try lower($0) })))
+        } else if case .selector(let base, let member, _) = callee,
+            let info = try methodInfo(base: base, name: member)
+        {
+            let baseType = try type(of: base)
+            let receiver: Int
+            if case .pointer = info.receiverType {
+                receiver = if case .pointer = baseType {
+                    try lower(base)
+                } else {
+                    try lowerAddress(of: base)
+                }
+            } else if case .pointer = baseType {
+                let pointer = try lower(base)
+                let value = allocateRegister()
+                operations.append(.dereference(destination: value, pointer: pointer))
+                receiver = value
+            } else {
+                receiver = try lower(base)
+            }
+            let registers =
+                [receiver] + (try lowerArguments(arguments, parameters: info.parameterTypes))
+            operations.append(.deferCall(
+                function: info.functionName,
+                arguments: registers))
+        } else {
+            throw GoDiagnostic(position: position, message: "unsupported defer expression")
+        }
+    }
+
+    mutating func lowerGoStatement(_ statement: GoStatement) throws {
+        guard case .goStatement(let expression, let position) = statement else {
+            return
+        }
+        guard case .call(let callee, let arguments, _) = expression else {
+            throw GoDiagnostic(position: position, message: "go requires function call")
+        }
+        if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
+            operations.append(.spawn(
+                function: wrapper.name, arguments: wrapper.registers))
+        } else if case .identifier(let functionName, _) = callee {
+            operations.append(.spawn(
+                function: functionSymbolNames[functionName] ?? functionName,
+                arguments: try lowerArguments(
+                    arguments, parameters: functionParameterTypes[functionName])))
+        } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
+            let name = runtimeLiteralName(literalPosition)
+            operations.append(.spawn(
+                function: functionSymbolNames[name] ?? name,
+                arguments: try arguments.map { try lower($0) }))
+        } else if case .selector(let base, let member, _) = callee,
+            case .identifier(let packageName, _) = base,
+            lookup(packageName) == nil,
+            globalInfos[packageName] == nil
+        {
+            if let newline = printCall(callee) {
+                let registers = try lowerFormatOperands(arguments)
+                operations.append(
+                    .spawn(
+                        function: printWrapper(newline: newline, operandCount: registers.count),
+                        arguments: registers))
+            } else {
+                operations.append(.spawn(
+                    function: "\(packageName).\(member)",
+                    arguments: try arguments.map { try lower($0) }))
+            }
+        } else if case .selector(let base, let member, _) = callee,
+            let receiverType = try? type(of: base),
+            let receiverName = syncReceiverName(receiverType)
+        {
+            var receiver = try lower(base)
+            if case .pointer = receiverType {
+                let dereferenced = allocateRegister()
+                operations.append(.dereference(destination: dereferenced, pointer: receiver))
+                receiver = dereferenced
+            }
+            operations.append(.spawn(
+                function: "$\(receiverName).\(member)",
+                arguments: [receiver] + (try arguments.map { try lower($0) })))
+        } else if case .selector(let base, let member, _) = callee,
+            let info = try methodInfo(base: base, name: member)
+        {
+            let baseType = try type(of: base)
+            let receiver: Int
+            if case .pointer = info.receiverType {
+                receiver = if case .pointer = baseType {
+                    try lower(base)
+                } else {
+                    try lowerAddress(of: base)
+                }
+            } else if case .pointer = baseType {
+                let pointer = try lower(base)
+                let value = allocateRegister()
+                operations.append(.dereference(destination: value, pointer: pointer))
+                receiver = value
+            } else {
+                receiver = try lower(base)
+            }
+            operations.append(.spawn(
+                function: info.functionName,
+                arguments: [receiver]
+                    + (try lowerArguments(arguments, parameters: info.parameterTypes))))
+        } else {
+            throw GoDiagnostic(position: position, message: "unsupported go expression")
+        }
+    }
+
+    mutating func lowerSendStatement(_ statement: GoStatement) throws {
+        guard case .sendStatement(let channel, let value, _) = statement else {
+            return
+        }
+        var elementType: GoType?
+        if case .channel(_, let element)? = (try? type(of: channel)).map({ underlying($0) }) {
+            elementType = element
+        }
+        operations.append(.sendChannel(
+            channel: try lower(channel),
+            value: try lowerConverted(value, to: elementType)))
+    }
+
+    mutating func lowerIfStatement(_ statement: GoStatement) throws {
+        guard case .ifStatement(let condition, let thenBlock, let elseBlock, _) = statement else {
+            return
+        }
+        let falseLabel = allocateLabel()
+        let conditionRegister = try lower(condition)
+        operations.append(.jumpIfFalse(condition: conditionRegister, target: falseLabel))
+        try lower(thenBlock)
+        if let elseBlock {
+            let endLabel = allocateLabel()
+            operations.append(.jump(target: endLabel))
+            operations.append(.label(falseLabel))
+            try lower(elseBlock)
+            operations.append(.label(endLabel))
+        } else {
+            operations.append(.label(falseLabel))
+        }
+    }
+
+    mutating func lowerForStatement(_ statement: GoStatement) throws {
+        guard case .forStatement(let initializer, let condition, let post, let body, _) = statement else {
+            return
+        }
+        scopes.append([:])
+        defer { scopes.removeLast() }
+        if let scoped = statement.initialized {
+            // An `if` or `switch` with an initializer runs once, and a
+            // `break` or `continue` inside it belongs to what encloses it.
+            try lower(scoped.initializer)
+            try lower(scoped.statement)
+            return
+        }
+        if let block = statement.block {
+            try lower(block)
+            return
+        }
+        if let initializer { try lower(initializer) }
+        // The variables of the clause, which each iteration has anew.
+        let iterationVariables = scopes[scopes.count - 1]
+            .filter { mayBeAddressed($0.key, type: $0.value.type) }
+            .sorted { $0.value.register < $1.value.register }
+        let conditionLabel = allocateLabel()
+        let postLabel = allocateLabel()
+        let endLabel = allocateLabel()
+        operations.append(.label(conditionLabel))
+        if let condition {
+            let conditionRegister = try lower(condition)
+            operations.append(.jumpIfFalse(condition: conditionRegister, target: endLabel))
+        }
+        breakLabels.append(endLabel)
+        continueLabels.append(postLabel)
+        try lower(body)
+        breakLabels.removeLast()
+        continueLabels.removeLast()
+        operations.append(.label(postLabel))
+        for variable in iterationVariables {
+            // Go copies each one before the post statement, so a pointer
+            // taken in the body keeps the value the iteration ended with.
+            let carried = allocateRegister()
+            operations.append(.copy(destination: carried, source: variable.value.register))
+            renewVariable(variable.value.register)
+            operations.append(.copy(destination: variable.value.register, source: carried))
+        }
+        if let post { try lower(post) }
+        operations.append(.jump(target: conditionLabel))
+        operations.append(.label(endLabel))
+    }
+
+    mutating func lowerForRangeStatement(_ statement: GoStatement) throws {
+        guard case .forRangeStatement(let indexName, let valueName, let collection, let body, _) = statement else {
+            return
+        }
+        scopes.append([:])
+        defer { scopes.removeLast() }
+
+        // Evaluate the collection once. The VM snapshots its keys so map
+        // iteration and UTF-8 string offsets use Go-compatible values.
+        let collectionRegister = try lower(collection)
+        let collectionType = underlying(try type(of: collection))
+        if case .channel(_, let elementType) = collectionType {
+            let receiveLabel = allocateLabel()
+            let endLabel = allocateLabel()
+            operations.append(.label(receiveLabel))
+            let received = allocateRegister()
+            let ok = allocateRegister()
+            let zero = try zeroValue(for: elementType, position: collection.position)
+            if let indexName, mayBeAddressed(indexName, type: elementType) {
+                renewVariable(received)
+            }
+            operations.append(.receiveChannel(
+                destination: received,
+                okDestination: ok,
+                channel: collectionRegister,
+                zero: zero))
+            operations.append(.jumpIfFalse(condition: ok, target: endLabel))
             if let indexName {
                 scopes[scopes.count - 1][indexName] = LoweredBinding(
-                    register: keyRegister, type: keyType)
+                    register: received,
+                    type: elementType)
             }
-
-            if let valueName {
-                let valueRegister = allocateRegister()
-                let elementType: GoType
-                switch collectionType {
-                case .array(_, let element), .slice(let element): elementType = element
-                case .map(_, let value): elementType = value
-                case .string: elementType = .int
-                default: elementType = .void
-                }
-                let zero = try zeroValue(for: elementType, position: collection.position)
-                if mayBeAddressed(valueName, type: elementType) { renewVariable(valueRegister) }
-                operations.append(.rangeValue(
-                    destination: valueRegister,
-                    base: collectionRegister,
-                    key: keyRegister,
-                    zero: zero))
-                scopes[scopes.count - 1][valueName] = LoweredBinding(
-                    register: valueRegister, type: elementType)
-            }
-
             breakLabels.append(endLabel)
-            continueLabels.append(postLabel)
+            continueLabels.append(receiveLabel)
             try lower(body)
             breakLabels.removeLast()
             continueLabels.removeLast()
-
-            // Post: index++
-            operations.append(.label(postLabel))
-            let one = constant(.int(1))
-            let incremented = allocateRegister()
-            operations.append(
-                .binary(
-                    destination: incremented,
-                    operator: .add,
-                    left: indexRegister,
-                    right: one))
-            operations.append(.copy(destination: indexRegister, source: incremented))
-            operations.append(.jump(target: conditionLabel))
+            operations.append(.jump(target: receiveLabel))
             operations.append(.label(endLabel))
-
-        case .switchStatement(let expression, let cases, _):
-            let switchRegister = try expression.map { try lower($0) } ?? constant(.bool(true))
-            let endLabel = allocateLabel()
-            let caseLabels = cases.map { _ in allocateLabel() }
-            let defaultIndex = cases.firstIndex(where: \.isDefault)
-
-            for (index, switchCase) in cases.enumerated() where !switchCase.isDefault {
-                for caseExpression in switchCase.expressions {
-                    let caseRegister = try lower(caseExpression)
-                    let comparison = allocateRegister()
-                    operations.append(
-                        .binary(
-                            destination: comparison,
-                            operator: .equal,
-                            left: switchRegister,
-                            right: caseRegister))
-                    operations.append(.jumpIfTrue(condition: comparison, target: caseLabels[index]))
-                }
-            }
-            operations.append(.jump(target: defaultIndex.map { caseLabels[$0] } ?? endLabel))
-
-            breakLabels.append(endLabel)
-            for (index, switchCase) in cases.enumerated() {
-                operations.append(.label(caseLabels[index]))
-                try lower(switchCase.body)
-                operations.append(.jump(target: endLabel))
-            }
-            breakLabels.removeLast()
-            operations.append(.label(endLabel))
-
-        case .selectStatement(let cases, _):
-            let endLabel = allocateLabel()
-            let caseLabels = cases.map { _ in allocateLabel() }
-            var loweredCases: [GoIRSelectCase] = []
-            var receiveRegisters: [[Int]] = Array(repeating: [], count: cases.count)
-            var receiveTypes: [[GoType]] = Array(repeating: [], count: cases.count)
-            var defaultTarget: Int?
-
-            // Go evaluates every channel operand and send RHS exactly once, in
-            // source order, before it decides which communication can proceed.
-            for (index, selectCase) in cases.enumerated() {
-                guard let communication = selectCase.communication else {
-                    defaultTarget = caseLabels[index]
-                    continue
-                }
-                switch communication {
-                case .sendStatement(let channel, let value, _):
-                    loweredCases.append(.send(
-                        channel: try lower(channel),
-                        value: try lower(value),
-                        target: caseLabels[index]))
-
-                case .expression(.unary(.receive, let channel, let position)):
-                    guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
-                        throw GoDiagnostic(position: position, message: "receive from non-channel")
-                    }
-                    let zero = try zeroValue(for: elementType, position: position)
-                    loweredCases.append(.receive(
-                        channel: try lower(channel), destination: nil, okDestination: nil,
-                        zero: zero, target: caseLabels[index]))
-
-                case .declaration(let name, _, .some(.unary(.receive, let channel, let position)), _, _):
-                    guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
-                        throw GoDiagnostic(position: position, message: "receive from non-channel")
-                    }
-                    let destination = allocateRegister()
-                    let zero = try zeroValue(for: elementType, position: position)
-                    receiveRegisters[index] = [destination]
-                    receiveTypes[index] = [elementType]
-                    _ = name
-                    loweredCases.append(.receive(
-                        channel: try lower(channel), destination: destination, okDestination: nil,
-                        zero: zero, target: caseLabels[index]))
-
-                case .multiDeclaration(_, .unary(.receive, let channel, let position), _):
-                    guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
-                        throw GoDiagnostic(position: position, message: "receive from non-channel")
-                    }
-                    let destination = allocateRegister()
-                    let ok = allocateRegister()
-                    let zero = try zeroValue(for: elementType, position: position)
-                    receiveRegisters[index] = [destination, ok]
-                    receiveTypes[index] = [elementType, .bool]
-                    loweredCases.append(.receive(
-                        channel: try lower(channel), destination: destination, okDestination: ok,
-                        zero: zero, target: caseLabels[index]))
-
-                case .assignment(_, .unary(.receive, let channel, let position), _):
-                    guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
-                        throw GoDiagnostic(position: position, message: "receive from non-channel")
-                    }
-                    let destination = allocateRegister()
-                    let zero = try zeroValue(for: elementType, position: position)
-                    receiveRegisters[index] = [destination]
-                    receiveTypes[index] = [elementType]
-                    loweredCases.append(.receive(
-                        channel: try lower(channel), destination: destination, okDestination: nil,
-                        zero: zero, target: caseLabels[index]))
-
-                case .multiAssignment(_, .unary(.receive, let channel, let position), _):
-                    guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
-                        throw GoDiagnostic(position: position, message: "receive from non-channel")
-                    }
-                    let destination = allocateRegister()
-                    let ok = allocateRegister()
-                    let zero = try zeroValue(for: elementType, position: position)
-                    receiveRegisters[index] = [destination, ok]
-                    receiveTypes[index] = [elementType, .bool]
-                    loweredCases.append(.receive(
-                        channel: try lower(channel), destination: destination, okDestination: ok,
-                        zero: zero, target: caseLabels[index]))
-
-                default:
-                    throw GoDiagnostic(
-                        position: selectCase.position,
-                        message: "select case must be send or receive")
-                }
-            }
-
-            operations.append(.select(cases: loweredCases, defaultTarget: defaultTarget))
-            breakLabels.append(endLabel)
-            for (index, selectCase) in cases.enumerated() {
-                operations.append(.label(caseLabels[index]))
-                scopes.append([:])
-                switch selectCase.communication {
-                case .declaration(let name, _, _, _, _):
-                    if let register = receiveRegisters[index].first,
-                        let type = receiveTypes[index].first
-                    {
-                        scopes[scopes.count - 1][name] = LoweredBinding(register: register, type: type)
-                    }
-                case .multiDeclaration(let names, _, _):
-                    for (name, pair) in zip(names, zip(receiveRegisters[index], receiveTypes[index])) {
-                        scopes[scopes.count - 1][name] = LoweredBinding(
-                            register: pair.0, type: pair.1)
-                    }
-                case .assignment(let target, _, _):
-                    if let register = receiveRegisters[index].first {
-                        try store(register, to: target)
-                    }
-                case .multiAssignment(let targets, _, _):
-                    for (target, register) in zip(targets, receiveRegisters[index]) {
-                        try store(register, to: target)
-                    }
-                default:
-                    break
-                }
-                try lower(selectCase.body, createsScope: false)
-                scopes.removeLast()
-                operations.append(.jump(target: endLabel))
-            }
-            breakLabels.removeLast()
-            operations.append(.label(endLabel))
+            return
         }
+        let keysRegister = allocateRegister()
+        operations.append(.rangeKeys(destination: keysRegister, base: collectionRegister))
+        let lengthRegister = allocateRegister()
+        operations.append(.length(destination: lengthRegister, base: keysRegister))
+
+        // Create the index variable (always int, always starts at 0)
+        let indexRegister = allocateRegister()
+        let zero = constant(.int(0))
+        operations.append(.copy(destination: indexRegister, source: zero))
+
+        // Loop structure: conditionLabel → body → postLabel → jump conditionLabel → endLabel
+        let conditionLabel = allocateLabel()
+        let postLabel = allocateLabel()
+        let endLabel = allocateLabel()
+
+        operations.append(.label(conditionLabel))
+        // Condition: index < length
+        let conditionRegister = allocateRegister()
+        operations.append(
+            .binary(
+                destination: conditionRegister,
+                operator: .less,
+                left: indexRegister,
+                right: lengthRegister))
+        operations.append(.jumpIfFalse(condition: conditionRegister, target: endLabel))
+
+        let keyRegister = allocateRegister()
+        let keyType: GoType
+        if case .map(let mapKey, _) = collectionType { keyType = mapKey } else { keyType = .int }
+        if let indexName, mayBeAddressed(indexName, type: keyType) {
+            renewVariable(keyRegister)
+        }
+        operations.append(.getIndex(
+            destination: keyRegister, base: keysRegister, index: indexRegister))
+        if let indexName {
+            scopes[scopes.count - 1][indexName] = LoweredBinding(
+                register: keyRegister, type: keyType)
+        }
+
+        if let valueName {
+            let valueRegister = allocateRegister()
+            let elementType: GoType
+            switch collectionType {
+            case .array(_, let element), .slice(let element): elementType = element
+            case .map(_, let value): elementType = value
+            case .string: elementType = .int
+            default: elementType = .void
+            }
+            let zero = try zeroValue(for: elementType, position: collection.position)
+            if mayBeAddressed(valueName, type: elementType) { renewVariable(valueRegister) }
+            operations.append(.rangeValue(
+                destination: valueRegister,
+                base: collectionRegister,
+                key: keyRegister,
+                zero: zero))
+            scopes[scopes.count - 1][valueName] = LoweredBinding(
+                register: valueRegister, type: elementType)
+        }
+
+        breakLabels.append(endLabel)
+        continueLabels.append(postLabel)
+        try lower(body)
+        breakLabels.removeLast()
+        continueLabels.removeLast()
+
+        // Post: index++
+        operations.append(.label(postLabel))
+        let one = constant(.int(1))
+        let incremented = allocateRegister()
+        operations.append(
+            .binary(
+                destination: incremented,
+                operator: .add,
+                left: indexRegister,
+                right: one))
+        operations.append(.copy(destination: indexRegister, source: incremented))
+        operations.append(.jump(target: conditionLabel))
+        operations.append(.label(endLabel))
+    }
+
+    mutating func lowerSwitchStatement(_ statement: GoStatement) throws {
+        guard case .switchStatement(let expression, let cases, _) = statement else {
+            return
+        }
+        let switchRegister = try expression.map { try lower($0) } ?? constant(.bool(true))
+        let endLabel = allocateLabel()
+        let caseLabels = cases.map { _ in allocateLabel() }
+        let defaultIndex = cases.firstIndex(where: \.isDefault)
+
+        for (index, switchCase) in cases.enumerated() where !switchCase.isDefault {
+            for caseExpression in switchCase.expressions {
+                let caseRegister = try lower(caseExpression)
+                let comparison = allocateRegister()
+                operations.append(
+                    .binary(
+                        destination: comparison,
+                        operator: .equal,
+                        left: switchRegister,
+                        right: caseRegister))
+                operations.append(.jumpIfTrue(condition: comparison, target: caseLabels[index]))
+            }
+        }
+        operations.append(.jump(target: defaultIndex.map { caseLabels[$0] } ?? endLabel))
+
+        breakLabels.append(endLabel)
+        for (index, switchCase) in cases.enumerated() {
+            operations.append(.label(caseLabels[index]))
+            try lower(switchCase.body)
+            operations.append(.jump(target: endLabel))
+        }
+        breakLabels.removeLast()
+        operations.append(.label(endLabel))
+    }
+
+    mutating func lowerSelectStatement(_ statement: GoStatement) throws {
+        guard case .selectStatement(let cases, _) = statement else {
+            return
+        }
+        let endLabel = allocateLabel()
+        let caseLabels = cases.map { _ in allocateLabel() }
+        var loweredCases: [GoIRSelectCase] = []
+        var receiveRegisters: [[Int]] = Array(repeating: [], count: cases.count)
+        var receiveTypes: [[GoType]] = Array(repeating: [], count: cases.count)
+        var defaultTarget: Int?
+
+        // Go evaluates every channel operand and send RHS exactly once, in
+        // source order, before it decides which communication can proceed.
+        for (index, selectCase) in cases.enumerated() {
+            guard let communication = selectCase.communication else {
+                defaultTarget = caseLabels[index]
+                continue
+            }
+            switch communication {
+            case .sendStatement(let channel, let value, _):
+                loweredCases.append(.send(
+                    channel: try lower(channel),
+                    value: try lower(value),
+                    target: caseLabels[index]))
+
+            case .expression(.unary(.receive, let channel, let position)):
+                guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
+                    throw GoDiagnostic(position: position, message: "receive from non-channel")
+                }
+                let zero = try zeroValue(for: elementType, position: position)
+                loweredCases.append(.receive(
+                    channel: try lower(channel), destination: nil, okDestination: nil,
+                    zero: zero, target: caseLabels[index]))
+
+            case .declaration(let name, _, .some(.unary(.receive, let channel, let position)), _, _):
+                guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
+                    throw GoDiagnostic(position: position, message: "receive from non-channel")
+                }
+                let destination = allocateRegister()
+                let zero = try zeroValue(for: elementType, position: position)
+                receiveRegisters[index] = [destination]
+                receiveTypes[index] = [elementType]
+                _ = name
+                loweredCases.append(.receive(
+                    channel: try lower(channel), destination: destination, okDestination: nil,
+                    zero: zero, target: caseLabels[index]))
+
+            case .multiDeclaration(_, .unary(.receive, let channel, let position), _):
+                guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
+                    throw GoDiagnostic(position: position, message: "receive from non-channel")
+                }
+                let destination = allocateRegister()
+                let ok = allocateRegister()
+                let zero = try zeroValue(for: elementType, position: position)
+                receiveRegisters[index] = [destination, ok]
+                receiveTypes[index] = [elementType, .bool]
+                loweredCases.append(.receive(
+                    channel: try lower(channel), destination: destination, okDestination: ok,
+                    zero: zero, target: caseLabels[index]))
+
+            case .assignment(_, .unary(.receive, let channel, let position), _):
+                guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
+                    throw GoDiagnostic(position: position, message: "receive from non-channel")
+                }
+                let destination = allocateRegister()
+                let zero = try zeroValue(for: elementType, position: position)
+                receiveRegisters[index] = [destination]
+                receiveTypes[index] = [elementType]
+                loweredCases.append(.receive(
+                    channel: try lower(channel), destination: destination, okDestination: nil,
+                    zero: zero, target: caseLabels[index]))
+
+            case .multiAssignment(_, .unary(.receive, let channel, let position), _):
+                guard case .channel(_, let elementType) = underlying(try type(of: channel)) else {
+                    throw GoDiagnostic(position: position, message: "receive from non-channel")
+                }
+                let destination = allocateRegister()
+                let ok = allocateRegister()
+                let zero = try zeroValue(for: elementType, position: position)
+                receiveRegisters[index] = [destination, ok]
+                receiveTypes[index] = [elementType, .bool]
+                loweredCases.append(.receive(
+                    channel: try lower(channel), destination: destination, okDestination: ok,
+                    zero: zero, target: caseLabels[index]))
+
+            default:
+                throw GoDiagnostic(
+                    position: selectCase.position,
+                    message: "select case must be send or receive")
+            }
+        }
+
+        operations.append(.select(cases: loweredCases, defaultTarget: defaultTarget))
+        breakLabels.append(endLabel)
+        for (index, selectCase) in cases.enumerated() {
+            operations.append(.label(caseLabels[index]))
+            scopes.append([:])
+            switch selectCase.communication {
+            case .declaration(let name, _, _, _, _):
+                if let register = receiveRegisters[index].first,
+                    let type = receiveTypes[index].first
+                {
+                    scopes[scopes.count - 1][name] = LoweredBinding(register: register, type: type)
+                }
+            case .multiDeclaration(let names, _, _):
+                for (name, pair) in zip(names, zip(receiveRegisters[index], receiveTypes[index])) {
+                    scopes[scopes.count - 1][name] = LoweredBinding(
+                        register: pair.0, type: pair.1)
+                }
+            case .assignment(let target, _, _):
+                if let register = receiveRegisters[index].first {
+                    try store(register, to: target)
+                }
+            case .multiAssignment(let targets, _, _):
+                for (target, register) in zip(targets, receiveRegisters[index]) {
+                    try store(register, to: target)
+                }
+            default:
+                break
+            }
+            try lower(selectCase.body, createsScope: false)
+            scopes.removeLast()
+            operations.append(.jump(target: endLabel))
+        }
+        breakLabels.removeLast()
+        operations.append(.label(endLabel))
     }
 
     mutating func lowerExpressionStatement(_ expression: GoExpression) throws {
@@ -3023,261 +3095,26 @@ private struct IRLowerer {
     }
 
     mutating func lower(_ expression: GoExpression) throws -> Int {
+        // One function for each kind of expression, like the statements:
+        // an expression inside an expression then costs the frame of its
+        // own kind, not of all of them.
         switch expression {
         case .integer(let value, _):
             return constant(.int(value))
         case .string(let value, _):
             return constant(.string(value))
-        case .identifier(let name, let position):
-            if name == "true" { return constant(.bool(true)) }
-            if name == "false" { return constant(.bool(false)) }
-            if name == "nil" { return constant(.nilValue) }
-            if let binding = lookup(name) {
-                return binding.register
-            }
-            if let global = globalInfos[name] {
-                let destination = allocateRegister()
-                operations.append(.loadGlobal(destination: destination, index: global.index))
-                return destination
-            }
-            throw GoDiagnostic(position: position, message: "undefined: \(name)")
-        case .unary(let unaryOperator, let operand, _):
-            switch unaryOperator {
-            case .plus:
-                let source = try lower(operand)
-                let destination = allocateRegister()
-                operations.append(.copy(destination: destination, source: source))
-                return destination
-            case .minus:
-                let source = try lower(operand)
-                let destination = allocateRegister()
-                operations.append(.unary(destination: destination, operator: .negate, operand: source))
-                return wrapByte(destination, type: try? type(of: operand))
-            case .not:
-                let source = try lower(operand)
-                let destination = allocateRegister()
-                operations.append(.unary(destination: destination, operator: .not, operand: source))
-                return destination
-            case .address:
-                if case .compositeLiteral = operand {
-                    let destination = allocateRegister()
-                    operations.append(
-                        .call(
-                            function: GoPredeclared.newVariable,
-                            arguments: [try lower(operand)],
-                            destinations: [destination]))
-                    return destination
-                }
-                return try lowerAddress(of: operand)
-            case .dereference:
-                let source = try lower(operand)
-                let destination = allocateRegister()
-                operations.append(.dereference(destination: destination, pointer: source))
-                return destination
-            case .receive:
-                guard case .channel(_, let elementType) = underlying(try type(of: operand)) else {
-                    throw GoDiagnostic(position: operand.position, message: "cannot receive from non-channel")
-                }
-                let destination = allocateRegister()
-                let zero = try zeroValue(for: elementType, position: operand.position)
-                operations.append(.receiveChannel(
-                    destination: destination,
-                    okDestination: nil,
-                    channel: try lower(operand),
-                    zero: zero))
-                return destination
-            }
-        case .binary(let left, let binaryOperator, let right, _):
-            if binaryOperator == .logicalAnd || binaryOperator == .logicalOr {
-                return try lowerShortCircuit(
-                    left: left,
-                    operator: binaryOperator,
-                    right: right)
-            }
-            let leftRegister = try lower(left)
-            let rightRegister = try lower(right)
-            let destination = allocateRegister()
-            operations.append(
-                .binary(
-                    destination: destination,
-                    operator: map(binaryOperator),
-                    left: leftRegister,
-                    right: rightRegister))
-            switch binaryOperator {
-            case .add, .subtract, .multiply:
-                return wrapByte(destination, type: try? operandType(left, right))
-            default:
-                return destination
-            }
-        case .selector(let base, let name, _):
-            if case .identifier(let packageName, _) = base,
-                let value = GoStandardLibrary.integerConstant(
-                    package: packageName, member: name)
-            {
-                return constant(.int(value))
-            }
-            if let message = standardErrorValue(base: base, member: name) {
-                let destination = allocateRegister()
-                operations.append(
-                    .makeInterface(
-                        destination: destination,
-                        source: constant(.string(message)),
-                        typeName: GoPredeclared.nativeErrorTypeName))
-                return destination
-            }
-            if let descriptor = standardFileDescriptor(base: base, member: name) {
-                return constant(.int(descriptor))
-            }
-            if case .identifier("os", _) = base, name == "Args" {
-                let destination = allocateRegister()
-                operations.append(.osArgs(destination: destination))
-                return destination
-            }
-            var baseRegister = try lower(base)
-            if case .pointer = try type(of: base) {
-                let dereferenced = allocateRegister()
-                operations.append(.dereference(destination: dereferenced, pointer: baseRegister))
-                baseRegister = dereferenced
-            }
-            let destination = allocateRegister()
-            operations.append(
-                .getField(destination: destination, base: baseRegister, name: name))
-            return destination
-        case .typeAssertion(let base, let assertedType, let position):
-            let type = resolve(assertedType)
-            guard let targetName = assertedTypeName(type) else {
-                throw GoDiagnostic(position: position, message: "unsupported asserted type")
-            }
-            let destination = allocateRegister()
-            let zero = try zeroValue(for: type, position: position)
-            operations.append(.typeAssert(
-                destination: destination,
-                okDestination: nil,
-                source: try lower(base),
-                targetName: targetName,
-                zero: zero))
-            return destination
+        case .identifier: return try lowerIdentifierExpression(expression)
+        case .unary: return try lowerUnaryExpression(expression)
+        case .binary: return try lowerBinaryExpression(expression)
+        case .selector: return try lowerSelectorExpression(expression)
+        case .typeAssertion: return try lowerTypeAssertionExpression(expression)
         case .functionLiteral(_, _, _, _, let position):
             throw GoDiagnostic(
                 position: position,
                 message: "function literal is only supported as a testing.T.Run callback")
-        case .compositeLiteral(let typeExpression, let elements, let position):
-            let literalType = resolve(typeExpression)
-            let destination = allocateRegister()
-            switch underlying(literalType) {
-            case .structure(let fields):
-                var values: [Int] = []
-                if elements.isEmpty || elements.contains(where: { $0.key != nil }) {
-                    // Fields a literal does not name, all of them in `T{}`,
-                    // have their zero values.
-                    let keyed = Dictionary(
-                        uniqueKeysWithValues: elements.compactMap { element in
-                            element.key.map { ($0, element.value) }
-                        })
-                    for field in fields {
-                        if let expression = keyed[field.name] {
-                            values.append(try lowerConverted(expression, to: field.type))
-                        } else {
-                            values.append(try zeroValue(for: field.type, position: position))
-                        }
-                    }
-                } else {
-                    values = try elements.enumerated().map { index, element in
-                        try lowerConverted(
-                            element.value, to: index < fields.count ? fields[index].type : nil)
-                    }
-                }
-                operations.append(
-                    .makeStruct(
-                        destination: destination,
-                        typeName: typeName(of: literalType),
-                        fieldNames: fields.map(\.name),
-                        values: values))
-            case .array(let length, let elementType):
-                var values = try elements.map { try lowerConverted($0.value, to: elementType) }
-                while values.count < length {
-                    values.append(try zeroValue(for: elementType, position: position))
-                }
-                operations.append(.makeArray(destination: destination, values: values))
-            case .slice(let elementType):
-                let zero = try zeroValue(for: elementType, position: position)
-                operations.append(
-                    .makeSlice(
-                        destination: destination,
-                        zero: zero,
-                        values: try elements.map { try lowerConverted($0.value, to: elementType) }))
-            case .map(let keyType, let valueType):
-                var keys: [Int] = []
-                var values: [Int] = []
-                for element in elements {
-                    if let keyExpression = element.keyExpression {
-                        keys.append(try lowerConverted(keyExpression, to: keyType))
-                    } else if let key = element.key {
-                        keys.append(constant(.string(key)))
-                    } else {
-                        throw GoDiagnostic(position: element.position, message: "missing key in map literal")
-                    }
-                    values.append(try lowerConverted(element.value, to: valueType))
-                }
-                operations.append(.makeMap(destination: destination, keys: keys, values: values))
-            default:
-                throw GoDiagnostic(position: position, message: "invalid composite literal type")
-            }
-            return destination
-        case .index(let base, let index, _):
-            let destination = allocateRegister()
-            let baseType = try type(of: base)
-            if case .map = underlying(baseType) {
-                guard case .map(_, let valueType) = underlying(baseType) else {
-                    throw GoDiagnostic(position: base.position, message: "invalid map type")
-                }
-                let zero = try zeroValue(for: valueType, position: base.position)
-                operations.append(
-                    .getMapIndex(
-                        destination: destination,
-                        okDestination: nil,
-                        base: try lower(base),
-                        key: try lower(index),
-                        zero: zero))
-            } else {
-                operations.append(
-                    .getIndex(
-                        destination: destination,
-                        base: try lower(base),
-                        index: try lower(index)))
-            }
-            return destination
-        case .slicing(let base, let low, let high, let position):
-            let baseType = try type(of: base)
-            let lowRegister = try low.map { try lower($0) } ?? constant(.int(0))
-            let highRegister: Int
-            if let high {
-                highRegister = try lower(high)
-            } else {
-                let lengthBase = try lower(base)
-                highRegister = allocateRegister()
-                operations.append(.length(destination: highRegister, base: lengthBase))
-            }
-            let destination = allocateRegister()
-            if case .array(_, let elementType) = underlying(baseType) {
-                let pointer = try lowerAddress(of: base)
-                let zero = try zeroValue(for: elementType, position: position)
-                operations.append(
-                    .sliceArray(
-                        destination: destination,
-                        pointer: pointer,
-                        low: lowRegister,
-                        high: highRegister,
-                        zero: zero))
-            } else {
-                operations.append(
-                    .sliceValue(
-                        destination: destination,
-                        base: try lower(base),
-                        low: lowRegister,
-                        high: highRegister))
-            }
-            return destination
+        case .compositeLiteral: return try lowerCompositeLiteralExpression(expression)
+        case .index: return try lowerIndexExpression(expression)
+        case .slicing: return try lowerSlicingExpression(expression)
         case .typeExpression(_, let position):
             throw GoDiagnostic(position: position, message: "type is not a value")
         case .call(let callee, let arguments, let position):
@@ -3286,6 +3123,292 @@ private struct IRLowerer {
             }
             return destination
         }
+    }
+
+    mutating func lowerIdentifierExpression(_ expression: GoExpression) throws -> Int {
+        guard case .identifier(let name, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if name == "true" { return constant(.bool(true)) }
+        if name == "false" { return constant(.bool(false)) }
+        if name == "nil" { return constant(.nilValue) }
+        if let binding = lookup(name) {
+            return binding.register
+        }
+        if let global = globalInfos[name] {
+            let destination = allocateRegister()
+            operations.append(.loadGlobal(destination: destination, index: global.index))
+            return destination
+        }
+        throw GoDiagnostic(position: position, message: "undefined: \(name)")
+    }
+
+    mutating func lowerUnaryExpression(_ expression: GoExpression) throws -> Int {
+        guard case .unary(let unaryOperator, let operand, _) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        switch unaryOperator {
+        case .plus:
+            let source = try lower(operand)
+            let destination = allocateRegister()
+            operations.append(.copy(destination: destination, source: source))
+            return destination
+        case .minus:
+            let source = try lower(operand)
+            let destination = allocateRegister()
+            operations.append(.unary(destination: destination, operator: .negate, operand: source))
+            return wrapByte(destination, type: try? type(of: operand))
+        case .not:
+            let source = try lower(operand)
+            let destination = allocateRegister()
+            operations.append(.unary(destination: destination, operator: .not, operand: source))
+            return destination
+        case .address:
+            if case .compositeLiteral = operand {
+                let destination = allocateRegister()
+                operations.append(
+                    .call(
+                        function: GoPredeclared.newVariable,
+                        arguments: [try lower(operand)],
+                        destinations: [destination]))
+                return destination
+            }
+            return try lowerAddress(of: operand)
+        case .dereference:
+            let source = try lower(operand)
+            let destination = allocateRegister()
+            operations.append(.dereference(destination: destination, pointer: source))
+            return destination
+        case .receive:
+            guard case .channel(_, let elementType) = underlying(try type(of: operand)) else {
+                throw GoDiagnostic(position: operand.position, message: "cannot receive from non-channel")
+            }
+            let destination = allocateRegister()
+            let zero = try zeroValue(for: elementType, position: operand.position)
+            operations.append(.receiveChannel(
+                destination: destination,
+                okDestination: nil,
+                channel: try lower(operand),
+                zero: zero))
+            return destination
+        }
+    }
+
+    mutating func lowerBinaryExpression(_ expression: GoExpression) throws -> Int {
+        guard case .binary(let left, let binaryOperator, let right, _) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if binaryOperator == .logicalAnd || binaryOperator == .logicalOr {
+            return try lowerShortCircuit(
+                left: left,
+                operator: binaryOperator,
+                right: right)
+        }
+        let leftRegister = try lower(left)
+        let rightRegister = try lower(right)
+        let destination = allocateRegister()
+        operations.append(
+            .binary(
+                destination: destination,
+                operator: map(binaryOperator),
+                left: leftRegister,
+                right: rightRegister))
+        switch binaryOperator {
+        case .add, .subtract, .multiply:
+            return wrapByte(destination, type: try? operandType(left, right))
+        default:
+            return destination
+        }
+    }
+
+    mutating func lowerSelectorExpression(_ expression: GoExpression) throws -> Int {
+        guard case .selector(let base, let name, _) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if case .identifier(let packageName, _) = base,
+            let value = GoStandardLibrary.integerConstant(
+                package: packageName, member: name)
+        {
+            return constant(.int(value))
+        }
+        if let message = standardErrorValue(base: base, member: name) {
+            let destination = allocateRegister()
+            operations.append(
+                .makeInterface(
+                    destination: destination,
+                    source: constant(.string(message)),
+                    typeName: GoPredeclared.nativeErrorTypeName))
+            return destination
+        }
+        if let descriptor = standardFileDescriptor(base: base, member: name) {
+            return constant(.int(descriptor))
+        }
+        if case .identifier("os", _) = base, name == "Args" {
+            let destination = allocateRegister()
+            operations.append(.osArgs(destination: destination))
+            return destination
+        }
+        var baseRegister = try lower(base)
+        if case .pointer = try type(of: base) {
+            let dereferenced = allocateRegister()
+            operations.append(.dereference(destination: dereferenced, pointer: baseRegister))
+            baseRegister = dereferenced
+        }
+        let destination = allocateRegister()
+        operations.append(
+            .getField(destination: destination, base: baseRegister, name: name))
+        return destination
+    }
+
+    mutating func lowerTypeAssertionExpression(_ expression: GoExpression) throws -> Int {
+        guard case .typeAssertion(let base, let assertedType, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let type = resolve(assertedType)
+        guard let targetName = assertedTypeName(type) else {
+            throw GoDiagnostic(position: position, message: "unsupported asserted type")
+        }
+        let destination = allocateRegister()
+        let zero = try zeroValue(for: type, position: position)
+        operations.append(.typeAssert(
+            destination: destination,
+            okDestination: nil,
+            source: try lower(base),
+            targetName: targetName,
+            zero: zero))
+        return destination
+    }
+
+    mutating func lowerCompositeLiteralExpression(_ expression: GoExpression) throws -> Int {
+        guard case .compositeLiteral(let typeExpression, let elements, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let literalType = resolve(typeExpression)
+        let destination = allocateRegister()
+        switch underlying(literalType) {
+        case .structure(let fields):
+            var values: [Int] = []
+            if elements.isEmpty || elements.contains(where: { $0.key != nil }) {
+                // Fields a literal does not name, all of them in `T{}`,
+                // have their zero values.
+                let keyed = Dictionary(
+                    uniqueKeysWithValues: elements.compactMap { element in
+                        element.key.map { ($0, element.value) }
+                    })
+                for field in fields {
+                    if let expression = keyed[field.name] {
+                        values.append(try lowerConverted(expression, to: field.type))
+                    } else {
+                        values.append(try zeroValue(for: field.type, position: position))
+                    }
+                }
+            } else {
+                values = try elements.enumerated().map { index, element in
+                    try lowerConverted(
+                        element.value, to: index < fields.count ? fields[index].type : nil)
+                }
+            }
+            operations.append(
+                .makeStruct(
+                    destination: destination,
+                    typeName: typeName(of: literalType),
+                    fieldNames: fields.map(\.name),
+                    values: values))
+        case .array(let length, let elementType):
+            var values = try elements.map { try lowerConverted($0.value, to: elementType) }
+            while values.count < length {
+                values.append(try zeroValue(for: elementType, position: position))
+            }
+            operations.append(.makeArray(destination: destination, values: values))
+        case .slice(let elementType):
+            let zero = try zeroValue(for: elementType, position: position)
+            operations.append(
+                .makeSlice(
+                    destination: destination,
+                    zero: zero,
+                    values: try elements.map { try lowerConverted($0.value, to: elementType) }))
+        case .map(let keyType, let valueType):
+            var keys: [Int] = []
+            var values: [Int] = []
+            for element in elements {
+                if let keyExpression = element.keyExpression {
+                    keys.append(try lowerConverted(keyExpression, to: keyType))
+                } else if let key = element.key {
+                    keys.append(constant(.string(key)))
+                } else {
+                    throw GoDiagnostic(position: element.position, message: "missing key in map literal")
+                }
+                values.append(try lowerConverted(element.value, to: valueType))
+            }
+            operations.append(.makeMap(destination: destination, keys: keys, values: values))
+        default:
+            throw GoDiagnostic(position: position, message: "invalid composite literal type")
+        }
+        return destination
+    }
+
+    mutating func lowerIndexExpression(_ expression: GoExpression) throws -> Int {
+        guard case .index(let base, let index, _) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let destination = allocateRegister()
+        let baseType = try type(of: base)
+        if case .map = underlying(baseType) {
+            guard case .map(_, let valueType) = underlying(baseType) else {
+                throw GoDiagnostic(position: base.position, message: "invalid map type")
+            }
+            let zero = try zeroValue(for: valueType, position: base.position)
+            operations.append(
+                .getMapIndex(
+                    destination: destination,
+                    okDestination: nil,
+                    base: try lower(base),
+                    key: try lower(index),
+                    zero: zero))
+        } else {
+            operations.append(
+                .getIndex(
+                    destination: destination,
+                    base: try lower(base),
+                    index: try lower(index)))
+        }
+        return destination
+    }
+
+    mutating func lowerSlicingExpression(_ expression: GoExpression) throws -> Int {
+        guard case .slicing(let base, let low, let high, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let baseType = try type(of: base)
+        let lowRegister = try low.map { try lower($0) } ?? constant(.int(0))
+        let highRegister: Int
+        if let high {
+            highRegister = try lower(high)
+        } else {
+            let lengthBase = try lower(base)
+            highRegister = allocateRegister()
+            operations.append(.length(destination: highRegister, base: lengthBase))
+        }
+        let destination = allocateRegister()
+        if case .array(_, let elementType) = underlying(baseType) {
+            let pointer = try lowerAddress(of: base)
+            let zero = try zeroValue(for: elementType, position: position)
+            operations.append(
+                .sliceArray(
+                    destination: destination,
+                    pointer: pointer,
+                    low: lowRegister,
+                    high: highRegister,
+                    zero: zero))
+        } else {
+            operations.append(
+                .sliceValue(
+                    destination: destination,
+                    base: try lower(base),
+                    low: lowRegister,
+                    high: highRegister))
+        }
+        return destination
     }
 
     /// Whether a pointer can reach a variable `name` of `type` somewhere in

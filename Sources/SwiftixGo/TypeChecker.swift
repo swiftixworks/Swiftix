@@ -952,351 +952,28 @@ private struct FunctionChecker {
     }
 
     private mutating func checkStatement(_ statement: GoStatement) throws {
+        // Each kind of statement is checked by a function of its own. In
+        // one function, an unoptimized build keeps the locals of every
+        // case in every frame, and a statement inside a statement, or a
+        // function literal inside a call, cost the stack of all of them.
         switch statement {
-        case .declaration(let name, let explicitType, let expression, let isConstant, let position):
-            guard scopes[scopes.count - 1][name] == nil else {
-                throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
-            }
-            if let expression { try requireSingleValue(expression, at: position) }
-            let declared = try explicitType.map { try declaredType($0) }
-            let expressionType = try expression.map { try type(of: $0) }
-            if let declared, let expression, let expressionType,
-                !(try isAssignable(expression, ofType: expressionType, to: declared))
-            {
-                throw GoDiagnostic(
-                    position: expression.position,
-                    message: "cannot use \(expressionType) as \(declared) value")
-            }
-            guard let bindingType = declared ?? expressionType else {
-                throw GoDiagnostic(position: position, message: "missing type in declaration")
-            }
-            guard bindingType != .void, bindingType != .nilType else {
-                throw GoDiagnostic(
-                    position: expression?.position ?? position,
-                    message: "no value used as value")
-            }
-            scopes[scopes.count - 1][name] = Binding(
-                type: bindingType,
-                isConstant: isConstant,
-                constantValue: isConstant && declared == nil
-                    ? expression.flatMap { untypedConstantValue($0) } : nil)
-
-        case .assignment(let target, let expression, _):
-            if target.isBlank {
-                // `_ = x` evaluates `x` and keeps nothing.
-                try requireValue(expression)
-                return
-            }
-            let targetType = try assignableType(of: target, asTarget: true)
-            let expressionType = try type(of: expression)
-            guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
-                throw GoDiagnostic(
-                    position: expression.position,
-                    message: "cannot use \(expressionType) as \(targetType) value")
-            }
-
-        case .multiDeclaration(let names, let expression, let position):
-            if let variables = expression.variables {
-                if variables.isConstant {
-                    // Constants are values of the compiler: one declaration each.
-                    guard variables.values.count == names.count else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: Self.mismatch(
-                                variables: names.count, values: variables.values.count))
-                    }
-                    for (name, value) in zip(names, variables.values) {
-                        try check(
-                            .declaration(
-                                name: name, explicitType: variables.type, expression: value,
-                                isConstant: true, position: position))
-                    }
-                    return
-                }
-                try checkVariables(
-                    names, type: variables.type, values: variables.values, position: position)
-                return
-            }
-            if let values = expression.valueList {
-                try checkParallelDeclaration(names, values: values, position: position)
-                return
-            }
-            if names.allSatisfy({ $0 == GoValueList.blank || scopes[scopes.count - 1][$0] != nil }) {
-                throw GoDiagnostic(
-                    position: position, message: "no new variables on left side of :=")
-            }
-            if let statements = GoStatement.redeclaration(
-                names: names, expression: expression, position: position,
-                declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
-            {
-                for statement in statements { try check(statement) }
-                return
-            }
-            if case .unary(.receive, let channel, _) = expression,
-                case .channel(let direction, let elementType) = underlying(try type(of: channel))
-            {
-                guard direction != .sendOnly else {
-                    throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
-                }
-                guard names.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: channel receive returns 2 values")
-                }
-                scopes[scopes.count - 1][names[0]] = Binding(
-                    type: elementType, isConstant: false)
-                scopes[scopes.count - 1][names[1]] = Binding(
-                    type: .bool, isConstant: false)
-                return
-            }
-            if case .index(let base, let key, _) = expression,
-                case .map(let keyType, let valueType) = underlying(try type(of: base))
-            {
-                guard names.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: map index returns 2 values")
-                }
-                try require(key, assignableTo: keyType)
-                scopes[scopes.count - 1][names[0]] = Binding(
-                    type: valueType, isConstant: false)
-                scopes[scopes.count - 1][names[1]] = Binding(
-                    type: .bool, isConstant: false)
-                return
-            }
-            if case .typeAssertion(_, let assertedType, _) = expression {
-                guard names.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: type assertion returns 2 values")
-                }
-                let valueType = try declaredType(assertedType)
-                scopes[scopes.count - 1][names[0]] = Binding(
-                    type: valueType, isConstant: false)
-                scopes[scopes.count - 1][names[1]] = Binding(
-                    type: .bool, isConstant: false)
-                _ = try type(of: expression)
-                return
-            }
-            guard case .call(let callee, let arguments, let callPosition) = expression else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: Self.mismatch(variables: names.count, values: 1))
-            }
-            let resultTypes = try callResultTypes(
-                callee: callee, arguments: arguments, position: callPosition)
-            guard resultTypes.count == names.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: \(names.count) variables but function returns \(resultTypes.count) values")
-            }
-            for (name, resultType) in zip(names, resultTypes) {
-                // The blank identifier declares nothing and may repeat.
-                if name == "_" { continue }
-                guard scopes[scopes.count - 1][name] == nil else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "\(name) redeclared in this block")
-                }
-                scopes[scopes.count - 1][name] = Binding(
-                    type: resultType, isConstant: false)
-            }
-
-        case .multiAssignment(let targets, let expression, let position):
-            if let values = expression.valueList {
-                guard targets.count == values.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: Self.mismatch(variables: targets.count, values: values.count))
-                }
-                for (target, value) in zip(targets, values) {
-                    if target.isBlank {
-                        try requireValue(value)
-                        continue
-                    }
-                    let targetType = try assignableType(of: target, asTarget: true)
-                    try requireSingleValue(value, at: value.position)
-                    let valueType = try type(of: value)
-                    guard try isAssignable(value, ofType: valueType, to: targetType) else {
-                        throw GoDiagnostic(
-                            position: value.position,
-                            message: "cannot use \(valueType) as \(targetType) value in assignment")
-                    }
-                }
-                return
-            }
-            if case .unary(.receive, let channel, _) = expression,
-                case .channel(let direction, let elementType) = underlying(try type(of: channel))
-            {
-                guard direction != .sendOnly else {
-                    throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
-                }
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: channel receive returns 2 values")
-                }
-                for (target, resultType) in zip(targets, [elementType, GoType.bool]) {
-                    if target.isBlank { continue }
-                    let targetType = try assignableType(of: target, asTarget: true)
-                    guard isAssignable(resultType, to: targetType) else {
-                        throw GoDiagnostic(
-                            position: target.position,
-                            message: "cannot assign \(resultType) to \(targetType)")
-                    }
-                }
-                return
-            }
-            if case .index(let base, let key, _) = expression,
-                case .map(let keyType, let valueType) = underlying(try type(of: base))
-            {
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: map index returns 2 values")
-                }
-                try require(key, assignableTo: keyType)
-                for (target, resultType) in zip(targets, [valueType, .bool]) {
-                    if target.isBlank { continue }
-                    let targetType = try assignableType(of: target, asTarget: true)
-                    guard isAssignable(resultType, to: targetType) else {
-                        throw GoDiagnostic(
-                            position: target.position,
-                            message: "cannot assign \(resultType) to \(targetType)")
-                    }
-                }
-                return
-            }
-            if case .typeAssertion(_, let assertedType, _) = expression {
-                guard targets.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "assignment mismatch: type assertion returns 2 values")
-                }
-                _ = try type(of: expression)
-                let resultTypes = [try declaredType(assertedType), GoType.bool]
-                for (target, resultType) in zip(targets, resultTypes) {
-                    if target.isBlank { continue }
-                    let targetType = try assignableType(of: target, asTarget: true)
-                    guard isAssignable(resultType, to: targetType) else {
-                        throw GoDiagnostic(
-                            position: target.position,
-                            message: "cannot assign \(resultType) to \(targetType)")
-                    }
-                }
-                return
-            }
-            guard case .call(let callee, let arguments, let callPosition) = expression else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: Self.mismatch(variables: targets.count, values: 1))
-            }
-            let resultTypes = try callResultTypes(
-                callee: callee, arguments: arguments, position: callPosition)
-            guard resultTypes.count == targets.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: \(targets.count) variables but function returns \(resultTypes.count) values")
-            }
-            for (target, resultType) in zip(targets, resultTypes) {
-                if target.isBlank { continue }
-                let targetType = try assignableType(of: target, asTarget: true)
-                guard isAssignable(resultType, to: targetType) else {
-                    throw GoDiagnostic(
-                        position: target.position,
-                        message: "cannot use \(resultType) as \(targetType) value in assignment")
-                }
-            }
-
-        case .increment(let target, let incrementOperator, let position):
-            let targetType = try assignableType(of: target)
-            guard isInteger(targetType) else {
-                let spelling = incrementOperator == .increment ? "++" : "--"
-                throw GoDiagnostic(
-                    position: position,
-                    message: "invalid operation: \(spelling) on non-numeric type \(targetType)")
-            }
-
-        case .expression(let expression):
-            guard case .call(let callee, let arguments, let callPosition) = expression else {
-                if case .unary(.receive, _, _) = expression {
-                    _ = try type(of: expression)
-                    return
-                }
-                throw GoDiagnostic(
-                    position: expression.position,
-                    message: "expression evaluated but not used")
-            }
-            if try isOperatorOrConversion(expression) {
-                _ = try type(of: expression)
-                throw GoDiagnostic(
-                    position: expression.position,
-                    message: "expression evaluated but not used")
-            }
-            // A native call may discard all of its results as a statement.
-            if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
-                return
-            }
-            _ = try type(of: expression)
-
-        case .returnValues(let values, let position):
-            guard !expectedResults.isEmpty else {
-                guard values.isEmpty else {
-                    throw GoDiagnostic(position: position, message: "too many return values")
-                }
-                return
-            }
-            if values.isEmpty, namedResultCount == expectedResults.count {
-                return
-            }
-            // `return f()` forwards every result of a multi-result call.
-            if values.count == 1, expectedResults.count > 1,
-                case .call(let callee, let arguments, let callPosition) = values[0]
-            {
-                let results = try callResultTypes(
-                    callee: callee, arguments: arguments, position: callPosition)
-                guard results.count >= expectedResults.count else {
-                    throw GoDiagnostic(position: position, message: "not enough return values")
-                }
-                guard results.count <= expectedResults.count else {
-                    throw GoDiagnostic(position: position, message: "too many return values")
-                }
-                for (actual, expected) in zip(results, expectedResults) {
-                    guard isAssignable(actual, to: expected) else {
-                        throw GoDiagnostic(
-                            position: values[0].position,
-                            message: "cannot use \(actual) as \(expected) value in return statement")
-                    }
-                }
-                return
-            }
-            guard values.count >= expectedResults.count else {
-                throw GoDiagnostic(position: position, message: "not enough return values")
-            }
-            guard values.count <= expectedResults.count else {
-                throw GoDiagnostic(position: position, message: "too many return values")
-            }
-            for (value, expected) in zip(values, expectedResults) {
-                let actual = try type(of: value)
-                guard try isAssignable(value, ofType: actual, to: expected) else {
-                    throw GoDiagnostic(
-                        position: value.position,
-                        message: "cannot use \(actual) as \(expected) value in return statement")
-                }
-            }
-
+        case .declaration: try checkDeclarationStatement(statement)
+        case .assignment: try checkAssignmentStatement(statement)
+        case .multiDeclaration: try checkMultiDeclarationStatement(statement)
+        case .multiAssignment: try checkMultiAssignmentStatement(statement)
+        case .increment: try checkIncrementStatement(statement)
+        case .expression: try checkExpressionStatement(statement)
+        case .returnValues: try checkReturnValuesStatement(statement)
         case .breakStatement(let position):
             guard breakableDepth > 0 else {
                 throw GoDiagnostic(
                     position: position,
                     message: "break is not in a loop, switch, or select")
             }
-
         case .continueStatement(let position):
             guard loopDepth > 0 else {
                 throw GoDiagnostic(position: position, message: "continue is not in a loop")
             }
-
         case .deferStatement(let expression, let position),
             .goStatement(let expression, let position):
             let keyword: String
@@ -1312,354 +989,592 @@ private struct FunctionChecker {
                 return
             }
             _ = try type(of: expression)
-
-        case .sendStatement(let channel, let value, _):
-            guard case .channel(let direction, let elementType) = underlying(try type(of: channel)) else {
-                throw GoDiagnostic(position: channel.position, message: "cannot send to non-channel value")
-            }
-            guard direction != .receiveOnly else {
-                throw GoDiagnostic(position: channel.position, message: "cannot send to receive-only channel")
-            }
-            let valueType = try type(of: value)
-            guard try isAssignable(value, ofType: valueType, to: elementType) else {
-                throw GoDiagnostic(
-                    position: value.position,
-                    message: "cannot send \(valueType) value on \(elementType) channel")
-            }
-
-        case .ifStatement(let condition, let thenBlock, let elseBlock, _):
-            try requireBool(condition)
-            try checkBlock(thenBlock)
-            if let elseBlock { try checkBlock(elseBlock) }
-
-        case .forStatement(let initializer, let condition, let post, let body, _):
-            scopes.append([:])
-            defer { scopes.removeLast() }
-            if let scoped = statement.initialized {
-                // An `if` or `switch` with an initializer: its variables are
-                // in scope for the statement, which is no loop.
-                try check(scoped.initializer)
-                try check(scoped.statement)
-                endScope()
-                break
-            }
-            if let block = statement.block {
-                try checkBlock(block)
-                break
-            }
-            if let initializer { try check(initializer) }
-            if let condition {
-                read(condition)
-                try requireBool(condition)
-            }
-            if let post { try check(post) }
-            breakableDepth += 1
-            loopDepth += 1
-            defer {
-                breakableDepth -= 1
-                loopDepth -= 1
-            }
-            try checkBlock(body)
-            endScope()
-
-        case .forRangeStatement(let indexName, let valueName, let collection, let body, let position):
-            scopes.append([:])
-            defer { scopes.removeLast() }
-            let collectionType = try type(of: collection)
-            let elementType: GoType
-            switch underlying(collectionType) {
-            case .array(_, let element): elementType = element
-            case .slice(let element): elementType = element
-            case .string: elementType = .int
-            case .map(_, let value): elementType = value
-            case .channel(let direction, let element):
-                guard direction != .sendOnly else {
-                    throw GoDiagnostic(
-                        position: collection.position,
-                        message: "cannot range over send-only channel")
-                }
-                guard valueName == nil else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "range over channel permits only one iteration variable")
-                }
-                elementType = element
-            default:
-                throw GoDiagnostic(
-                    position: collection.position,
-                    message: "cannot range over \(collectionType)")
-            }
-            if let indexName {
-                let indexType: GoType
-                if case .map(let key, _) = underlying(collectionType) {
-                    indexType = key
-                } else if case .channel(_, let element) = underlying(collectionType) {
-                    indexType = element
-                } else {
-                    indexType = .int
-                }
-                scopes[scopes.count - 1][indexName] = Binding(type: indexType, isConstant: false)
-            }
-            if let valueName {
-                scopes[scopes.count - 1][valueName] = Binding(type: elementType, isConstant: false)
-            }
-            let positions = namePositions[position.offset] ?? []
-            for (index, name) in [indexName, valueName].enumerated() {
-                if let name { place(name, at: index < positions.count ? positions[index] : position) }
-            }
-            breakableDepth += 1
-            loopDepth += 1
-            defer {
-                breakableDepth -= 1
-                loopDepth -= 1
-            }
-            try checkBlock(body)
-            endScope()
-
-        case .switchStatement(let expression, let cases, _):
-            let switchType = try expression.map { try type(of: $0) } ?? .bool
-            guard switchType != .void else {
-                throw GoDiagnostic(
-                    position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
-                    message: "switch expression used as value")
-            }
-            guard isComparable(switchType) else {
-                throw GoDiagnostic(
-                    position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
-                    message: "switch expression is not comparable")
-            }
-            var hasDefault = false
-            var constants: Set<SwitchCaseConstant> = []
-            breakableDepth += 1
-            defer { breakableDepth -= 1 }
-            for switchCase in cases {
-                if switchCase.isDefault {
-                    guard !hasDefault else {
-                        throw GoDiagnostic(
-                            position: switchCase.position,
-                            message: "multiple defaults in switch")
-                    }
-                    hasDefault = true
-                }
-                for caseExpression in switchCase.expressions {
-                    let caseType = try type(of: caseExpression)
-                    // An untyped constant case adopts an integer switch type.
-                    let matchesSwitch = try caseType == switchType
-                        || (isInteger(switchType)
-                            && isAssignable(caseExpression, ofType: caseType, to: switchType))
-                    guard matchesSwitch else {
-                        throw GoDiagnostic(
-                            position: caseExpression.position,
-                            message: "invalid case \(caseType) in switch on \(switchType)")
-                    }
-                    if let constant = switchCaseConstant(caseExpression),
-                        !constants.insert(constant).inserted
-                    {
-                        throw GoDiagnostic(
-                            position: caseExpression.position,
-                            message: "duplicate case in switch")
-                    }
-                }
-                try checkBlock(switchCase.body)
-            }
-
-        case .selectStatement(let cases, let position):
-            guard !cases.isEmpty else {
-                // `select {}` is valid and blocks forever.
-                return
-            }
-            var hasDefault = false
-            breakableDepth += 1
-            defer { breakableDepth -= 1 }
-            for selectCase in cases {
-                scopes.append([:])
-                defer { scopes.removeLast() }
-                if let communication = selectCase.communication {
-                    guard isSelectCommunication(communication) else {
-                        throw GoDiagnostic(
-                            position: selectCase.position,
-                            message: "select case must be send or receive")
-                    }
-                    try check(communication)
-                } else {
-                    guard !hasDefault else {
-                        throw GoDiagnostic(
-                            position: selectCase.position,
-                            message: "multiple defaults in select")
-                    }
-                    hasDefault = true
-                }
-                try checkBlock(selectCase.body, createsScope: false)
-                endScope()
-            }
-            _ = position
+        case .sendStatement: try checkSendStatement(statement)
+        case .ifStatement: try checkIfStatement(statement)
+        case .forStatement: try checkForStatement(statement)
+        case .forRangeStatement: try checkForRangeStatement(statement)
+        case .switchStatement: try checkSwitchStatement(statement)
+        case .selectStatement: try checkSelectStatement(statement)
         }
     }
 
+    private mutating func checkDeclarationStatement(_ statement: GoStatement) throws {
+        guard case .declaration(let name, let explicitType, let expression, let isConstant, let position) = statement else {
+            return
+        }
+        guard scopes[scopes.count - 1][name] == nil else {
+            throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
+        }
+        if let expression { try requireSingleValue(expression, at: position) }
+        let declared = try explicitType.map { try declaredType($0) }
+        let expressionType = try expression.map { try type(of: $0) }
+        if let declared, let expression, let expressionType,
+            !(try isAssignable(expression, ofType: expressionType, to: declared))
+        {
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "cannot use \(expressionType) as \(declared) value")
+        }
+        guard let bindingType = declared ?? expressionType else {
+            throw GoDiagnostic(position: position, message: "missing type in declaration")
+        }
+        guard bindingType != .void, bindingType != .nilType else {
+            throw GoDiagnostic(
+                position: expression?.position ?? position,
+                message: "no value used as value")
+        }
+        scopes[scopes.count - 1][name] = Binding(
+            type: bindingType,
+            isConstant: isConstant,
+            constantValue: isConstant && declared == nil
+                ? expression.flatMap { untypedConstantValue($0) } : nil)
+    }
+
+    private mutating func checkAssignmentStatement(_ statement: GoStatement) throws {
+        guard case .assignment(let target, let expression, _) = statement else {
+            return
+        }
+        if target.isBlank {
+            // `_ = x` evaluates `x` and keeps nothing.
+            try requireValue(expression)
+            return
+        }
+        let targetType = try assignableType(of: target, asTarget: true)
+        let expressionType = try type(of: expression)
+        guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "cannot use \(expressionType) as \(targetType) value")
+        }
+    }
+
+    private mutating func checkMultiDeclarationStatement(_ statement: GoStatement) throws {
+        guard case .multiDeclaration(let names, let expression, let position) = statement else {
+            return
+        }
+        if let variables = expression.variables {
+            if variables.isConstant {
+                // Constants are values of the compiler: one declaration each.
+                guard variables.values.count == names.count else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: Self.mismatch(
+                            variables: names.count, values: variables.values.count))
+                }
+                for (name, value) in zip(names, variables.values) {
+                    try check(
+                        .declaration(
+                            name: name, explicitType: variables.type, expression: value,
+                            isConstant: true, position: position))
+                }
+                return
+            }
+            try checkVariables(
+                names, type: variables.type, values: variables.values, position: position)
+            return
+        }
+        if let values = expression.valueList {
+            try checkParallelDeclaration(names, values: values, position: position)
+            return
+        }
+        if names.allSatisfy({ $0 == GoValueList.blank || scopes[scopes.count - 1][$0] != nil }) {
+            throw GoDiagnostic(
+                position: position, message: "no new variables on left side of :=")
+        }
+        if let statements = GoStatement.redeclaration(
+            names: names, expression: expression, position: position,
+            declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
+        {
+            for statement in statements { try check(statement) }
+            return
+        }
+        if case .unary(.receive, let channel, _) = expression,
+            case .channel(let direction, let elementType) = underlying(try type(of: channel))
+        {
+            guard direction != .sendOnly else {
+                throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
+            }
+            guard names.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: channel receive returns 2 values")
+            }
+            scopes[scopes.count - 1][names[0]] = Binding(
+                type: elementType, isConstant: false)
+            scopes[scopes.count - 1][names[1]] = Binding(
+                type: .bool, isConstant: false)
+            return
+        }
+        if case .index(let base, let key, _) = expression,
+            case .map(let keyType, let valueType) = underlying(try type(of: base))
+        {
+            guard names.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: map index returns 2 values")
+            }
+            try require(key, assignableTo: keyType)
+            scopes[scopes.count - 1][names[0]] = Binding(
+                type: valueType, isConstant: false)
+            scopes[scopes.count - 1][names[1]] = Binding(
+                type: .bool, isConstant: false)
+            return
+        }
+        if case .typeAssertion(_, let assertedType, _) = expression {
+            guard names.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: type assertion returns 2 values")
+            }
+            let valueType = try declaredType(assertedType)
+            scopes[scopes.count - 1][names[0]] = Binding(
+                type: valueType, isConstant: false)
+            scopes[scopes.count - 1][names[1]] = Binding(
+                type: .bool, isConstant: false)
+            _ = try type(of: expression)
+            return
+        }
+        guard case .call(let callee, let arguments, let callPosition) = expression else {
+            throw GoDiagnostic(
+                position: position,
+                message: Self.mismatch(variables: names.count, values: 1))
+        }
+        let resultTypes = try callResultTypes(
+            callee: callee, arguments: arguments, position: callPosition)
+        guard resultTypes.count == names.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: "assignment mismatch: \(names.count) variables but function returns \(resultTypes.count) values")
+        }
+        for (name, resultType) in zip(names, resultTypes) {
+            // The blank identifier declares nothing and may repeat.
+            if name == "_" { continue }
+            guard scopes[scopes.count - 1][name] == nil else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "\(name) redeclared in this block")
+            }
+            scopes[scopes.count - 1][name] = Binding(
+                type: resultType, isConstant: false)
+        }
+    }
+
+    private mutating func checkMultiAssignmentStatement(_ statement: GoStatement) throws {
+        guard case .multiAssignment(let targets, let expression, let position) = statement else {
+            return
+        }
+        if let values = expression.valueList {
+            guard targets.count == values.count else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: Self.mismatch(variables: targets.count, values: values.count))
+            }
+            for (target, value) in zip(targets, values) {
+                if target.isBlank {
+                    try requireValue(value)
+                    continue
+                }
+                let targetType = try assignableType(of: target, asTarget: true)
+                try requireSingleValue(value, at: value.position)
+                let valueType = try type(of: value)
+                guard try isAssignable(value, ofType: valueType, to: targetType) else {
+                    throw GoDiagnostic(
+                        position: value.position,
+                        message: "cannot use \(valueType) as \(targetType) value in assignment")
+                }
+            }
+            return
+        }
+        if case .unary(.receive, let channel, _) = expression,
+            case .channel(let direction, let elementType) = underlying(try type(of: channel))
+        {
+            guard direction != .sendOnly else {
+                throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
+            }
+            guard targets.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: channel receive returns 2 values")
+            }
+            for (target, resultType) in zip(targets, [elementType, GoType.bool]) {
+                if target.isBlank { continue }
+                let targetType = try assignableType(of: target, asTarget: true)
+                guard isAssignable(resultType, to: targetType) else {
+                    throw GoDiagnostic(
+                        position: target.position,
+                        message: "cannot assign \(resultType) to \(targetType)")
+                }
+            }
+            return
+        }
+        if case .index(let base, let key, _) = expression,
+            case .map(let keyType, let valueType) = underlying(try type(of: base))
+        {
+            guard targets.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: map index returns 2 values")
+            }
+            try require(key, assignableTo: keyType)
+            for (target, resultType) in zip(targets, [valueType, .bool]) {
+                if target.isBlank { continue }
+                let targetType = try assignableType(of: target, asTarget: true)
+                guard isAssignable(resultType, to: targetType) else {
+                    throw GoDiagnostic(
+                        position: target.position,
+                        message: "cannot assign \(resultType) to \(targetType)")
+                }
+            }
+            return
+        }
+        if case .typeAssertion(_, let assertedType, _) = expression {
+            guard targets.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "assignment mismatch: type assertion returns 2 values")
+            }
+            _ = try type(of: expression)
+            let resultTypes = [try declaredType(assertedType), GoType.bool]
+            for (target, resultType) in zip(targets, resultTypes) {
+                if target.isBlank { continue }
+                let targetType = try assignableType(of: target, asTarget: true)
+                guard isAssignable(resultType, to: targetType) else {
+                    throw GoDiagnostic(
+                        position: target.position,
+                        message: "cannot assign \(resultType) to \(targetType)")
+                }
+            }
+            return
+        }
+        guard case .call(let callee, let arguments, let callPosition) = expression else {
+            throw GoDiagnostic(
+                position: position,
+                message: Self.mismatch(variables: targets.count, values: 1))
+        }
+        let resultTypes = try callResultTypes(
+            callee: callee, arguments: arguments, position: callPosition)
+        guard resultTypes.count == targets.count else {
+            throw GoDiagnostic(
+                position: position,
+                message: "assignment mismatch: \(targets.count) variables but function returns \(resultTypes.count) values")
+        }
+        for (target, resultType) in zip(targets, resultTypes) {
+            if target.isBlank { continue }
+            let targetType = try assignableType(of: target, asTarget: true)
+            guard isAssignable(resultType, to: targetType) else {
+                throw GoDiagnostic(
+                    position: target.position,
+                    message: "cannot use \(resultType) as \(targetType) value in assignment")
+            }
+        }
+    }
+
+    private mutating func checkIncrementStatement(_ statement: GoStatement) throws {
+        guard case .increment(let target, let incrementOperator, let position) = statement else {
+            return
+        }
+        let targetType = try assignableType(of: target)
+        guard isInteger(targetType) else {
+            let spelling = incrementOperator == .increment ? "++" : "--"
+            throw GoDiagnostic(
+                position: position,
+                message: "invalid operation: \(spelling) on non-numeric type \(targetType)")
+        }
+    }
+
+    private mutating func checkExpressionStatement(_ statement: GoStatement) throws {
+        guard case .expression(let expression) = statement else {
+            return
+        }
+        guard case .call(let callee, let arguments, let callPosition) = expression else {
+            if case .unary(.receive, _, _) = expression {
+                _ = try type(of: expression)
+                return
+            }
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "expression evaluated but not used")
+        }
+        if try isOperatorOrConversion(expression) {
+            _ = try type(of: expression)
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "expression evaluated but not used")
+        }
+        // A native call may discard all of its results as a statement.
+        if try nativeCall(callee: callee, arguments: arguments, position: callPosition) != nil {
+            return
+        }
+        _ = try type(of: expression)
+    }
+
+    private mutating func checkReturnValuesStatement(_ statement: GoStatement) throws {
+        guard case .returnValues(let values, let position) = statement else {
+            return
+        }
+        guard !expectedResults.isEmpty else {
+            guard values.isEmpty else {
+                throw GoDiagnostic(position: position, message: "too many return values")
+            }
+            return
+        }
+        if values.isEmpty, namedResultCount == expectedResults.count {
+            return
+        }
+        // `return f()` forwards every result of a multi-result call.
+        if values.count == 1, expectedResults.count > 1,
+            case .call(let callee, let arguments, let callPosition) = values[0]
+        {
+            let results = try callResultTypes(
+                callee: callee, arguments: arguments, position: callPosition)
+            guard results.count >= expectedResults.count else {
+                throw GoDiagnostic(position: position, message: "not enough return values")
+            }
+            guard results.count <= expectedResults.count else {
+                throw GoDiagnostic(position: position, message: "too many return values")
+            }
+            for (actual, expected) in zip(results, expectedResults) {
+                guard isAssignable(actual, to: expected) else {
+                    throw GoDiagnostic(
+                        position: values[0].position,
+                        message: "cannot use \(actual) as \(expected) value in return statement")
+                }
+            }
+            return
+        }
+        guard values.count >= expectedResults.count else {
+            throw GoDiagnostic(position: position, message: "not enough return values")
+        }
+        guard values.count <= expectedResults.count else {
+            throw GoDiagnostic(position: position, message: "too many return values")
+        }
+        for (value, expected) in zip(values, expectedResults) {
+            let actual = try type(of: value)
+            guard try isAssignable(value, ofType: actual, to: expected) else {
+                throw GoDiagnostic(
+                    position: value.position,
+                    message: "cannot use \(actual) as \(expected) value in return statement")
+            }
+        }
+    }
+
+    private mutating func checkSendStatement(_ statement: GoStatement) throws {
+        guard case .sendStatement(let channel, let value, _) = statement else {
+            return
+        }
+        guard case .channel(let direction, let elementType) = underlying(try type(of: channel)) else {
+            throw GoDiagnostic(position: channel.position, message: "cannot send to non-channel value")
+        }
+        guard direction != .receiveOnly else {
+            throw GoDiagnostic(position: channel.position, message: "cannot send to receive-only channel")
+        }
+        let valueType = try type(of: value)
+        guard try isAssignable(value, ofType: valueType, to: elementType) else {
+            throw GoDiagnostic(
+                position: value.position,
+                message: "cannot send \(valueType) value on \(elementType) channel")
+        }
+    }
+
+    private mutating func checkIfStatement(_ statement: GoStatement) throws {
+        guard case .ifStatement(let condition, let thenBlock, let elseBlock, _) = statement else {
+            return
+        }
+        try requireBool(condition)
+        try checkBlock(thenBlock)
+        if let elseBlock { try checkBlock(elseBlock) }
+    }
+
+    private mutating func checkForStatement(_ statement: GoStatement) throws {
+        guard case .forStatement(let initializer, let condition, let post, let body, _) = statement else {
+            return
+        }
+        scopes.append([:])
+        defer { scopes.removeLast() }
+        if let scoped = statement.initialized {
+            // An `if` or `switch` with an initializer: its variables are
+            // in scope for the statement, which is no loop.
+            try check(scoped.initializer)
+            try check(scoped.statement)
+            endScope()
+            return
+        }
+        if let block = statement.block {
+            try checkBlock(block)
+            return
+        }
+        if let initializer { try check(initializer) }
+        if let condition {
+            read(condition)
+            try requireBool(condition)
+        }
+        if let post { try check(post) }
+        breakableDepth += 1
+        loopDepth += 1
+        defer {
+            breakableDepth -= 1
+            loopDepth -= 1
+        }
+        try checkBlock(body)
+        endScope()
+    }
+
+    private mutating func checkForRangeStatement(_ statement: GoStatement) throws {
+        guard case .forRangeStatement(let indexName, let valueName, let collection, let body, let position) = statement else {
+            return
+        }
+        scopes.append([:])
+        defer { scopes.removeLast() }
+        let collectionType = try type(of: collection)
+        let elementType: GoType
+        switch underlying(collectionType) {
+        case .array(_, let element): elementType = element
+        case .slice(let element): elementType = element
+        case .string: elementType = .int
+        case .map(_, let value): elementType = value
+        case .channel(let direction, let element):
+            guard direction != .sendOnly else {
+                throw GoDiagnostic(
+                    position: collection.position,
+                    message: "cannot range over send-only channel")
+            }
+            guard valueName == nil else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "range over channel permits only one iteration variable")
+            }
+            elementType = element
+        default:
+            throw GoDiagnostic(
+                position: collection.position,
+                message: "cannot range over \(collectionType)")
+        }
+        if let indexName {
+            let indexType: GoType
+            if case .map(let key, _) = underlying(collectionType) {
+                indexType = key
+            } else if case .channel(_, let element) = underlying(collectionType) {
+                indexType = element
+            } else {
+                indexType = .int
+            }
+            scopes[scopes.count - 1][indexName] = Binding(type: indexType, isConstant: false)
+        }
+        if let valueName {
+            scopes[scopes.count - 1][valueName] = Binding(type: elementType, isConstant: false)
+        }
+        let positions = namePositions[position.offset] ?? []
+        for (index, name) in [indexName, valueName].enumerated() {
+            if let name { place(name, at: index < positions.count ? positions[index] : position) }
+        }
+        breakableDepth += 1
+        loopDepth += 1
+        defer {
+            breakableDepth -= 1
+            loopDepth -= 1
+        }
+        try checkBlock(body)
+        endScope()
+    }
+
+    private mutating func checkSwitchStatement(_ statement: GoStatement) throws {
+        guard case .switchStatement(let expression, let cases, _) = statement else {
+            return
+        }
+        let switchType = try expression.map { try type(of: $0) } ?? .bool
+        guard switchType != .void else {
+            throw GoDiagnostic(
+                position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
+                message: "switch expression used as value")
+        }
+        guard isComparable(switchType) else {
+            throw GoDiagnostic(
+                position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
+                message: "switch expression is not comparable")
+        }
+        var hasDefault = false
+        var constants: Set<SwitchCaseConstant> = []
+        breakableDepth += 1
+        defer { breakableDepth -= 1 }
+        for switchCase in cases {
+            if switchCase.isDefault {
+                guard !hasDefault else {
+                    throw GoDiagnostic(
+                        position: switchCase.position,
+                        message: "multiple defaults in switch")
+                }
+                hasDefault = true
+            }
+            for caseExpression in switchCase.expressions {
+                let caseType = try type(of: caseExpression)
+                // An untyped constant case adopts an integer switch type.
+                let matchesSwitch = try caseType == switchType
+                    || (isInteger(switchType)
+                        && isAssignable(caseExpression, ofType: caseType, to: switchType))
+                guard matchesSwitch else {
+                    throw GoDiagnostic(
+                        position: caseExpression.position,
+                        message: "invalid case \(caseType) in switch on \(switchType)")
+                }
+                if let constant = switchCaseConstant(caseExpression),
+                    !constants.insert(constant).inserted
+                {
+                    throw GoDiagnostic(
+                        position: caseExpression.position,
+                        message: "duplicate case in switch")
+                }
+            }
+            try checkBlock(switchCase.body)
+        }
+    }
+
+    private mutating func checkSelectStatement(_ statement: GoStatement) throws {
+        guard case .selectStatement(let cases, let position) = statement else {
+            return
+        }
+        guard !cases.isEmpty else {
+            // `select {}` is valid and blocks forever.
+            return
+        }
+        var hasDefault = false
+        breakableDepth += 1
+        defer { breakableDepth -= 1 }
+        for selectCase in cases {
+            scopes.append([:])
+            defer { scopes.removeLast() }
+            if let communication = selectCase.communication {
+                guard isSelectCommunication(communication) else {
+                    throw GoDiagnostic(
+                        position: selectCase.position,
+                        message: "select case must be send or receive")
+                }
+                try check(communication)
+            } else {
+                guard !hasDefault else {
+                    throw GoDiagnostic(
+                        position: selectCase.position,
+                        message: "multiple defaults in select")
+                }
+                hasDefault = true
+            }
+            try checkBlock(selectCase.body, createsScope: false)
+            endScope()
+        }
+        _ = position
+    }
+
     mutating func type(of expression: GoExpression) throws -> GoType {
+        // One function for each kind of expression, like the statements.
         switch expression {
         case .integer:
             return .int
         case .string:
             return .string
-        case .identifier(let name, let position):
-            if name == "true" || name == "false" { return .bool }
-            if name == "nil" { return .nilType }
-            guard let binding = lookup(name) else {
-                let isPackage = importedPaths.contains {
-                    GoImportName.defaultName(ofPath: $0) == name
-                }
-                throw GoDiagnostic(
-                    position: position,
-                    message: isPackage
-                        ? GoImportName.misuse(ofPackage: name) : "undefined: \(name)")
-            }
-            use(name)
-            return binding.type
-        case .selector(let base, let name, let position):
-            if case .identifier(let packageName, _) = base,
-                importedPaths.contains(packageName),
-                GoStandardLibrary.integerConstant(package: packageName, member: name) != nil
-            {
-                return .int
-            }
-            if case .identifier(let packageName, _) = base,
-                importedPaths.contains(packageName),
-                lookup(packageName) == nil,
-                GoStandardLibrary.errorValue(package: packageName, member: name) != nil
-            {
-                return GoPredeclared.errorType
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "fmt",
-                importedPaths.contains("fmt"),
-                name == "Print" || name == "Println"
-            {
-                return .void
-            }
-            if case .identifier("os", _) = base,
-                importedPaths.contains("os"),
-                name == "Args"
-            {
-                return .slice(.string)
-            }
-            if case .identifier("os", _) = base,
-                importedPaths.contains("os"),
-                lookup("os") == nil,
-                GoStandardLibrary.standardFileDescriptor(member: name) != nil
-            {
-                return GoPredeclared.filePointer
-            }
-            if let packageName = importedPackage(named: base) {
-                // Nothing above knows the member of the package.
-                throw GoDiagnostic(position: position, message: "undefined: \(packageName).\(name)")
-            }
-            let baseType = try type(of: base)
-            guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "\(baseType) has no field or method \(name)")
-            }
-            return field.type
-        case .compositeLiteral(let typeExpression, let elements, let position):
-            let literalType = try declaredType(typeExpression)
-            switch underlying(literalType) {
-            case .structure(let fields):
-                let keyed = elements.contains { $0.key != nil }
-                if keyed, elements.contains(where: { $0.key == nil }) {
-                    throw GoDiagnostic(position: position, message: "mixture of field:value and value elements")
-                }
-                if keyed {
-                    var seen: Set<String> = []
-                    for element in elements {
-                        guard let key = element.key,
-                            let field = fields.first(where: { $0.name == key })
-                        else {
-                            throw GoDiagnostic(
-                                position: element.position,
-                                message: "unknown field \(element.key ?? "") in struct literal of type \(literalType)")
-                        }
-                        guard seen.insert(key).inserted else {
-                            throw GoDiagnostic(
-                                position: element.position,
-                                message: "duplicate field name \(key) in struct literal")
-                        }
-                        try require(element.value, assignableTo: field.type)
-                    }
-                } else if !elements.isEmpty {
-                    // `T{}` is the zero value; a literal without field names
-                    // gives every field.
-                    guard elements.count == fields.count else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message:
-                                "too \(elements.count < fields.count ? "few" : "many") values in struct literal of type \(literalType)"
-                        )
-                    }
-                    for (element, field) in zip(elements, fields) {
-                        try require(element.value, assignableTo: field.type)
-                    }
-                }
-            case .array(let length, let elementType):
-                guard !elements.contains(where: { $0.key != nil }) else {
-                    throw GoDiagnostic(position: position, message: "keyed array literals are not supported yet")
-                }
-                guard elements.count <= length else {
-                    throw GoDiagnostic(position: position, message: "index out of bounds in array literal")
-                }
-                for element in elements { try require(element.value, assignableTo: elementType) }
-            case .slice(let elementType):
-                guard !elements.contains(where: { $0.key != nil }) else {
-                    throw GoDiagnostic(position: position, message: "keyed slice literals are not supported yet")
-                }
-                for element in elements { try require(element.value, assignableTo: elementType) }
-            case .map(let keyType, let valueType):
-                for element in elements {
-                    if let keyExpression = element.keyExpression {
-                        try require(keyExpression, assignableTo: keyType)
-                    } else if element.key == nil {
-                        throw GoDiagnostic(position: element.position, message: "missing key in map literal")
-                    }
-                    try require(element.value, assignableTo: valueType)
-                }
-            default:
-                throw GoDiagnostic(position: position, message: "invalid composite literal type \(literalType)")
-            }
-            return literalType
-        case .index(let base, let index, let position):
-            let baseType = underlying(try type(of: base))
-            switch baseType {
-            case .array(_, let element), .slice(let element):
-                guard isInteger(try type(of: index)) else {
-                    throw GoDiagnostic(position: index.position, message: "index must be integer")
-                }
-                return element
-            case .string:
-                guard isInteger(try type(of: index)) else {
-                    throw GoDiagnostic(position: index.position, message: "index must be integer")
-                }
-                return GoPredeclared.byte
-            case .map(let keyType, let valueType):
-                let indexType = try type(of: index)
-                guard try isAssignable(index, ofType: indexType, to: keyType) else {
-                    throw GoDiagnostic(
-                        position: index.position,
-                        message: "cannot use \(indexType) as \(keyType) value in map index")
-                }
-                return valueType
-            default:
-                throw GoDiagnostic(position: position, message: "cannot index expression")
-            }
-        case .slicing(let base, let low, let high, let position):
-            for bound in [low, high].compactMap({ $0 }) where !isInteger(try type(of: bound)) {
-                throw GoDiagnostic(position: bound.position, message: "slice index must be integer")
-            }
-            switch underlying(try type(of: base)) {
-            case .array(_, let element), .slice(let element): return .slice(element)
-            case .string: return .string
-            default:
-                throw GoDiagnostic(position: position, message: "cannot slice expression")
-            }
+        case .identifier: return try typeOfIdentifier(expression)
+        case .selector: return try typeOfSelector(expression)
+        case .compositeLiteral: return try typeOfCompositeLiteral(expression)
+        case .index: return try typeOfIndex(expression)
+        case .slicing: return try typeOfSlicing(expression)
         case .typeExpression(_, let position):
             throw GoDiagnostic(position: position, message: "type is not an expression")
         case .typeAssertion(let base, let assertedType, let position):
@@ -1703,112 +1618,307 @@ private struct FunctionChecker {
             // expression costs, and the cases of a call are most of it.
             return try callType(
                 of: expression, callee: callee, arguments: arguments, position: position)
-        case .unary(let unaryOperator, let operand, let position):
-            switch unaryOperator {
-            case .plus, .minus:
-                let operandType = try type(of: operand)
-                guard isInteger(operandType) else {
-                    throw GoDiagnostic(position: position, message: "operator requires integer operand")
+        case .unary: return try typeOfUnary(expression)
+        case .binary: return try typeOfBinary(expression)
+        }
+    }
+
+    mutating func typeOfIdentifier(_ expression: GoExpression) throws -> GoType {
+        guard case .identifier(let name, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if name == "true" || name == "false" { return .bool }
+        if name == "nil" { return .nilType }
+        guard let binding = lookup(name) else {
+            let isPackage = importedPaths.contains {
+                GoImportName.defaultName(ofPath: $0) == name
+            }
+            throw GoDiagnostic(
+                position: position,
+                message: isPackage
+                    ? GoImportName.misuse(ofPackage: name) : "undefined: \(name)")
+        }
+        use(name)
+        return binding.type
+    }
+
+    mutating func typeOfSelector(_ expression: GoExpression) throws -> GoType {
+        guard case .selector(let base, let name, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        if case .identifier(let packageName, _) = base,
+            importedPaths.contains(packageName),
+            GoStandardLibrary.integerConstant(package: packageName, member: name) != nil
+        {
+            return .int
+        }
+        if case .identifier(let packageName, _) = base,
+            importedPaths.contains(packageName),
+            lookup(packageName) == nil,
+            GoStandardLibrary.errorValue(package: packageName, member: name) != nil
+        {
+            return GoPredeclared.errorType
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "fmt",
+            importedPaths.contains("fmt"),
+            name == "Print" || name == "Println"
+        {
+            return .void
+        }
+        if case .identifier("os", _) = base,
+            importedPaths.contains("os"),
+            name == "Args"
+        {
+            return .slice(.string)
+        }
+        if case .identifier("os", _) = base,
+            importedPaths.contains("os"),
+            lookup("os") == nil,
+            GoStandardLibrary.standardFileDescriptor(member: name) != nil
+        {
+            return GoPredeclared.filePointer
+        }
+        if let packageName = importedPackage(named: base) {
+            // Nothing above knows the member of the package.
+            throw GoDiagnostic(position: position, message: "undefined: \(packageName).\(name)")
+        }
+        let baseType = try type(of: base)
+        guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
+            throw GoDiagnostic(
+                position: position,
+                message: "\(baseType) has no field or method \(name)")
+        }
+        return field.type
+    }
+
+    mutating func typeOfCompositeLiteral(_ expression: GoExpression) throws -> GoType {
+        guard case .compositeLiteral(let typeExpression, let elements, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let literalType = try declaredType(typeExpression)
+        switch underlying(literalType) {
+        case .structure(let fields):
+            let keyed = elements.contains { $0.key != nil }
+            if keyed, elements.contains(where: { $0.key == nil }) {
+                throw GoDiagnostic(position: position, message: "mixture of field:value and value elements")
+            }
+            if keyed {
+                var seen: Set<String> = []
+                for element in elements {
+                    guard let key = element.key,
+                        let field = fields.first(where: { $0.name == key })
+                    else {
+                        throw GoDiagnostic(
+                            position: element.position,
+                            message: "unknown field \(element.key ?? "") in struct literal of type \(literalType)")
+                    }
+                    guard seen.insert(key).inserted else {
+                        throw GoDiagnostic(
+                            position: element.position,
+                            message: "duplicate field name \(key) in struct literal")
+                    }
+                    try require(element.value, assignableTo: field.type)
                 }
-                return operandType
-            case .not:
-                let operandType = try type(of: operand)
-                guard isBool(operandType) else {
-                    throw GoDiagnostic(position: position, message: "operator ! not defined on \(operandType)")
-                }
-                return operandType
-            case .address:
-                // A composite literal is the one operand that is not a
-                // variable: `&T{...}` makes one.
-                if case .compositeLiteral = operand { return .pointer(try type(of: operand)) }
-                guard isAddressable(operand) else {
+            } else if !elements.isEmpty {
+                // `T{}` is the zero value; a literal without field names
+                // gives every field.
+                guard elements.count == fields.count else {
                     throw GoDiagnostic(
-                        position: operand.position,
-                        message: "invalid operation: cannot take address of a value that is not a variable")
+                        position: position,
+                        message:
+                            "too \(elements.count < fields.count ? "few" : "many") values in struct literal of type \(literalType)"
+                    )
                 }
-                return .pointer(try assignableType(of: operand))
-            case .dereference:
-                let operandType = try type(of: operand)
-                guard case .pointer(let pointee) = operandType else {
-                    throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
+                for (element, field) in zip(elements, fields) {
+                    try require(element.value, assignableTo: field.type)
                 }
-                try rejectOpaqueFile(pointee, at: position)
-                return pointee
-            case .receive:
-                let operandType = underlying(try type(of: operand))
-                guard case .channel(let direction, let elementType) = operandType else {
-                    throw GoDiagnostic(position: position, message: "cannot receive from non-channel value")
-                }
-                guard direction != .sendOnly else {
-                    throw GoDiagnostic(position: position, message: "cannot receive from send-only channel")
-                }
-                return elementType
             }
-        case .binary(let left, let binaryOperator, let right, let position):
-            var leftType = try type(of: left)
-            var rightType = try type(of: right)
-            if leftType != rightType,
-                let common = try commonIntegerType(
-                    left: left, leftType: leftType, right: right, rightType: rightType)
-            {
-                leftType = common
-                rightType = common
+        case .array(let length, let elementType):
+            guard !elements.contains(where: { $0.key != nil }) else {
+                throw GoDiagnostic(position: position, message: "keyed array literals are not supported yet")
             }
-            guard
-                leftType == rightType
-                    || ((leftType == .nilType || rightType == .nilType)
-                        && (isPointer(leftType) || isPointer(rightType)
-                            || isSlice(leftType) || isSlice(rightType)
-                            || isMap(leftType) || isMap(rightType)
-                            || isChannel(leftType) || isChannel(rightType)
-                            || isInterface(leftType) || isInterface(rightType)))
-            else {
-                throw GoDiagnostic(position: position, message: "mismatched types \(leftType) and \(rightType)")
+            guard elements.count <= length else {
+                throw GoDiagnostic(position: position, message: "index out of bounds in array literal")
             }
-            switch binaryOperator {
-            case .add:
-                guard isInteger(leftType) || isString(leftType) else {
-                    throw GoDiagnostic(position: position, message: "operator + not defined on \(leftType)")
+            for element in elements { try require(element.value, assignableTo: elementType) }
+        case .slice(let elementType):
+            guard !elements.contains(where: { $0.key != nil }) else {
+                throw GoDiagnostic(position: position, message: "keyed slice literals are not supported yet")
+            }
+            for element in elements { try require(element.value, assignableTo: elementType) }
+        case .map(let keyType, let valueType):
+            for element in elements {
+                if let keyExpression = element.keyExpression {
+                    try require(keyExpression, assignableTo: keyType)
+                } else if element.key == nil {
+                    throw GoDiagnostic(position: element.position, message: "missing key in map literal")
                 }
-                return leftType
-            case .subtract, .multiply:
-                guard isInteger(leftType) else {
-                    throw GoDiagnostic(position: position, message: "operator requires integer operands")
-                }
-                return leftType
-            case .divide, .remainder:
-                guard isInteger(leftType) else {
-                    throw GoDiagnostic(position: position, message: "operator requires integer operands")
-                }
-                if case .integer(0, let zeroPosition) = right {
-                    throw GoDiagnostic(position: zeroPosition, message: "division by zero")
-                }
-                return leftType
-            case .equal, .notEqual:
-                if (leftType == .nilType || rightType == .nilType)
+                try require(element.value, assignableTo: valueType)
+            }
+        default:
+            throw GoDiagnostic(position: position, message: "invalid composite literal type \(literalType)")
+        }
+        return literalType
+    }
+
+    mutating func typeOfIndex(_ expression: GoExpression) throws -> GoType {
+        guard case .index(let base, let index, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        let baseType = underlying(try type(of: base))
+        switch baseType {
+        case .array(_, let element), .slice(let element):
+            guard isInteger(try type(of: index)) else {
+                throw GoDiagnostic(position: index.position, message: "index must be integer")
+            }
+            return element
+        case .string:
+            guard isInteger(try type(of: index)) else {
+                throw GoDiagnostic(position: index.position, message: "index must be integer")
+            }
+            return GoPredeclared.byte
+        case .map(let keyType, let valueType):
+            let indexType = try type(of: index)
+            guard try isAssignable(index, ofType: indexType, to: keyType) else {
+                throw GoDiagnostic(
+                    position: index.position,
+                    message: "cannot use \(indexType) as \(keyType) value in map index")
+            }
+            return valueType
+        default:
+            throw GoDiagnostic(position: position, message: "cannot index expression")
+        }
+    }
+
+    mutating func typeOfSlicing(_ expression: GoExpression) throws -> GoType {
+        guard case .slicing(let base, let low, let high, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        for bound in [low, high].compactMap({ $0 }) where !isInteger(try type(of: bound)) {
+            throw GoDiagnostic(position: bound.position, message: "slice index must be integer")
+        }
+        switch underlying(try type(of: base)) {
+        case .array(_, let element), .slice(let element): return .slice(element)
+        case .string: return .string
+        default:
+            throw GoDiagnostic(position: position, message: "cannot slice expression")
+        }
+    }
+
+    mutating func typeOfUnary(_ expression: GoExpression) throws -> GoType {
+        guard case .unary(let unaryOperator, let operand, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        switch unaryOperator {
+        case .plus, .minus:
+            let operandType = try type(of: operand)
+            guard isInteger(operandType) else {
+                throw GoDiagnostic(position: position, message: "operator requires integer operand")
+            }
+            return operandType
+        case .not:
+            let operandType = try type(of: operand)
+            guard isBool(operandType) else {
+                throw GoDiagnostic(position: position, message: "operator ! not defined on \(operandType)")
+            }
+            return operandType
+        case .address:
+            // A composite literal is the one operand that is not a
+            // variable: `&T{...}` makes one.
+            if case .compositeLiteral = operand { return .pointer(try type(of: operand)) }
+            guard isAddressable(operand) else {
+                throw GoDiagnostic(
+                    position: operand.position,
+                    message: "invalid operation: cannot take address of a value that is not a variable")
+            }
+            return .pointer(try assignableType(of: operand))
+        case .dereference:
+            let operandType = try type(of: operand)
+            guard case .pointer(let pointee) = operandType else {
+                throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
+            }
+            try rejectOpaqueFile(pointee, at: position)
+            return pointee
+        case .receive:
+            let operandType = underlying(try type(of: operand))
+            guard case .channel(let direction, let elementType) = operandType else {
+                throw GoDiagnostic(position: position, message: "cannot receive from non-channel value")
+            }
+            guard direction != .sendOnly else {
+                throw GoDiagnostic(position: position, message: "cannot receive from send-only channel")
+            }
+            return elementType
+        }
+    }
+
+    mutating func typeOfBinary(_ expression: GoExpression) throws -> GoType {
+        guard case .binary(let left, let binaryOperator, let right, let position) = expression else {
+            throw GoDiagnostic(position: expression.position, message: "unsupported expression")
+        }
+        var leftType = try type(of: left)
+        var rightType = try type(of: right)
+        if leftType != rightType,
+            let common = try commonIntegerType(
+                left: left, leftType: leftType, right: right, rightType: rightType)
+        {
+            leftType = common
+            rightType = common
+        }
+        guard
+            leftType == rightType
+                || ((leftType == .nilType || rightType == .nilType)
                     && (isPointer(leftType) || isPointer(rightType)
                         || isSlice(leftType) || isSlice(rightType)
                         || isMap(leftType) || isMap(rightType)
                         || isChannel(leftType) || isChannel(rightType)
-                        || isInterface(leftType) || isInterface(rightType))
-                {
-                    return .bool
-                }
-                guard isComparable(leftType) else {
-                    throw GoDiagnostic(position: position, message: "values are not comparable")
-                }
-                return .bool
-            case .less, .lessEqual, .greater, .greaterEqual:
-                guard isInteger(leftType) || isString(leftType) else {
-                    throw GoDiagnostic(position: position, message: "operator is not defined on \(leftType)")
-                }
-                return .bool
-            case .logicalAnd, .logicalOr:
-                guard isBool(leftType) else {
-                    throw GoDiagnostic(position: position, message: "operator requires boolean operands")
-                }
-                return leftType
+                        || isInterface(leftType) || isInterface(rightType)))
+        else {
+            throw GoDiagnostic(position: position, message: "mismatched types \(leftType) and \(rightType)")
+        }
+        switch binaryOperator {
+        case .add:
+            guard isInteger(leftType) || isString(leftType) else {
+                throw GoDiagnostic(position: position, message: "operator + not defined on \(leftType)")
             }
+            return leftType
+        case .subtract, .multiply:
+            guard isInteger(leftType) else {
+                throw GoDiagnostic(position: position, message: "operator requires integer operands")
+            }
+            return leftType
+        case .divide, .remainder:
+            guard isInteger(leftType) else {
+                throw GoDiagnostic(position: position, message: "operator requires integer operands")
+            }
+            if case .integer(0, let zeroPosition) = right {
+                throw GoDiagnostic(position: zeroPosition, message: "division by zero")
+            }
+            return leftType
+        case .equal, .notEqual:
+            if (leftType == .nilType || rightType == .nilType)
+                && (isPointer(leftType) || isPointer(rightType)
+                    || isSlice(leftType) || isSlice(rightType)
+                    || isMap(leftType) || isMap(rightType)
+                    || isChannel(leftType) || isChannel(rightType)
+                    || isInterface(leftType) || isInterface(rightType))
+            {
+                return .bool
+            }
+            guard isComparable(leftType) else {
+                throw GoDiagnostic(position: position, message: "values are not comparable")
+            }
+            return .bool
+        case .less, .lessEqual, .greater, .greaterEqual:
+            guard isInteger(leftType) || isString(leftType) else {
+                throw GoDiagnostic(position: position, message: "operator is not defined on \(leftType)")
+            }
+            return .bool
+        case .logicalAnd, .logicalOr:
+            guard isBool(leftType) else {
+                throw GoDiagnostic(position: position, message: "operator requires boolean operands")
+            }
+            return leftType
         }
     }
 
