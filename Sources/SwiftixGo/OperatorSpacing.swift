@@ -38,6 +38,13 @@ struct GoOperatorSpacing: Equatable, Sendable {
     private(set) var spacedSlices: Set<Int> = []
     /// Offsets of the parentheses that are not printed.
     private(set) var droppedParentheses: Set<Int> = []
+    /// Every binary operator by its offset, with Go's precedence: where the
+    /// source breaks a line after one, the printer keeps the break, and it
+    /// needs to know where the operand that follows ends.
+    private(set) var binaryOperators: [Int: Int] = [:]
+    /// Offsets of the `(` that wrap an expression rather than open the
+    /// arguments of a call or the parameters of a function.
+    var groupingParentheses: Set<Int> { parentheses.opens }
     /// Offsets of the expressions the source wraps in parentheses, which the
     /// parser drops: each is the position of the expression inside a pair.
     private let parenthesized: Set<Int>
@@ -183,6 +190,7 @@ struct GoOperatorSpacing: Equatable, Sendable {
 
     private mutating func visitBare(_ expression: GoExpression, depth: Int) {
         if let operation = bareBinary(expression) {
+            binaryOperators[operation.offset] = operation.precedence
             if operation.precedence >= cutoff(operation, depth: depth) {
                 tight.insert(operation.offset)
             }

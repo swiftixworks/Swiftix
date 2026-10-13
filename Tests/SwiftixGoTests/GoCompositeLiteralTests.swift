@@ -290,8 +290,8 @@ struct GoCompositeLiteralTests: GoTestHarness {
                 package main
 
                 type node struct {
-                \tnext *node
-                \tlist []*node
+                \tnext  *node
+                \tlist  []*node
                 \tbyKey map[string]*node
                 }
 

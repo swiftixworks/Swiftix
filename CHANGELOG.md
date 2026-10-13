@@ -111,6 +111,19 @@ format, behavior and platform changes are recorded here.
   by Go's `gofmt` now comes back unchanged apart from the cases listed under
   "Known Gaps" in `docs/go-toolchain.md`; formatting existing Swiftix Go
   source again will change its operator spacing once.
+- `gofmt` lays out lines and columns as Go's printer does. It aligns the
+  names and types of struct fields, comments at the ends of consecutive
+  lines, the bodies of consecutive one-line functions, and the values of
+  composite literal elements that each begin a line. It keeps a function on
+  one line when the source has it there and it is short (`func main() {}`,
+  `func (s *stack) empty() bool { return len(s.items) == 0 }`), and a
+  `struct` or `interface` with one short field or method
+  (`interface{ Area() int }`). It keeps the line breaks the source has
+  after a binary operator, between the elements of a list, after `=`, and
+  after a `.`, and indents what follows. Until now it printed every body on
+  lines of its own, left fields and comments unaligned, and joined a
+  statement into one line. Source formatted by Go's `gofmt` comes back
+  unchanged; source formatted by an earlier Swiftix `gofmt` will change once.
 - A Swiftix Go program that ends on a run-time error fails with
   `GoRuntimeError.panicError("runtime error: ...")`, the text Go prints,
   instead of `.divisionByZero`, `.indexOutOfRange`, `.invalidSliceBounds`, or
@@ -149,6 +162,11 @@ format, behavior and platform changes are recorded here.
   `p := m[k]` followed by `p.field` failed with `bytecode operand type
   mismatch` when the map held pointers, and a map value stored in an
   interface lost its type.
+- `gofmt` joined the statements of a function literal that is an argument
+  of a call onto one line (`t.Run("name", func(t *testing.T) {` followed by
+  `a := 1 b := 2`), which no longer compiled. It also moved a comment after
+  the `{` of a block or after a `case` to the next line, and kept a final
+  comma before a closing delimiter on the same line (`f(a, b,)`).
 - `gofmt` broke `interface{}` and `struct{}` in a function signature over
   two lines (`func f(v interface {` / `}) int{...}`), which no longer read as
   the declaration it was. It also printed `[]interface{}{x}` as a block,

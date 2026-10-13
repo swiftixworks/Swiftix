@@ -35,7 +35,6 @@ struct GoFormatterTests: GoTestHarness {
             "package main",
             "",
             "import \"fmt\" // used for output",
-            "",
             "func message(name string) string {",
             "\t/* Keep this comment. */",
             "\treturn \"hello \" + name",
@@ -141,7 +140,7 @@ struct GoFormatterTests: GoTestHarness {
         let formatted = try GoFormatter.format(source)
 
         #expect(formatted.contains("func send(out chan<- int)"))
-        #expect(formatted.contains("\tout <- 1"))
+        #expect(formatted.contains("func send(out chan<- int) { out <- 1 }\nfunc main() {"))
         #expect(formatted.contains("\tselect {\n\tcase value := <-values:\n\t\tvalue++\n\tdefault:"))
         #expect(try GoFormatter.format(GoSourceFile(path: source.path, text: formatted)) == formatted)
     }

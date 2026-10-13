@@ -37,7 +37,7 @@ struct GofmtCommandTests: GoTestHarness {
                         """)
             })
 
-        #expect(output.contains("func main() {\n\tfmt.Println(\"formatted\")\n}"))
+        #expect(output.contains("func main() { fmt.Println(\"formatted\") }"))
         #expect(output.contains("file=0"))
         #expect(output.contains("stdin=0"))
         #expect(output.contains("write=0"))
@@ -71,13 +71,13 @@ struct GofmtCommandTests: GoTestHarness {
         #expect(output.contains("diff main.go.orig main.go"))
         #expect(output.contains("diff sub/other.go.orig sub/other.go"))
         #expect(output.contains("diff <standard input>.orig <standard input>"))
-        #expect(output.contains("--- main.go.orig\n+++ main.go\n@@ -1,2 +1,4 @@"))
+        #expect(output.contains("--- main.go.orig\n+++ main.go\n@@ -1,2 +1,3 @@"))
         #expect(output.contains("-func main(){}"))
-        #expect(output.contains("+func main() {"))
+        #expect(output.contains("+func main() {}"))
         #expect(output.contains("file=0"))
         #expect(output.contains("stdin=0"))
         #expect(output.contains("write=0"))
-        #expect(output.contains("func main() {\n}"))
+        #expect(output.contains("\nfunc main() {}\n"))
     }
 
     @Test func gofmtListsOnlyChangedSourcesAndCombinesWithWrite() {
@@ -126,7 +126,7 @@ struct GofmtCommandTests: GoTestHarness {
         #expect(resultLines.filter { $0 == "main.go" }.count == 2)
         #expect(resultLines.contains("write=0"))
         #expect(resultLines.contains("clean=0"))
-        #expect(output.contains("func main() {\n}"))
+        #expect(output.contains("\nfunc main() {}\n"))
         #expect(!resultLines.contains("clean.go"))
     }
 
@@ -150,8 +150,8 @@ struct GofmtCommandTests: GoTestHarness {
             })
 
         #expect(output.contains("example/format\n"))
-        #expect(output.contains("func main() {\n}"))
-        #expect(output.contains("func helper() {\n\treturn\n}"))
+        #expect(output.contains("\nfunc main() {}\n"))
+        #expect(output.contains("\nfunc helper() { return }\n"))
     }
 
     @Test func goFmtRecursesWithinModuleAndSkipsGoPackageBoundaries() {
@@ -218,9 +218,9 @@ struct GofmtCommandTests: GoTestHarness {
         #expect(output.contains("example/recursive/internal\n"))
         #expect(!output.contains("example/recursive/nested\n"))
         #expect(output.contains("status=0"))
-        #expect(output.contains("func main() {\n}"))
-        #expect(output.contains("func Tool() {\n\treturn\n}"))
-        #expect(output.contains("func Library() {\n}"))
+        #expect(output.contains("\nfunc main() {}\n"))
+        #expect(output.contains("\nfunc Tool() { return }\n"))
+        #expect(output.contains("\nfunc Library() {}\n"))
         for name in ["Nested", "Vendor", "Sample", "Hidden", "Cache", "Ignored"] {
             #expect(output.contains("func \(name)(){}"))
         }

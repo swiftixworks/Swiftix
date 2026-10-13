@@ -27,8 +27,11 @@ struct GoParentheses: Equatable, Sendable {
     /// The `(` and `)` of every further pair around an expression that
     /// already has one, as in `((x))`.
     private(set) var redundant: Set<Int> = []
+    /// The `(` of every pair.
+    private(set) var opens: Set<Int> = []
 
     mutating func record(around expression: GoExpression, open: Int, close: Int) {
+        opens.insert(open)
         let offset = expression.position.offset
         if pairs[offset] == nil {
             pairs[offset] = (open, close)
