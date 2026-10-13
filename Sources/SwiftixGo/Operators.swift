@@ -246,3 +246,36 @@ extension GoExpression {
         }
     }
 }
+
+/// `if x := f(); x > 0 { }` and `switch x := f(); x { }`: a statement with an
+/// initializer whose variables last for that statement only.
+///
+/// `GoStatement` is frozen and neither statement has room for an initializer,
+/// so the pair is carried by the statement that already scopes one: a `for`
+/// whose post statement is a `break`, which no source `for` can have, and
+/// whose body is the statement alone. Read as a loop it runs the statement
+/// once, so a pass that only walks the tree needs no case for it; the passes
+/// that give `break` and `continue` a meaning ask `initialized` first,
+/// because the statement is not a loop to them.
+extension GoStatement {
+    static func initialized(
+        _ statement: GoStatement,
+        by initializer: GoStatement,
+        position: GoSourcePosition
+    ) -> GoStatement {
+        .forStatement(
+            initializer: initializer,
+            condition: nil,
+            post: .breakStatement(position: position),
+            body: GoBlock(statements: [statement], position: position),
+            position: position)
+    }
+
+    /// The initializer and the statement it belongs to, when this is one.
+    var initialized: (initializer: GoStatement, statement: GoStatement)? {
+        guard case .forStatement(let initializer?, nil, .breakStatement?, let body, _) = self,
+            body.statements.count == 1
+        else { return nil }
+        return (initializer, body.statements[0])
+    }
+}

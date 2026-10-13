@@ -33,7 +33,8 @@ go build -o hello .
 | Area | Supported |
 | --- | --- |
 | Packages | One module of local packages linked into one program: cross-package functions with any number of results, exported constants, variables, types, struct fields, and methods; dependency-first initialization; `internal/` visibility. See [Packages and Linking](#packages-and-linking) |
-| Control flow | `if`, both `switch` forms, three-clause `for`, `range`, break, and continue |
+| Control flow | `if`, both `switch` forms, three-clause `for`, `range`, break, and continue. `if` and `switch` take an initializer statement (`if err := f(); err != nil { }`, `switch n := len(s); { }`), whose variables last for that statement and its `else` branches |
+| Panics | `panic`, `recover`, and `defer`. A run-time error is a panic with Go's message that `recover` returns as an `error`: a nil pointer dereference, an index or slice bound out of range, an integer division by zero, an assignment to a nil map, a failed type assertion, a negative shift count, and a misuse of a closed or nil channel. See [Panics](#panics) |
 | Literals | Decimal, hexadecimal (`0x1f`), octal (`0o644`, `0644`), and binary (`0b101`) integers with `_` digit separators; interpreted strings with Go escapes (`\x`, octal, `\u`, `\U`); strings must be valid UTF-8 |
 | Operators | Arithmetic, comparison, logical, and bitwise `&`, `\|`, `^`, `&^`, `<<`, `>>`, and unary `^` with Go precedence; a negative shift count panics and a count of 64 or more shifts every bit out. Compound assignment `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `&^=`, `<<=`, `>>=`, and `++`/`--` |
 | Types | `int`, `byte`/`uint8`, `string`, `bool`, and named types; structs, pointers, arrays/slices/strings, maps, interfaces, and channels |
@@ -63,8 +64,7 @@ go build -o hello .
 - A compound assignment evaluates its target twice (`x op= y` is compiled as `x = x op y`), so a target that contains a call or a channel receive is rejected with a diagnostic rather than evaluated twice. `++`/`--` have the same double evaluation without the check.
 - A single-value `x := v` and a multi-value `:=` without a new name are redeclarations, reported as `x redeclared in this block`.
 - The error of a failed library call (`strconv.Atoi`, `os.Open`, `conn.Read`, ...) is its message only. Two of them with the same text compare equal, where Go makes a new value each time; `%T` reports `*errors.errorString` where Go has `*strconv.NumError`, `*fs.PathError`, or `*net.OpError`; and `io.EOF` is the only sentinel (`os.ErrNotExist` and the like are not provided). Errors a program makes with `errors.New`, `fmt.Errorf`, or its own types do not have this limit.
-- A nil pointer dereference, an index out of range, and a division by zero end the program with a run-time error; in Go they are panics that `recover` can catch. The exception is a method `fmt` calls on a nil pointer, which prints `<nil>` as in Go.
-- `if` and `switch` take no init statement (`if err := f(); err != nil`): declare the variable on the line before.
+- An unrecovered panic prints Go's first line (`panic: runtime error: index out of range [3] with length 1`) without the goroutine trace that follows it in Go. `sync: unlock of unlocked mutex` is a panic that `recover` can catch, where Go ends the program. The `runtime` package and its `runtime.Error` interface are not provided; a recovered run-time error asserts to `error`.
 - An interface value cannot be compared with a value of a concrete type (`var a any = 5; a == 5`); two interface values, and an interface with `nil`, can.
 - Function values are limited to literals invoked by `go` and `defer`: there is no function type syntax, a function or a function-valued variable cannot be called through a variable, and a literal does not capture the locals of its enclosing function (pass them as arguments). These limits are the same inside one package and across packages.
 - Call results cannot be spread into another call's arguments (`f(g())` with a multi-result `g`), `iota` is not implemented, the blank identifier is accepted only in `:=` and `range`, an empty struct literal (`T{}`) and the address of a composite literal (`&T{...}`) are rejected, an interface method lists parameter types without names, and imports are written one per line (no parenthesized group).
@@ -213,6 +213,26 @@ A value converted to an interface is boxed with a descriptor of its static type:
 - **Assertions to an interface type** succeed for the types that implement it. The compiler, which sees every package of the program, lists them from exact method signatures (name, parameter types, result types, and whether the receiver is a pointer), and the VM looks the dynamic type up in that list. A failed assertion without `, ok` panics with Go's message: `interface conversion: main.file is not main.sizer: missing method size`.
 - **Method calls** through an interface dispatch on the dynamic type, dereference a pointer for a value receiver, take several results (`value, ok := store.Get(key)`), and pack a variadic parameter.
 - **Native calls into guest code.** `fmt` and `errors` run a program's `Error`, `String`, `Unwrap`, and `Is` methods. A native cannot run guest code, so the instruction that needs a method calls it like any function and then executes again with the result; a native that needs several methods repeats this once per method. A formatting call therefore costs one VM instruction plus the instructions of the methods it runs.
+
+### Panics
+
+A run-time error of the program does not end it at once. The instruction that meets the error raises a panic in the function that was executing, that function's deferred calls run, and so do its callers' while the panic travels up the goroutine's stack. A deferred function that calls `recover` stops it, and the function that panicked returns the zero values of its results (or what its named results hold).
+
+| Error | `recover()` prints | `%T` |
+| --- | --- | --- |
+| `p.field`, `*p`, or a method call with a nil `p` or a nil interface | `runtime error: invalid memory address or nil pointer dereference` | `runtime.errorString` |
+| `x[i]` out of range | `runtime error: index out of range [5] with length 3`, or `[-1]` for a negative index | `runtime.boundsError` |
+| `x[a:b]` out of range | `runtime error: slice bounds out of range [:5] with capacity 3` (`with length` for a string or an array), `[2:1]`, `[-1:]` | `runtime.boundsError` |
+| `a / b`, `a % b` with `b == 0` | `runtime error: integer divide by zero` | `runtime.errorString` |
+| `1 << n` with `n < 0`; `make([]T, n)` with `n < 0` | `runtime error: negative shift amount`; `runtime error: makeslice: len out of range` | `runtime.errorString` |
+| An assignment to an entry of a nil map; a send on or a second `close` of a closed channel; `close` of a nil channel | `assignment to entry in nil map`, `send on closed channel`, `close of closed channel`, `close of nil channel` | `runtime.plainError` |
+| `v.(T)` without `, ok` when `v` is not a `T` | `interface conversion: interface {} is string, not int` | `*runtime.TypeAssertionError` |
+
+- The recovered value is an `error`: `err, ok := r.(error)` succeeds and `err.Error()` is the text above. Two such values are equal when they say the same, as Go's are; no heap cell is allocated to report one.
+- A panic nothing recovers ends the run with `GoRuntimeError.panicError(message)`, printed as `panic: <message>`, after every deferred call of the goroutine has run. A file-backed program exits with status 2, as a Go program does.
+- A goroutine recovers only its own panics; an unrecovered panic in any goroutine ends the program.
+- `fmt` recovers a panic of an `Error` or `String` method it calls and prints `%!v(PANIC=String method: runtime error: ...)`.
+- A fault of the machine itself is not a panic and cannot be recovered: a malformed image, a dangling heap cell, an exceeded resource limit, or a deadlock ends the run with its own `GoRuntimeError`.
 
 ### Formatting
 

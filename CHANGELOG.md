@@ -39,6 +39,19 @@ format, behavior and platform changes are recorded here.
 - Interface methods with several results can be called in a multi-value
   context (`value, ok := store.Get(key)`, `return store.Get(key)`).
 - A function with results may end in a call to `panic` instead of a `return`.
+- `if` and `switch` initializer statements (`if err := f(); err != nil { }`,
+  `switch n := len(s); n { }`, `switch x := f(); { }`). The variables last
+  for the statement and its `else` branches, and `gofmt` keeps the header on
+  one line.
+- Swiftix Go run-time errors are panics that `recover` can catch, with Go's
+  messages and types: a nil pointer dereference, an index or slice bound out
+  of range (`runtime error: index out of range [5] with length 3`), an
+  integer division by zero, an assignment to a nil map, a failed type
+  assertion, a negative shift count, `make` with a negative length, and a
+  misuse of a closed or nil channel. Deferred calls run while the panic
+  unwinds, the recovered value is an `error`, and a server can keep one
+  failing goroutine from ending the program. See "Panics" in
+  `docs/go-toolchain.md`.
 - Swiftix Go `strings.ToUpper`, `strings.ToLower`, `strings.Fields`,
   `strings.TrimPrefix`, and `strings.TrimSuffix`. Case mapping and the
   printable test of `%q` use Go 1.24's Unicode 15.0.0 tables
@@ -72,6 +85,15 @@ format, behavior and platform changes are recorded here.
   never).
 - A type assertion to an interface type used to compile and always fail; it
   now tests the method set.
+- A Swiftix Go program that ends on a run-time error fails with
+  `GoRuntimeError.panicError("runtime error: ...")`, the text Go prints,
+  instead of `.divisionByZero`, `.indexOutOfRange`, `.invalidSliceBounds`, or
+  `.invalidPointer`. Those cases stay in the enum for faults of an image.
+  The program's deferred calls now run first.
+- A file-backed Go program that panics exits with status 2, as a Go program
+  does (was 1).
+- The value a failed type assertion or a closed-channel operation panics with
+  is an `error` with the same text (was a string).
 - Swiftix Go maps are hash-indexed and updated in place: lookup, insertion,
   and `delete` are O(1) amortized instead of O(entries). Iteration order is
   unchanged (insertion order). `GoMapStorage.entries` is now computed, and
@@ -87,6 +109,14 @@ format, behavior and platform changes are recorded here.
 
 ### Fixed
 
+- `nil` could not be passed or assigned to a named interface type
+  (`cannot use nil as namer value`); only `error` and literal interface types
+  took it.
+- Indexing or slicing a nil slice failed with `bytecode operand type
+  mismatch`. It now panics with Go's bounds error, and `s[0:0]` of a nil
+  slice is nil.
+- Calling a method on a nil interface value failed with `bytecode operand
+  type mismatch`; it is now Go's nil pointer dereference panic.
 - `net.Dial` returned a connection and a nil error when the peer refused the
   connection or the handshake was abandoned. It now returns
   `dial tcp <address>: connect: connection refused` or `connection timed out`

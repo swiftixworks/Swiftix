@@ -85,6 +85,14 @@ struct GoConformanceTests {
     @Test func variadicFunctionsAndSpreads() throws {
         try expectSameOutput(variadicFunctionsAndSpreadsSource, variadicFunctionsAndSpreadsExpected)
     }
+
+    @Test func ifAndSwitchInitializers() throws {
+        try expectSameOutput(ifAndSwitchInitializersSource, ifAndSwitchInitializersExpected)
+    }
+
+    @Test func runTimeErrorsAreRecoverablePanics() throws {
+        try expectSameOutput(runTimeErrorsAreRecoverablePanicsSource, runTimeErrorsAreRecoverablePanicsExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -1542,5 +1550,544 @@ ab abcd xyz
 
 x=3
 x 3
+
+"""#
+
+private let ifAndSwitchInitializersSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "strconv"
+
+type store struct {
+	values map[string]int
+}
+
+func (s *store) get(key string) (int, bool) {
+	value, ok := s.values[key]
+	return value, ok
+}
+
+func parse(text string) (int, error) {
+	n, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, errors.New("bad number " + text)
+	}
+	return n, nil
+}
+
+func classify(n int) string {
+	if half := n / 2; half > 10 {
+		return "large"
+	} else if half > 2 {
+		return "medium"
+	} else {
+		return "small " + strconv.Itoa(half)
+	}
+}
+
+func sign(n int) string {
+	switch abs := n * n; {
+	case n < 0:
+		return "negative " + strconv.Itoa(abs)
+	case n == 0:
+		return "zero"
+	default:
+		return "positive " + strconv.Itoa(abs)
+	}
+}
+
+func grade(score int) string {
+	switch band := score / 10; band {
+	case 10, 9:
+		return "A"
+	case 8:
+		return "B"
+	default:
+		return "C"
+	}
+}
+
+func firstEven(values []int) int {
+	found := -1
+	for index, value := range values {
+		if rest := value % 2; rest != 0 {
+			continue
+		}
+		if double := value * 2; double > 100 {
+			break
+		}
+		found = index
+		switch quarter := value / 4; quarter {
+		case 0:
+			continue
+		}
+		break
+	}
+	return found
+}
+
+func main() {
+	s := store{values: map[string]int{"a": 1, "b": 2}}
+	if value, ok := s.get("a"); ok {
+		fmt.Println("a =", value)
+	}
+	if _, ok := s.get("z"); !ok {
+		fmt.Println("no z")
+	}
+	if n, err := parse("42"); err != nil {
+		fmt.Println("error", err)
+	} else if n > 40 {
+		fmt.Println("big", n)
+	} else {
+		fmt.Println("small", n)
+	}
+	if _, err := parse("x1"); err != nil {
+		fmt.Println("error:", err)
+	}
+	err := errors.New("outer")
+	if err := errors.New("inner"); err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(err)
+
+	var value interface{} = 7
+	if number, ok := value.(int); ok && number > 5 {
+		fmt.Println("int", number)
+	}
+	if text, ok := value.(string); ok {
+		fmt.Println("string", text)
+	} else if number, ok := value.(int); ok {
+		fmt.Println("still int", number, text == "")
+	}
+
+	total := 0
+	if total = total + 5; total > 3 {
+		fmt.Println("assigned", total)
+	}
+	if total++; total == 6 {
+		fmt.Println("incremented", total)
+	}
+	if fmt.Println("called"); total > 0 {
+		fmt.Println("after call")
+	}
+	if x := 1; x > 0 {
+		if x := x + 1; x > 1 {
+			if x := x + 1; x > 2 {
+				fmt.Println("nested", x)
+			}
+			fmt.Println("middle", x)
+		}
+		fmt.Println("outer", x)
+	}
+
+	fmt.Println(classify(30), classify(8), classify(3))
+	fmt.Println(sign(-3), sign(0), sign(4))
+	fmt.Println(grade(100), grade(95), grade(85), grade(10))
+	fmt.Println(firstEven([]int{1, 3, 2, 8}), firstEven([]int{7, 60, 4}), firstEven([]int{9, 6}), firstEven([]int{1}))
+
+	m := map[string][]int{"k": []int{4, 5}}
+	if list, ok := m["k"]; ok && len(list) > 1 {
+		fmt.Println(list[1], len(list))
+	}
+	for i := 0; i < 3; i++ {
+		if square := i * i; square%2 == 0 {
+			fmt.Println("even square", square)
+		}
+	}
+}
+"""#
+
+private let ifAndSwitchInitializersExpected = #"""
+a = 1
+no z
+big 42
+error: bad number x1
+inner
+outer
+int 7
+still int 7 true
+assigned 5
+incremented 6
+called
+after call
+nested 3
+middle 2
+outer 1
+large medium small 1
+negative 9 zero positive 16
+A A B C
+3 -1 1 -1
+5 2
+even square 0
+even square 4
+
+"""#
+
+private let runTimeErrorsAreRecoverablePanicsSource = #"""
+package main
+
+import "errors"
+import "fmt"
+import "strings"
+
+type node struct {
+	name string
+	next *node
+}
+
+func (n node) label() string {
+	return "label " + n.name
+}
+
+type namer interface {
+	label() string
+}
+
+type series struct {
+	values []int
+}
+
+func (s series) String() string {
+	return fmt.Sprint(s.values[5])
+}
+
+func report(name string) {
+	r := recover()
+	if r == nil {
+		fmt.Println(name, "-> no panic")
+		return
+	}
+	if err, ok := r.(error); ok {
+		fmt.Printf("%s -> %v | %s | %T | %q\n", name, r, err.Error(), r, r)
+	} else {
+		fmt.Printf("%s -> %v | not an error | %T\n", name, r, r)
+	}
+}
+
+func indexSlice(values []int, i int) int {
+	defer report("index slice")
+	return values[i]
+}
+
+func indexArray(i int) int {
+	defer report("index array")
+	values := [3]int{1, 2, 3}
+	return values[i]
+}
+
+func indexString(text string, i int) byte {
+	defer report("index string")
+	return text[i]
+}
+
+func storeSlice(values []int, i int) {
+	defer report("store slice")
+	values[i] = 9
+}
+
+func sliceHigh(values []int, low int, high int) []int {
+	defer report("slice bounds")
+	return values[low:high]
+}
+
+func sliceFrom(values []int, low int) []int {
+	defer report("slice from")
+	return values[low:]
+}
+
+func sliceString(text string, low int, high int) string {
+	defer report("slice string")
+	return text[low:high]
+}
+
+func divide(a int, b int) int {
+	defer report("divide")
+	return a / b
+}
+
+func remainder(a int, b int) int {
+	defer report("remainder")
+	return a % b
+}
+
+func readField(n *node) string {
+	defer report("nil field read")
+	return n.name
+}
+
+func writeField(n *node) {
+	defer report("nil field write")
+	n.name = "x"
+}
+
+func chase(n *node) string {
+	defer report("nil chain")
+	return n.next.next.name
+}
+
+func valueMethod(n *node) string {
+	defer report("nil value method")
+	return n.label()
+}
+
+func nilInterface(n namer) string {
+	defer report("nil interface")
+	return n.label()
+}
+
+func nilInInterface(pointer *node) string {
+	defer report("nil in interface")
+	var n namer = pointer
+	return n.label()
+}
+
+func nilMap(key string) {
+	defer report("nil map")
+	var m map[string]int
+	m[key] = 1
+}
+
+func assertInt(value interface{}) int {
+	defer report("assertion")
+	return value.(int)
+}
+
+func assertNamer(value interface{}) string {
+	defer report("interface assertion")
+	return value.(namer).label()
+}
+
+func shift(count int) int {
+	defer report("shift")
+	return 1 << count
+}
+
+func allocate(n int) int {
+	defer report("make")
+	return len(make([]int, n))
+}
+
+func closedSend() {
+	defer report("send on closed")
+	ch := make(chan int, 1)
+	close(ch)
+	ch <- 1
+}
+
+func closeTwice() {
+	defer report("close twice")
+	ch := make(chan int)
+	close(ch)
+	close(ch)
+}
+
+func closeNil() {
+	defer report("close nil")
+	var ch chan int
+	close(ch)
+}
+
+func repeat(n int) string {
+	defer report("repeat")
+	return strings.Repeat("ab", n)
+}
+
+func explicit(code int) {
+	defer report("explicit")
+	if code == 1 {
+		panic("text")
+	}
+	if code == 2 {
+		panic(errors.New("made error"))
+	}
+	if code == 3 {
+		panic(fmt.Errorf("wrapped: %w", errors.New("inner")))
+	}
+	panic(code)
+}
+
+func none() int {
+	defer report("none")
+	return 1
+}
+
+func ordered() {
+	defer fmt.Println("deferred first, runs last")
+	defer report("ordered")
+	defer fmt.Println("deferred last, runs first")
+	var values []int
+	fmt.Println(values[0])
+}
+
+func cleanup(stage string) {
+	fmt.Println("cleanup", stage)
+}
+
+func inner(values []int) int {
+	defer cleanup("inner")
+	return values[len(values)]
+}
+
+func outer() (result int) {
+	defer report("outer")
+	defer cleanup("outer")
+	result = inner([]int{1, 2})
+	return result + 1
+}
+
+func worker(done chan string, values []int, i int) {
+	defer finish(done)
+	done <- fmt.Sprint(values[i])
+}
+
+func finish(done chan string) {
+	if r := recover(); r != nil {
+		done <- fmt.Sprint("worker recovered: ", r)
+	}
+}
+
+func repanic() {
+	defer report("repanic")
+	defer raise()
+	var m map[int]int
+	m[1] = 1
+}
+
+func raise() {
+	if r := recover(); r != nil {
+		panic(fmt.Sprint("again: ", r))
+	}
+}
+
+func compare(values []int) {
+	defer report("compare")
+	defer same(values)
+	fmt.Println(values[4])
+}
+
+func same(values []int) {
+	first := recover()
+	second := capture(values)
+	third := capture(values[:1])
+	fmt.Println(first == second, first == third, first != nil)
+	panic(first)
+}
+
+func capture(values []int) (r interface{}) {
+	defer grab(values)
+	return nil
+}
+
+func grab(values []int) {
+	recover()
+}
+
+func main() {
+	values := []int{1, 2, 3}
+	fmt.Println(indexSlice(values, 3), indexSlice(values, -1), indexSlice(nil, 0), indexSlice(values, 2))
+	fmt.Println(indexArray(5), indexString("héllo", 9))
+	storeSlice(values, 7)
+	fmt.Println(sliceHigh(values, 1, 5), sliceHigh(values, 2, 1), sliceHigh(values[:1], 0, 3), sliceHigh(values, -1, 2))
+	fmt.Println(sliceFrom(values, 4), sliceString("hello", 2, 9), sliceString("hello", 4, 2))
+	fmt.Println(divide(7, 0), remainder(7, 0), divide(7, 2))
+	head := node{name: "a", next: nil}
+	fmt.Println(readField(nil), chase(&head) == "")
+	writeField(nil)
+	fmt.Println(valueMethod(nil), nilInterface(nil), nilInInterface(nil))
+	nilMap("k")
+	fmt.Println(assertInt("text"), assertInt(nil), assertInt(4), assertNamer(7))
+	fmt.Println(shift(-1), allocate(-5))
+	closedSend()
+	closeTwice()
+	closeNil()
+	fmt.Println(repeat(-1) == "")
+	explicit(1)
+	explicit(2)
+	explicit(3)
+	explicit(4)
+	fmt.Println(none())
+	ordered()
+	fmt.Println(outer())
+	done := make(chan string)
+	go worker(done, values, 1)
+	fmt.Println(<-done)
+	go worker(done, values, 8)
+	fmt.Println(<-done)
+	repanic()
+	compare(values)
+	fmt.Println(series{values: values})
+	fmt.Printf("%v|%s|%d\n", series{values: nil}, series{values: values}, 3)
+	fmt.Println("still running")
+}
+"""#
+
+private let runTimeErrorsAreRecoverablePanicsExpected = #"""
+index slice -> runtime error: index out of range [3] with length 3 | runtime error: index out of range [3] with length 3 | runtime.boundsError | "runtime error: index out of range [3] with length 3"
+index slice -> runtime error: index out of range [-1] | runtime error: index out of range [-1] | runtime.boundsError | "runtime error: index out of range [-1]"
+index slice -> runtime error: index out of range [0] with length 0 | runtime error: index out of range [0] with length 0 | runtime.boundsError | "runtime error: index out of range [0] with length 0"
+index slice -> no panic
+0 0 0 3
+index array -> runtime error: index out of range [5] with length 3 | runtime error: index out of range [5] with length 3 | runtime.boundsError | "runtime error: index out of range [5] with length 3"
+index string -> runtime error: index out of range [9] with length 6 | runtime error: index out of range [9] with length 6 | runtime.boundsError | "runtime error: index out of range [9] with length 6"
+0 0
+store slice -> runtime error: index out of range [7] with length 3 | runtime error: index out of range [7] with length 3 | runtime.boundsError | "runtime error: index out of range [7] with length 3"
+slice bounds -> runtime error: slice bounds out of range [:5] with capacity 3 | runtime error: slice bounds out of range [:5] with capacity 3 | runtime.boundsError | "runtime error: slice bounds out of range [:5] with capacity 3"
+slice bounds -> runtime error: slice bounds out of range [2:1] | runtime error: slice bounds out of range [2:1] | runtime.boundsError | "runtime error: slice bounds out of range [2:1]"
+slice bounds -> no panic
+slice bounds -> runtime error: slice bounds out of range [-1:] | runtime error: slice bounds out of range [-1:] | runtime.boundsError | "runtime error: slice bounds out of range [-1:]"
+[] [] [1 2 3] []
+slice from -> runtime error: slice bounds out of range [4:3] | runtime error: slice bounds out of range [4:3] | runtime.boundsError | "runtime error: slice bounds out of range [4:3]"
+slice string -> runtime error: slice bounds out of range [:9] with length 5 | runtime error: slice bounds out of range [:9] with length 5 | runtime.boundsError | "runtime error: slice bounds out of range [:9] with length 5"
+slice string -> runtime error: slice bounds out of range [4:2] | runtime error: slice bounds out of range [4:2] | runtime.boundsError | "runtime error: slice bounds out of range [4:2]"
+[]\#u{20}\#u{20}
+divide -> runtime error: integer divide by zero | runtime error: integer divide by zero | runtime.errorString | "runtime error: integer divide by zero"
+remainder -> runtime error: integer divide by zero | runtime error: integer divide by zero | runtime.errorString | "runtime error: integer divide by zero"
+divide -> no panic
+0 0 3
+nil field read -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+nil chain -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+ true
+nil field write -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+nil value method -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+nil interface -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+nil in interface -> runtime error: invalid memory address or nil pointer dereference | runtime error: invalid memory address or nil pointer dereference | runtime.errorString | "runtime error: invalid memory address or nil pointer dereference"
+\#u{20}\#u{20}
+nil map -> assignment to entry in nil map | assignment to entry in nil map | runtime.plainError | "assignment to entry in nil map"
+assertion -> interface conversion: interface {} is string, not int | interface conversion: interface {} is string, not int | *runtime.TypeAssertionError | "interface conversion: interface {} is string, not int"
+assertion -> interface conversion: interface {} is nil, not int | interface conversion: interface {} is nil, not int | *runtime.TypeAssertionError | "interface conversion: interface {} is nil, not int"
+assertion -> no panic
+interface assertion -> interface conversion: int is not main.namer: missing method label | interface conversion: int is not main.namer: missing method label | *runtime.TypeAssertionError | "interface conversion: int is not main.namer: missing method label"
+0 0 4\#u{20}
+shift -> runtime error: negative shift amount | runtime error: negative shift amount | runtime.errorString | "runtime error: negative shift amount"
+make -> runtime error: makeslice: len out of range | runtime error: makeslice: len out of range | runtime.errorString | "runtime error: makeslice: len out of range"
+0 0
+send on closed -> send on closed channel | send on closed channel | runtime.plainError | "send on closed channel"
+close twice -> close of closed channel | close of closed channel | runtime.plainError | "close of closed channel"
+close nil -> close of nil channel | close of nil channel | runtime.plainError | "close of nil channel"
+repeat -> strings: negative Repeat count | not an error | string
+true
+explicit -> text | not an error | string
+explicit -> made error | made error | *errors.errorString | "made error"
+explicit -> wrapped: inner | wrapped: inner | *fmt.wrapError | "wrapped: inner"
+explicit -> 4 | not an error | int
+none -> no panic
+1
+deferred last, runs first
+ordered -> runtime error: index out of range [0] with length 0 | runtime error: index out of range [0] with length 0 | runtime.boundsError | "runtime error: index out of range [0] with length 0"
+deferred first, runs last
+cleanup inner
+cleanup outer
+outer -> runtime error: index out of range [2] with length 2 | runtime error: index out of range [2] with length 2 | runtime.boundsError | "runtime error: index out of range [2] with length 2"
+0
+2
+worker recovered: runtime error: index out of range [8] with length 3
+repanic -> again: assignment to entry in nil map | not an error | string
+false false true
+compare -> runtime error: index out of range [4] with length 3 | runtime error: index out of range [4] with length 3 | runtime.boundsError | "runtime error: index out of range [4] with length 3"
+%!v(PANIC=String method: runtime error: index out of range [5] with length 3)
+%!v(PANIC=String method: runtime error: index out of range [5] with length 0)|%!s(PANIC=String method: runtime error: index out of range [5] with length 3)|3
+still running
 
 """#

@@ -369,7 +369,9 @@ private struct FormatPrinter {
                 activeCaseDepths.insert(braceDepth)
             }
         case ";":
-            if forHeader {
+            // Inside a `for` clause, and after the initializer of an `if` or
+            // a `switch`, the header goes on.
+            if forHeader || pendingIf || pendingSwitch {
                 trimTrailingWhitespace()
                 append("; ")
             } else {

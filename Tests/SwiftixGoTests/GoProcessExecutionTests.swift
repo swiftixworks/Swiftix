@@ -259,6 +259,42 @@ struct GoProcessExecutionTests {
         #expect(session.run("echo status=$?") == "status=1")
     }
 
+    @Test func anUnrecoveredPanicExitsWithStatusTwo() throws {
+        let session = try GoProcessSession([
+            "/crash": """
+                package main
+                import "fmt"
+                func main() {
+                    defer fmt.Println("deferred")
+                    values := []int{1}
+                    index := 3
+                    fmt.Println(values[index])
+                }
+                """,
+            "/survive": """
+                package main
+                import "fmt"
+                func guard() {
+                    if r := recover(); r != nil {
+                        fmt.Println("recovered:", r)
+                    }
+                }
+                func main() {
+                    defer guard()
+                    zero := 0
+                    fmt.Println(1 / zero)
+                }
+                """,
+        ])
+        let crashed = session.run("/crash")
+        #expect(crashed.contains("deferred"))
+        #expect(
+            crashed.contains("panic: runtime error: index out of range [3] with length 1"))
+        #expect(session.run("echo status=$?") == "status=2")
+        #expect(session.run("/survive") == "recovered: runtime error: integer divide by zero")
+        #expect(session.run("echo status=$?") == "status=0")
+    }
+
     // MARK: - Sleep
 
     @Test func sleepParksTheProcessUntilLogicalTimeAdvances() throws {

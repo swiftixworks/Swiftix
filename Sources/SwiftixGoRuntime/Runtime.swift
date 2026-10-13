@@ -1720,7 +1720,7 @@ public struct GoVirtualMachine: Sendable {
                         try jump(to: target, frame: &context.frames[activeFrame])
                     case .closed:
                         context.frames[activeFrame].pendingExit = .panicking(
-                            .string("send on closed channel"))
+                            GoRuntimePanic.closedChannelSend.value)
                     case .blocked:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -2147,6 +2147,19 @@ public struct GoVirtualMachine: Sendable {
                     {
                         return legacyError(message)
                     }
+                    if GoErrors.isMessageType(boxed.typeName),
+                        case .string(let message) = boxed.value
+                    {
+                        // An error of the runtime, which Go declares as a
+                        // string type: its message, quoted for `%#v`.
+                        if directive.goSyntax { return GoFormat.quote(message, asciiOnly: false) }
+                        var plain = directive
+                        plain.verb = "v"
+                        return GoFormat.string(message, directive)
+                            ?? GoFormat.badVerb(
+                                directive, typeName: inferredTypeName(of: value),
+                                value: GoFormat.string(message, plain) ?? message)
+                    }
                     library = try libraryError(value)
                     type = GoTypeDescriptor.dynamicType(named: boxed.typeName)
                     value = boxed.value
@@ -2196,7 +2209,7 @@ public struct GoVirtualMachine: Sendable {
                         }
                         let result = try guestCall(
                             function, [try methodReceiver(value, for: function)],
-                            recovery: isNilPointer ? .failures : .panics)
+                            recovery: .panics)
                         if case .interface(let caught)? = result,
                             caught.typeName == GoFormat.panicMarker
                         {
@@ -2574,27 +2587,6 @@ public struct GoVirtualMachine: Sendable {
                 .interface(GoInterfaceValue(typeName: GoFormat.panicMarker, value: value)))
         }
 
-        /// End a method `fmt` called on a nil pointer when it used the
-        /// pointer, which Go reports as a panic that `fmt` recovers from.
-        /// False when no such call is running in this goroutine.
-        func abandonFailedGuestCall() -> Bool {
-            guard
-                let waiting = frames.lastIndex(where: {
-                    $0.awaitsGuestCall && $0.guestCallRecovery == .failures
-                }), waiting + 1 < frames.count,
-                stack.count >= frames[waiting + 1].stackBase
-            else { return false }
-            let stackBase = frames[waiting + 1].stackBase
-            while frames.count > waiting + 1 {
-                let abandoned = frames.removeLast()
-                activeDeferredCallCount -= abandoned.deferredCalls.count
-                releaseFrame(abandoned)
-            }
-            stack.removeSubrange(stackBase...)
-            deliverGuestPanic(.nilValue)
-            return true
-        }
-
         /// The method `name` of the dynamic type `owner` (`T` or `*T`) when it
         /// takes `parameterCount` arguments besides its receiver and returns
         /// one value. A pointer also has the methods of what it points to.
@@ -2666,7 +2658,7 @@ public struct GoVirtualMachine: Sendable {
         /// or nil for any other value.
         func libraryError(_ value: GoValue) throws -> (message: String, wrapped: [GoValue])? {
             guard case .interface(let boxed) = value else { return nil }
-            if boxed.typeName == GoErrors.legacyTypeName, case .string(let message) = boxed.value {
+            if GoErrors.isMessageType(boxed.typeName), case .string(let message) = boxed.value {
                 return (message, [])
             }
             guard GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
@@ -2843,7 +2835,7 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard case .pointer(let target) = operands[1] else {
-                        throw GoRuntimeError.panicError("errors: target must be a non-nil pointer")
+                        throw GoRuntimePanic(text: "errors: target must be a non-nil pointer")
                     }
                     guard err != .nilValue,
                         let found = try find(err, typed: specification, depth: 0)
@@ -3376,7 +3368,7 @@ public struct GoVirtualMachine: Sendable {
                     case .string(let text) = try pop(&stack)
                 else { throw GoRuntimeError.typeMismatch }
                 guard rawCount >= 0, let count = Int(exactly: rawCount) else {
-                    throw GoRuntimeError.panicError("strings: negative Repeat count")
+                    throw GoRuntimePanic(text: "strings: negative Repeat count")
                 }
                 let (total, overflow) = text.utf8.count.multipliedReportingOverflow(by: count)
                 guard !overflow else {
@@ -3662,12 +3654,18 @@ public struct GoVirtualMachine: Sendable {
         }
 
         /// Run guest code until the program finishes or suspends on host input.
+        ///
+        /// A run-time error of the program, which Go reports as a panic, is
+        /// raised by the instruction that meets it and becomes a panic of the
+        /// frame that was executing: its deferred functions run, and one of
+        /// them may `recover`.
         func runSlice() throws {
             while true {
                 do {
                     return try runInstructions()
-                } catch GoRuntimeError.invalidPointer {
-                    guard abandonFailedGuestCall() else { throw GoRuntimeError.invalidPointer }
+                } catch let panic as GoRuntimePanic {
+                    guard !frames.isEmpty else { throw GoRuntimeError.panicError(panic.message) }
+                    frames[frames.count - 1].pendingExit = .panicking(panic.value)
                 }
             }
         }
@@ -3750,7 +3748,9 @@ public struct GoVirtualMachine: Sendable {
                         }
                     case .panicking(let value):
                         guard !frames.isEmpty else {
-                            throw GoRuntimeError.panicError(value.description)
+                            // Go prints an error it panicked with by its text.
+                            throw GoRuntimeError.panicError(
+                                try libraryError(value)?.message ?? value.description)
                         }
                         if frames[frames.count - 1].awaitsGuestCall,
                             frames[frames.count - 1].guestCallRecovery != .none
@@ -3837,7 +3837,7 @@ public struct GoVirtualMachine: Sendable {
                     try integerBinary(&stack) { $0 &* $1 }
                 case .divide:
                     let (lhs, rhs) = try integerPair(&stack)
-                    guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
+                    guard rhs != 0 else { throw GoRuntimePanic.divideByZero }
                     if lhs == Int64.min, rhs == -1 {
                         // Go defines signed integer division using two's-complement
                         // arithmetic; this quotient wraps to the minimum value.
@@ -3847,7 +3847,7 @@ public struct GoVirtualMachine: Sendable {
                     }
                 case .remainder:
                     let (lhs, rhs) = try integerPair(&stack)
-                    guard rhs != 0 else { throw GoRuntimeError.divisionByZero }
+                    guard rhs != 0 else { throw GoRuntimePanic.divideByZero }
                     stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
                 case .equal:
                     let (left, right) = try popPair(&stack)
@@ -4018,7 +4018,7 @@ public struct GoVirtualMachine: Sendable {
                                 path: fieldPath.map(GoPointerComponent.field))))
                 case .fieldAddress(let name):
                     let pointerValue = try pop(&stack)
-                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4032,7 +4032,7 @@ public struct GoVirtualMachine: Sendable {
                                 path: pointer.path + [.field(name)])))
                 case .dereference:
                     let pointerValue = try pop(&stack)
-                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4040,7 +4040,7 @@ public struct GoVirtualMachine: Sendable {
                 case .setPointer:
                     let value = try pop(&stack)
                     let pointerValue = try pop(&stack)
-                    if pointerValue == .nilValue { throw GoRuntimeError.invalidPointer }
+                    if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4080,10 +4080,12 @@ public struct GoVirtualMachine: Sendable {
                         case .int(let length) = try pop(&stack)
                     else { throw GoRuntimeError.typeMismatch }
                     let zero = try pop(&stack)
-                    guard length >= 0, capacity >= length,
-                        let exactLength = Int(exactly: length),
-                        let exactCapacity = Int(exactly: capacity)
-                    else { throw GoRuntimeError.invalidSliceBounds }
+                    guard length >= 0, let exactLength = Int(exactly: length) else {
+                        throw GoRuntimePanic.makeSliceLength
+                    }
+                    guard capacity >= length, let exactCapacity = Int(exactly: capacity) else {
+                        throw GoRuntimePanic.makeSliceCapacity
+                    }
                     try requireCollectionCount(exactCapacity, resource: "slice elements")
                     let cell = try heap.allocate(
                         .array(Array(repeating: zero, count: exactCapacity)))
@@ -4102,12 +4104,14 @@ public struct GoVirtualMachine: Sendable {
                     let base = try pop(&stack)
                     switch base {
                     case .array(let values):
-                        guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
+                        guard values.indices.contains(index) else {
+                            throw GoRuntimePanic.index(index, length: values.count)
+                        }
                         stack.append(values[index])
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
-                            throw GoRuntimeError.indexOutOfRange
+                            throw GoRuntimePanic.index(index, length: slice.length)
                         }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
@@ -4120,9 +4124,12 @@ public struct GoVirtualMachine: Sendable {
                         // it into an array made byte loops quadratic.
                         let utf8 = string.utf8
                         guard index >= 0, index < utf8.count else {
-                            throw GoRuntimeError.indexOutOfRange
+                            throw GoRuntimePanic.index(index, length: utf8.count)
                         }
                         stack.append(.int(Int64(utf8[utf8.index(utf8.startIndex, offsetBy: index)])))
+                    case .nilValue:
+                        // A nil slice has no elements.
+                        throw GoRuntimePanic.index(index, length: 0)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4134,13 +4141,15 @@ public struct GoVirtualMachine: Sendable {
                     let base = try pop(&stack)
                     switch base {
                     case .array(var values):
-                        guard values.indices.contains(index) else { throw GoRuntimeError.indexOutOfRange }
+                        guard values.indices.contains(index) else {
+                            throw GoRuntimePanic.index(index, length: values.count)
+                        }
                         values[index] = value
                         stack.append(.array(values))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
-                            throw GoRuntimeError.indexOutOfRange
+                            throw GoRuntimePanic.index(index, length: slice.length)
                         }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
@@ -4149,6 +4158,8 @@ public struct GoVirtualMachine: Sendable {
                             through: appending(index: absoluteIndex, to: slice.backing),
                             heap: &heap)
                         stack.append(.slice(slice))
+                    case .nilValue:
+                        throw GoRuntimePanic.index(index, length: 0)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4162,8 +4173,10 @@ public struct GoVirtualMachine: Sendable {
                     switch base {
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
-                        guard low >= 0, low <= high, high <= slice.capacity else {
-                            throw GoRuntimeError.invalidSliceBounds
+                        if let panic = GoRuntimePanic.slice(
+                            low: low, high: high, limit: slice.capacity, limitIsCapacity: true)
+                        {
+                            throw panic
                         }
                         let newStart = try checkedAdd(
                             slice.start, low, resource: "slice bounds")
@@ -4177,12 +4190,22 @@ public struct GoVirtualMachine: Sendable {
                                     zeroValue: slice.zeroValue)))
                     case .string(let string):
                         let utf8 = string.utf8
-                        guard low >= 0, low <= high, high <= utf8.count else {
-                            throw GoRuntimeError.invalidSliceBounds
+                        if let panic = GoRuntimePanic.slice(
+                            low: low, high: high, limit: utf8.count, limitIsCapacity: false)
+                        {
+                            throw panic
                         }
                         let lower = utf8.index(utf8.startIndex, offsetBy: low)
                         let upper = utf8.index(lower, offsetBy: high - low)
                         stack.append(.string(String(decoding: utf8[lower..<upper], as: UTF8.self)))
+                    case .nilValue:
+                        // A nil slice can be sliced from 0 to 0, and stays nil.
+                        if let panic = GoRuntimePanic.slice(
+                            low: low, high: high, limit: 0, limitIsCapacity: true)
+                        {
+                            throw panic
+                        }
+                        stack.append(.nilValue)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4191,11 +4214,18 @@ public struct GoVirtualMachine: Sendable {
                     guard case .int(let rawHigh) = try pop(&stack),
                         case .int(let rawLow) = try pop(&stack),
                         let low = Int(exactly: rawLow),
-                        let high = Int(exactly: rawHigh),
-                        case .pointer(let pointer) = try pop(&stack),
-                        case .array(let values) = try read(pointer: pointer, heap: heap),
-                        low >= 0, low <= high, high <= values.count
-                    else { throw GoRuntimeError.invalidSliceBounds }
+                        let high = Int(exactly: rawHigh)
+                    else { throw GoRuntimeError.typeMismatch }
+                    let arrayPointer = try pop(&stack)
+                    if arrayPointer == .nilValue { throw GoRuntimePanic.nilDereference }
+                    guard case .pointer(let pointer) = arrayPointer,
+                        case .array(let values) = try read(pointer: pointer, heap: heap)
+                    else { throw GoRuntimeError.typeMismatch }
+                    if let panic = GoRuntimePanic.slice(
+                        low: low, high: high, limit: values.count, limitIsCapacity: false)
+                    {
+                        throw panic
+                    }
                     stack.append(
                         .slice(
                             GoSliceValue(
@@ -4315,19 +4345,23 @@ public struct GoVirtualMachine: Sendable {
                         guard pointer.path.count < resourceLimits.maximumPointerDepth else {
                             throw GoRuntimeError.resourceLimitExceeded("pointer depth")
                         }
-                        guard case .array(let values) = try read(pointer: pointer, heap: heap),
-                            values.indices.contains(index)
-                        else { throw GoRuntimeError.indexOutOfRange }
+                        guard case .array(let values) = try read(pointer: pointer, heap: heap)
+                        else { throw GoRuntimeError.typeMismatch }
+                        guard values.indices.contains(index) else {
+                            throw GoRuntimePanic.index(index, length: values.count)
+                        }
                         stack.append(.pointer(appending(index: index, to: pointer)))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
-                            throw GoRuntimeError.indexOutOfRange
+                            throw GoRuntimePanic.index(index, length: slice.length)
                         }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
                         stack.append(
                             .pointer(appending(index: absoluteIndex, to: slice.backing)))
+                    case .nilValue:
+                        throw GoRuntimePanic.index(index, length: 0)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
@@ -4415,7 +4449,9 @@ public struct GoVirtualMachine: Sendable {
                     let zero = try pop(&stack)
                     guard capacity >= 0 else {
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("makechan: size out of range"))
+                            GoRuntimePanic(
+                                GoErrors.plainRuntimeErrorType, "makechan: size out of range"
+                            ).value)
                         break
                     }
                     guard capacity <= resourceLimits.maximumCollectionElements else {
@@ -4432,7 +4468,7 @@ public struct GoVirtualMachine: Sendable {
                         try wakeReadyBlockedSelects()
                     case .closed:
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("send on closed channel"))
+                            GoRuntimePanic.closedChannelSend.value)
                     case .blocked:
                         if base == .nilValue {
                             currentBlocked = true
@@ -4485,7 +4521,9 @@ public struct GoVirtualMachine: Sendable {
                     guard case .channel(let channel) = base else {
                         if base == .nilValue {
                             frames[frameIndex].pendingExit = .panicking(
-                                .string("close of nil channel"))
+                                GoRuntimePanic(
+                                    GoErrors.plainRuntimeErrorType, "close of nil channel"
+                                ).value)
                             break
                         }
                         throw GoRuntimeError.typeMismatch
@@ -4495,7 +4533,9 @@ public struct GoVirtualMachine: Sendable {
                     else { throw GoRuntimeError.typeMismatch }
                     guard !storage.closed else {
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("close of closed channel"))
+                            GoRuntimePanic(
+                                GoErrors.plainRuntimeErrorType, "close of closed channel"
+                            ).value)
                         break
                     }
                     storage.closed = true
@@ -4564,7 +4604,7 @@ public struct GoVirtualMachine: Sendable {
                             try jump(to: target, frame: &frames[frameIndex])
                         case .closed:
                             frames[frameIndex].pendingExit = .panicking(
-                                .string("send on closed channel"))
+                                GoRuntimePanic.closedChannelSend.value)
                         case .blocked:
                             throw GoRuntimeError.typeMismatch
                         }
@@ -5458,7 +5498,7 @@ public struct GoVirtualMachine: Sendable {
                     let key = try pop(&stack)
                     let base = try pop(&stack)
                     guard case .map(let mapValue) = base else {
-                        if base == .nilValue { throw GoRuntimeError.panicError("assignment to entry in nil map") }
+                        if base == .nilValue { throw GoRuntimePanic.nilMapAssignment }
                         throw GoRuntimeError.typeMismatch
                     }
                     guard heap.contains(mapValue.storage.cell) else {
@@ -5514,7 +5554,10 @@ public struct GoVirtualMachine: Sendable {
                     // Unwrap interface to get concrete type and value
                     let concreteTypeName: String
                     let concreteValue: GoValue
-                    if case .interface(let iface) = receiver {
+                    if receiver == .nilValue {
+                        // A method of a nil interface value.
+                        throw GoRuntimePanic.nilDereference
+                    } else if case .interface(let iface) = receiver {
                         // A value converted to an interface carries its type.
                         guard let owner = GoTypeDescriptor.methodOwner(ofTypeName: iface.typeName)
                         else { throw GoRuntimeError.typeMismatch }
@@ -5546,7 +5589,11 @@ public struct GoVirtualMachine: Sendable {
                     // A method with a value receiver takes the value a
                     // pointer points to.
                     var receiverValue = concreteValue
-                    if !functionName.hasPrefix("*"), case .pointer(let pointer) = receiverValue {
+                    if !functionName.hasPrefix("*"), concreteTypeName.hasPrefix("*") {
+                        // A nil pointer has no value to hand the method.
+                        guard case .pointer(let pointer) = receiverValue else {
+                            throw GoRuntimePanic.nilDereference
+                        }
                         receiverValue = try read(pointer: pointer, heap: heap)
                     }
                     let allArgs = [receiverValue] + arguments
@@ -5600,11 +5647,12 @@ public struct GoVirtualMachine: Sendable {
                                 ? (wanted.methods.map(\.name) == ["Error"] ? "error" : "interface")
                                 : GoTypeDescriptor.goName(wanted.typeName)
                             frames[frameIndex].pendingExit = .panicking(
-                                .string(
+                                GoRuntimePanic(
+                                    GoErrors.assertionErrorType,
                                     source == .nilValue
                                         ? "interface conversion: interface is nil, not \(name)"
                                         : "interface conversion: \(inferredTypeName(of: source)) is not \(name): missing method \(missing ?? "")"
-                                ))
+                                ).value)
                         }
                     } else if dynamicType == GoTypeDescriptor.identity(ofTypeName: targetName) {
                         stack.append(dynamicValue)
@@ -5621,7 +5669,10 @@ public struct GoVirtualMachine: Sendable {
                             ?? GoTypeDescriptor.dynamicType(named: targetName).map(
                                 GoTypeDescriptor.name(of:)) ?? targetName
                         frames[frameIndex].pendingExit = .panicking(
-                            .string("interface conversion: interface {} is \(held), not \(wanted)"))
+                            GoRuntimePanic(
+                                GoErrors.assertionErrorType,
+                                "interface conversion: interface {} is \(held), not \(wanted)"
+                            ).value)
                     }
                 case .rangeKeys:
                     let base = try pop(&stack)
@@ -6813,9 +6864,6 @@ private enum GoGuestCallRecovery {
     case none
     /// It takes a panic as the result, as `fmt` does for a method.
     case panics
-    /// The same, and a use of a nil pointer counts as a panic: the receiver
-    /// of the method is one.
-    case failures
 }
 
 /// What the operands of one `fmt` call share: the named types of the

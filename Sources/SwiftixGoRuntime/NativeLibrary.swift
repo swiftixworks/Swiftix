@@ -87,12 +87,12 @@ enum GoNative {
         case "$bits.andNot": return lhs & ~rhs
         case "$bits.shl":
             guard rhs >= 0 else {
-                throw GoRuntimeError.panicError("runtime error: negative shift amount")
+                throw GoRuntimePanic.negativeShift
             }
             return rhs >= 64 ? 0 : lhs << rhs
         case "$bits.shr":
             guard rhs >= 0 else {
-                throw GoRuntimeError.panicError("runtime error: negative shift amount")
+                throw GoRuntimePanic.negativeShift
             }
             return rhs >= 64 ? (lhs < 0 ? -1 : 0) : lhs >> rhs
         default:

@@ -997,6 +997,13 @@ private struct FunctionChecker {
         case .forStatement(let initializer, let condition, let post, let body, _):
             scopes.append([:])
             defer { scopes.removeLast() }
+            if let scoped = statement.initialized {
+                // An `if` or `switch` with an initializer: its variables are
+                // in scope for the statement, which is no loop.
+                try check(scoped.initializer)
+                try check(scoped.statement)
+                break
+            }
             if let initializer { try check(initializer) }
             if let condition { try requireBool(condition) }
             if let post { try check(post) }
@@ -2584,7 +2591,7 @@ private struct FunctionChecker {
         {
             return actualDirection == expectedDirection || actualDirection == .bidirectional
         }
-        if actual == .nilType, case .interface = expected { return true }
+        if actual == .nilType, case .interface = underlying(expected) { return true }
         if case .interface(let methods) = underlying(expected) {
             // Empty interface accepts anything
             if methods.isEmpty { return true }
@@ -2994,6 +3001,7 @@ private struct FunctionChecker {
     }
 
     func statementTerminates(_ statement: GoStatement) -> Bool {
+        if let scoped = statement.initialized { return statementTerminates(scoped.statement) }
         switch statement {
         case .returnValues:
             return true
@@ -3017,7 +3025,8 @@ private struct FunctionChecker {
 
     func containsBreakTargetingCurrentConstruct(_ block: GoBlock) -> Bool {
         for statement in block.statements {
-            switch statement {
+            // An `if` with an initializer is still that `if`.
+            switch statement.initialized?.statement ?? statement {
             case .breakStatement:
                 return true
             case .ifStatement(_, let thenBlock, let elseBlock, _):

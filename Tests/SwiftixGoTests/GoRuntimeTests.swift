@@ -25,7 +25,7 @@ struct GoRuntimeTests: GoTestHarness {
                 }
                 """)
         let executable = try GoCompiler.compile(sources: [source])
-        #expect(throws: GoRuntimeError.divisionByZero) {
+        #expect(throws: GoRuntimeError.panicError("runtime error: integer divide by zero")) {
             try GoVirtualMachine().run(executable) { _ in }
         }
     }

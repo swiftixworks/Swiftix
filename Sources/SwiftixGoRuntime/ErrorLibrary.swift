@@ -38,6 +38,21 @@ enum GoErrors {
         ]),
     ]
 
+    /// Types of the errors the runtime panics with, whose value is the
+    /// message. See `GoRuntimePanic`.
+    static let runtimeErrorType = "runtime.errorString"
+    static let plainRuntimeErrorType = "runtime.plainError"
+    static let boundsErrorType = "runtime.boundsError"
+    static let assertionErrorType = "*runtime.TypeAssertionError"
+
+    /// Whether an interface value of this type name is an error that is its
+    /// message: one of the runtime's, or the error of a failed library call.
+    static func isMessageType(_ typeName: String) -> Bool {
+        typeName == legacyTypeName || typeName == runtimeErrorType
+            || typeName == plainRuntimeErrorType || typeName == boundsErrorType
+            || typeName == assertionErrorType
+    }
+
     /// Whether `typeName` is one of the pointer types above.
     static func isLibraryType(_ typeName: String) -> Bool {
         typeName == plainType || typeName == wrappingType || typeName == joiningType
@@ -50,7 +65,7 @@ enum GoErrors {
     /// Methods of the errors above, for a target that is an interface. Each
     /// takes no argument and returns one value.
     static func methods(ofLibraryType typeName: String) -> Set<String> {
-        typeName == plainType || typeName == legacyTypeName ? ["Error"] : ["Error", "Unwrap"]
+        typeName == plainType || isMessageType(typeName) ? ["Error"] : ["Error", "Unwrap"]
     }
 
     /// An interface a value is tested against at run time: the methods it

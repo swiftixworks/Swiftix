@@ -461,10 +461,36 @@ private struct Parser {
         return .returnValues(values, position: position)
     }
 
+    /// The optional initializer of an `if` or `switch` header, and the
+    /// expression after it. Go writes both as `SimpleStmt; Expression`, and a
+    /// header without `;` is the expression alone. `closesHeader` says
+    /// whether a `{` may follow the `;`, as it may in a `switch` without a tag.
+    mutating func parseHeader(
+        closesHeader: Bool
+    ) throws -> (initializer: GoStatement?, expression: GoExpression?) {
+        if check(.semicolon) {
+            // An empty initializer.
+            advance()
+            if closesHeader, check(.leftBrace) { return (nil, nil) }
+            return (nil, try parseExpression(allowCompositeLiteral: false))
+        }
+        let first = try parseSimpleStatement(allowCompositeLiteral: false)
+        if check(.semicolon) {
+            advance()
+            if closesHeader, check(.leftBrace) { return (first, nil) }
+            return (first, try parseExpression(allowCompositeLiteral: false))
+        }
+        guard case .expression(let expression) = first else { return (first, nil) }
+        return (nil, expression)
+    }
+
     mutating func parseIf() throws -> GoStatement {
         let position = current.position
         advance()
-        let condition = try parseExpression(allowCompositeLiteral: false)
+        let header = try parseHeader(closesHeader: false)
+        guard let condition = header.expression else {
+            throw GoDiagnostic(position: position, message: "missing condition in if statement")
+        }
         let thenBlock = try parseBlock()
         var elseBlock: GoBlock?
         if check(.else) {
@@ -478,11 +504,13 @@ private struct Parser {
                 elseBlock = try parseBlock()
             }
         }
-        return .ifStatement(
+        let statement = GoStatement.ifStatement(
             condition: condition,
             thenBlock: thenBlock,
             elseBlock: elseBlock,
             position: position)
+        guard let initializer = header.initializer else { return statement }
+        return .initialized(statement, by: initializer, position: position)
     }
 
     mutating func parseFor() throws -> GoStatement {
@@ -592,10 +620,14 @@ private struct Parser {
     mutating func parseSwitch() throws -> GoStatement {
         let position = current.position
         advance()
-        let expression = check(.leftBrace) ? nil : try parseExpression(allowCompositeLiteral: false)
-        if check(.semicolon) {
-            throw diagnostic("switch initializer statements are not supported yet")
+        var header: (initializer: GoStatement?, expression: GoExpression?) = (nil, nil)
+        if !check(.leftBrace) {
+            header = try parseHeader(closesHeader: true)
+            if header.expression == nil, header.initializer != nil, !check(.leftBrace) {
+                throw diagnostic("expected '{' after switch expression")
+            }
         }
+        let expression = header.expression
         try expect(.leftBrace, message: "expected '{' after switch expression")
         skipSemicolons()
 
@@ -640,7 +672,10 @@ private struct Parser {
                     position: casePosition))
         }
         advance()
-        return .switchStatement(expression: expression, cases: cases, position: position)
+        let statement = GoStatement.switchStatement(
+            expression: expression, cases: cases, position: position)
+        guard let initializer = header.initializer else { return statement }
+        return .initialized(statement, by: initializer, position: position)
     }
 
     mutating func parseSelect() throws -> GoStatement {

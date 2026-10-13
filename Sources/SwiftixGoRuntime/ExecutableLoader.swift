@@ -73,7 +73,12 @@ public enum GoExecutableLoader {
                         child.exit(result.exitCode)
                     case .failure(let error):
                         writeError(child, "\(path): \(String(describing: error))\n")
-                        child.exit(1)
+                        // A Go program that panics exits with status 2.
+                        if case GoRuntimeError.panicError = error {
+                            child.exit(2)
+                        } else {
+                            child.exit(1)
+                        }
                     }
                 })
         }

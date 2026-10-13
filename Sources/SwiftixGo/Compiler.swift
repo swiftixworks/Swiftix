@@ -1799,6 +1799,13 @@ private struct IRLowerer {
         case .forStatement(let initializer, let condition, let post, let body, _):
             scopes.append([:])
             defer { scopes.removeLast() }
+            if let scoped = statement.initialized {
+                // An `if` or `switch` with an initializer runs once, and a
+                // `break` or `continue` inside it belongs to what encloses it.
+                try lower(scoped.initializer)
+                try lower(scoped.statement)
+                break
+            }
             if let initializer { try lower(initializer) }
             let conditionLabel = allocateLabel()
             let postLabel = allocateLabel()

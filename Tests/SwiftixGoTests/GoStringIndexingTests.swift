@@ -45,14 +45,19 @@ struct GoStringIndexingTests: GoTestHarness {
     }
 
     @Test func outOfRangeIndexAndSliceFail() throws {
-        #expect(throws: GoRuntimeError.indexOutOfRange) {
+        #expect(
+            throws: GoRuntimeError.panicError("runtime error: index out of range [2] with length 2")
+        ) {
             try run("""
                 s := "ab"
                 i := 2
                 fmt.Println(s[i])
                 """)
         }
-        #expect(throws: GoRuntimeError.invalidSliceBounds) {
+        #expect(
+            throws: GoRuntimeError.panicError(
+                "runtime error: slice bounds out of range [:3] with length 2")
+        ) {
             try run("""
                 s := "ab"
                 i := 3
