@@ -155,6 +155,13 @@ private struct FormatToken: Equatable {
     func withLeadingNewlines(_ count: Int) -> FormatToken {
         FormatToken(kind: kind, text: text, leadingNewlines: count, offset: offset)
     }
+
+    /// Whether this is a string literal, interpreted or raw.
+    var isString: Bool { kind == .literal && (text.first == "\"" || text.first == "`") }
+
+    /// Whether this is a raw string that goes on past the line it starts
+    /// on: what follows it stands on another line than what precedes it.
+    var spansLines: Bool { kind == .literal && text.first == "`" && text.contains("\n") }
 }
 
 private struct FormatScanner {
@@ -187,6 +194,8 @@ private struct FormatScanner {
                 tokens.append(scanInteger(leadingNewlines: newlines))
             } else if byte == 0x22 || byte == 0x27 {
                 tokens.append(try scanString(leadingNewlines: newlines))
+            } else if byte == 0x60 {
+                tokens.append(try scanRawString(leadingNewlines: newlines))
             } else {
                 tokens.append(scanSymbol(leadingNewlines: newlines))
             }
@@ -260,6 +269,25 @@ private struct FormatScanner {
             } else {
                 index += 1
             }
+        }
+        throw GoDiagnostic(
+            position: position(at: start),
+            message: "string not terminated")
+    }
+
+    /// A raw string literal, kept as the source has it, the lines inside it
+    /// too: only its carriage returns go, which are no part of its value.
+    mutating func scanRawString(leadingNewlines: Int) throws -> FormatToken {
+        let start = index
+        index += 1
+        while index < bytes.count {
+            index += 1
+            guard bytes[index - 1] == 0x60 else { continue }
+            return FormatToken(
+                kind: .literal,
+                text: String(decoding: bytes[start..<index].filter { $0 != 0x0D }, as: UTF8.self),
+                leadingNewlines: leadingNewlines,
+                offset: start)
         }
         throw GoDiagnostic(
             position: position(at: start),
@@ -511,8 +539,20 @@ private struct FormatPrinter {
     /// Whether the line being written declares a field of a struct, whose
     /// name is a cell.
     var lineIsStructField = false
+    /// Whether the field being written is an embedded one, and whether the
+    /// line has come to the field's tag.
+    var lineIsEmbeddedField = false
+    var lineHasTag = false
+    /// Whether the line being written begins with the `}` that ends the
+    /// type of a struct field.
+    var lineClosesFieldType = false
     /// Whether the line written last ended in a `//` comment after code.
     var previousLineHadTrailingComment = false
+    /// Whether the line written last holds a raw string of several lines:
+    /// Go's printer starts the columns over after what spans lines.
+    var previousLineSpannedLines = false
+    /// Whether the line being written has such a string already.
+    var lineEndsAlignment = false
     /// Brace depths of `struct` bodies.
     var structBodyDepths: Set<Int> = []
     /// Index in `tokens` of the token being handled.
@@ -627,6 +667,13 @@ private struct FormatPrinter {
     /// Ends the cell being written: what follows starts the next column.
     mutating func endCell() {
         trimTrailingWhitespace()
+        if lineEndsAlignment {
+            // After a raw string of several lines Go's printer aligns
+            // nothing more on the line: a blank stands where a column
+            // would have ended.
+            current += " "
+            return
+        }
         cells.append(current)
         current = ""
     }
@@ -636,14 +683,44 @@ private struct FormatPrinter {
     mutating func endStructFieldName() {
         // The names of a field list, `X, Y int`, are one cell: the blank
         // that ends them is the first that follows no comma.
-        guard lineIsStructField, cells.isEmpty,
+        guard lineIsStructField, cells.isEmpty else { return }
+        guard
             let blank = current.indices.first(where: { index in
                 current[index] == " " && index > current.startIndex
                     && current[current.index(before: index)] != ","
             })
-        else { return }
+        else {
+            lineIsEmbeddedField = structBodyDepths.contains(braceDepth)
+            return
+        }
         cells.append(String(current[..<blank]))
         current = String(current[current.index(after: blank)...])
+    }
+
+    /// Gives an embedded field, which has no name, the empty column Go's
+    /// printer puts after its type before a comment: the type stands in
+    /// the column of names, and the comment with those of the fields
+    /// around it. Called when the type has just become a cell.
+    mutating func endEmbeddedFieldType() {
+        guard lineIsStructField, lineIsEmbeddedField, cells.count == 1, !lineEndsAlignment
+        else { return }
+        cells.append("")
+    }
+
+    /// Ends the columns before the tag of a struct field, the string
+    /// literal `token`, as Go's printer has them: after the name and the
+    /// type an empty column, where the comment of a field without a tag
+    /// stands; after an embedded type nothing more.
+    mutating func beginStructTag(_ token: FormatToken) {
+        guard token.isString, lineIsStructField, structBodyDepths.contains(braceDepth),
+            parenthesisDepth == statementBase, sliceBrackets.isEmpty, !lineIsEmpty,
+            !lineHasTag
+        else { return }
+        lineHasTag = true
+        endStructFieldName()
+        let isEmbedded = cells.isEmpty
+        endCell()
+        if !isEmbedded { cells.append("") }
     }
 
     mutating func handleLeadingNewlines(for token: FormatToken) {
@@ -728,6 +805,7 @@ private struct FormatPrinter {
             let token = tokens[index]
             if index > start, token.leadingNewlines > 0 { return 0 }
             if token.kind == .lineComment || token.kind == .blockComment { return 0 }
+            if token.spansLines { return 0 }
             guard token.kind == .symbol else { continue }
             switch token.text {
             case "(", "[", "{": depth += 1
@@ -830,6 +908,7 @@ private struct FormatPrinter {
         for ahead in position..<tokens.count {
             let token = tokens[ahead]
             if ahead > position, token.leadingNewlines > 0 { return true }
+            if token.spansLines { return true }
             guard token.kind == .symbol else { continue }
             switch token.text {
             case "(", "[", "{": depth += 1
@@ -1066,7 +1145,7 @@ private struct FormatPrinter {
         var depth = 0
         for index in (position + 1)..<tokens.count {
             let token = tokens[index]
-            if token.leadingNewlines > 0 { return false }
+            if token.leadingNewlines > 0 || token.spansLines { return false }
             guard token.kind == .symbol else { continue }
             switch token.text {
             case "(", "[", "{": depth += 1
@@ -1181,6 +1260,7 @@ private struct FormatPrinter {
                 // the comments of the lines around it.
                 endStructFieldName()
                 endCell()
+                endEmbeddedFieldType()
                 if let specification = lineSpecification, isAtGroupLevel {
                     // Go's printer has four columns in a `var` or `const`
                     // group, names, types, values, and comments; the ones a
@@ -1214,6 +1294,7 @@ private struct FormatPrinter {
                 // comment there.
                 endStructFieldName()
                 endCell()
+                endEmbeddedFieldType()
             } else if !current.isEmpty {
                 ensureSpace()
             }
@@ -1619,7 +1700,9 @@ private struct FormatPrinter {
             append(token.text)
             append(" ")
         default:
+            beginStructTag(token)
             appendWord(token.text, kind: token.kind)
+            if token.spansLines { lineEndsAlignment = true }
         }
         // What follows the `=` of a `var` is a value, not its type.
         if token.text == "=" { pendingVariableDeclaration = false }
@@ -1669,6 +1752,7 @@ private struct FormatPrinter {
             let token = tokens[index]
             if index > position, token.leadingNewlines > 0 { return nil }
             if token.kind == .lineComment || token.kind == .blockComment { return nil }
+            if token.spansLines { return nil }
             guard token.kind == .symbol else { continue }
             if token.text == "{" {
                 depth += 1
@@ -1716,7 +1800,7 @@ private struct FormatPrinter {
     func staysOnOneLineAsTypeBody() -> Bool {
         guard previous?.text == "struct" || previous?.text == "interface",
             let close = closingBraceOnSameLine(),
-            !tokens[position...close].contains(where: { $0.text == ";" }),
+            !tokens[position...close].contains(where: { $0.text == ";" || $0.isString }),
             let probe = probingOneLineBody(until: close), let body = probe.closedOneLineBody
         else { return false }
         // The field or method as the probe wrote it, between `{ ` and ` }`.
@@ -1832,6 +1916,14 @@ private struct FormatPrinter {
         indent -= 1
         braceDepth -= 1
         append("}")
+        if structBodyDepths.contains(braceDepth) {
+            // The last line of a field whose type is a struct or an
+            // interface of several lines: Go's printer starts the columns
+            // over before it and after it, so a tag or a comment that
+            // follows the brace is aligned with nothing.
+            lineStartsSection = true
+            lineClosesFieldType = true
+        }
     }
 
     mutating func appendWord(_ text: String, kind: FormatTokenKind) {
@@ -1947,12 +2039,17 @@ private struct FormatPrinter {
         lines.append(
             FormatLine(
                 indent: lineIndent ?? indent, cells: cells, tail: current,
-                startsSection: lineStartsSection))
+                startsSection: lineStartsSection || previousLineSpannedLines))
+        previousLineSpannedLines = lineClosesFieldType || lineEndsAlignment
+        lineClosesFieldType = false
+        lineEndsAlignment = false
         cells = []
         current = ""
         lineIndent = nil
         lineStartsSection = false
         lineIsStructField = false
+        lineIsEmbeddedField = false
+        lineHasTag = false
         lineIsFunctionDeclaration = false
         lineSpecification = nil
         pendingVariableDeclaration = false

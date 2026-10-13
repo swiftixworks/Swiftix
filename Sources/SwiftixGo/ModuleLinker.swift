@@ -484,10 +484,7 @@ private struct FileRewriter {
             return .named(renamed(name), position: position)
         case .structure(let fields, let position):
             return .structure(
-                fields: try fields.map {
-                    GoStructFieldDeclaration(
-                        name: $0.name, type: try rewrite($0.type), position: $0.position)
-                },
+                fields: try fields.map { $0.with(type: try rewrite($0.type)) },
                 position: position)
         case .pointer(let pointee, let position):
             return .pointer(pointee: try rewrite(pointee), position: position)

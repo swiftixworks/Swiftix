@@ -861,13 +861,19 @@ public enum GoSourceRewriter {
             if methods.isEmpty { return "interface{}" }
             return "interface{ "
                 + methods.map { m in
-                    m.name + "("
+                    if let embedded = m.embeddedInterface { return typeText(embedded) }
+                    return m.name + "("
                         + m.parameters.map(typeText).joined(separator: ", ") + ")"
                         + (m.results.isEmpty ? "" : " " + m.results.map(typeText).joined(separator: ", "))
                 }.joined(separator: "; ") + " }"
         case .structure(let fields, _):
             return "struct { "
-                + fields.map { $0.name + " " + typeText($0.type) }
+                + fields.map { field in
+                    // An embedded field is its type alone, and a tag follows
+                    // the type of either kind.
+                    (field.isEmbedded ? "" : field.name + " ") + typeText(field.type)
+                        + (field.tag.map { " " + quote($0) } ?? "")
+                }
                 .joined(separator: "; ") + " }"
         }
     }

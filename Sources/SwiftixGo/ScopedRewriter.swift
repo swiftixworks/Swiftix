@@ -31,6 +31,21 @@ protocol GoScopedRewriter {
 
     /// A type declared in a function; returns what stands in its place.
     mutating func localType(_ declaration: GoTypeDeclaration) throws -> [GoStatement]
+
+    /// An interface type, its methods rewritten; returns what stands in
+    /// its place. A function type arrives here too, as the interface it is
+    /// carried by.
+    mutating func interface(
+        _ methods: [GoInterfaceMethodDeclaration], at position: GoSourcePosition
+    ) throws -> GoTypeExpression
+}
+
+extension GoScopedRewriter {
+    mutating func interface(
+        _ methods: [GoInterfaceMethodDeclaration], at position: GoSourcePosition
+    ) throws -> GoTypeExpression {
+        .interface(methods: methods, position: position)
+    }
 }
 
 extension GoScopedRewriter {
@@ -77,10 +92,7 @@ extension GoScopedRewriter {
             return try self.type(named: name, at: position)
         case .structure(let fields, let position):
             return .structure(
-                fields: try fields.map {
-                    GoStructFieldDeclaration(
-                        name: $0.name, type: try rewrite($0.type), position: $0.position)
-                },
+                fields: try fields.map { $0.with(type: try rewrite($0.type)) },
                 position: position)
         case .pointer(let pointee, let position):
             return .pointer(pointee: try rewrite(pointee), position: position)
@@ -94,15 +106,15 @@ extension GoScopedRewriter {
             return .channel(
                 direction: direction, element: try rewrite(element), position: position)
         case .interface(let methods, let position):
-            return .interface(
-                methods: try methods.map { method in
+            return try interface(
+                try methods.map { method in
                     GoInterfaceMethodDeclaration(
                         name: method.name,
                         parameters: try method.parameters.map { try rewrite($0) },
                         results: try method.results.map { try rewrite($0) },
                         position: method.position)
                 },
-                position: position)
+                at: position)
         }
     }
 

@@ -72,6 +72,8 @@ private struct Parser {
     var iotaDepth: UInt16 = 0
     /// Whether a composite literal leaves something for its type to settle.
     var hasOpenLiterals = false
+    /// Whether a struct type embeds a field or an interface type another.
+    var usesEmbedding = false
     /// The names of each declaration of several names, which the tree keeps
     /// as text. For a function: its name, the end of its body, and the names
     /// of its results.
@@ -183,6 +185,7 @@ private struct Parser {
             functions: functions)
         file.declaresLocalTypes = declaresLocalTypes
         file.hasOpenLiterals = hasOpenLiterals
+        file.usesEmbedding = usesEmbedding
         file.namePositions = namePositions
         return file
     }
@@ -521,8 +524,20 @@ private struct Parser {
             var methods: [GoInterfaceMethodDeclaration] = []
             while !check(.rightBrace) {
                 guard !check(.eof) else { throw diagnostic("expected '}'") }
+                if let embedded = parseEmbeddedInterface() {
+                    methods.append(embedded)
+                    if check(.semicolon) { skipSemicolons() }
+                    else if !check(.rightBrace) {
+                        throw diagnostic("expected semicolon or newline in interface type")
+                    }
+                    continue
+                }
                 let methodPosition = current.position
                 let methodName = try expectIdentifier(message: "expected method name")
+                if methods.contains(where: { $0.name == methodName }) {
+                    throw GoDiagnostic(
+                        position: methodPosition, message: "duplicate method \(methodName)")
+                }
                 try expect(.leftParen, message: "expected '('")
                 let parameters = try parseSignatureTypes()
                 for parameter in parameters.dropLast() {
@@ -564,18 +579,7 @@ private struct Parser {
             var fields: [GoStructFieldDeclaration] = []
             while !check(.rightBrace) {
                 guard !check(.eof) else { throw diagnostic("expected '}'") }
-                // `X, Y int`: a field of that type for each name.
-                var names = [(current.position, try expectIdentifier(message: "expected field name"))]
-                while check(.comma) {
-                    advance()
-                    names.append(
-                        (current.position, try expectIdentifier(message: "expected field name")))
-                }
-                let type = try parseTypeExpression()
-                for (fieldPosition, name) in names {
-                    fields.append(
-                        GoStructFieldDeclaration(name: name, type: type, position: fieldPosition))
-                }
+                fields.append(contentsOf: try parseStructFields())
                 if check(.semicolon) {
                     skipSemicolons()
                 } else if !check(.rightBrace) {
@@ -586,6 +590,98 @@ private struct Parser {
             return .structure(fields: fields, position: position)
         }
         throw diagnostic("expected type")
+    }
+
+    /// The fields one declaration of a struct type gives it: `X, Y int`, a
+    /// field of that type for each name, or an embedded field, `T`, `*T`,
+    /// or `pkg.T`, whose name is the name of its type. A string literal
+    /// after either is the tag of each field declared.
+    mutating func parseStructFields() throws -> [GoStructFieldDeclaration] {
+        var fields: [GoStructFieldDeclaration] = []
+        if let embedded = try parseEmbeddedField() {
+            fields.append(embedded)
+        } else {
+            var names = [(current.position, try expectIdentifier(message: "expected field name"))]
+            while check(.comma) {
+                advance()
+                names.append(
+                    (current.position, try expectIdentifier(message: "expected field name")))
+            }
+            let type = try parseTypeExpression()
+            for (fieldPosition, name) in names {
+                fields.append(
+                    GoStructFieldDeclaration(name: name, type: type, position: fieldPosition))
+            }
+        }
+        if case .string(let tag) = current.kind {
+            advance()
+            for index in fields.indices { fields[index].tag = tag }
+        }
+        return fields
+    }
+
+    /// The embedded field at the current token, when a type name stands
+    /// where a field's name and type would: alone, after a `*`, or with the
+    /// name of its package.
+    mutating func parseEmbeddedField() throws -> GoStructFieldDeclaration? {
+        let position = current.position
+        let isPointer = check(.star)
+        if !isPointer {
+            guard case .identifier(let word) = current.kind,
+                !GoBitwiseOperator.isOperatorSpelling(word)
+            else { return nil }
+            switch lookahead(1).kind {
+            case .semicolon, .rightBrace, .string, .eof: break
+            case .period:
+                // A name of a field is never followed by a period.
+                guard case .identifier = lookahead(2).kind else { return nil }
+            default: return nil
+            }
+        } else {
+            advance()
+        }
+        let namePosition = current.position
+        let qualifier = try expectIdentifier(message: "expected embedded type name")
+        var typeName = qualifier
+        var fieldName = qualifier
+        if check(.period), case .identifier(let member) = lookahead(1).kind {
+            advance()
+            advance()
+            typeName = qualifier + "." + member
+            fieldName = member
+        }
+        let named = GoTypeExpression.named(typeName, position: namePosition)
+        var field = GoStructFieldDeclaration(
+            name: fieldName,
+            type: isPointer ? .pointer(pointee: named, position: position) : named,
+            position: namePosition)
+        field.isEmbedded = true
+        usesEmbedding = true
+        return field
+    }
+
+    /// The interface embedded at the current token of an interface type,
+    /// when a type name stands where a method would: `I` or `pkg.I`.
+    mutating func parseEmbeddedInterface() -> GoInterfaceMethodDeclaration? {
+        guard case .identifier(let word) = current.kind,
+            !GoBitwiseOperator.isOperatorSpelling(word)
+        else { return nil }
+        let position = current.position
+        var name = word
+        switch lookahead(1).kind {
+        case .semicolon, .rightBrace:
+            advance()
+        case .period:
+            guard case .identifier(let member) = lookahead(2).kind else { return nil }
+            name += "." + member
+            advance()
+            advance()
+            advance()
+        default:
+            return nil
+        }
+        usesEmbedding = true
+        return .embedded(.named(name, position: position), position: position)
     }
 
     mutating func parseFunction() throws -> GoFunctionDeclaration {

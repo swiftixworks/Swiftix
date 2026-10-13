@@ -176,6 +176,10 @@ public struct GoFile: Sendable, Equatable {
     /// checker, in the order of the source. See `GoBranchChecker`.
     var branchErrors: [Int: [GoDiagnostic]] = [:]
 
+    /// Whether a struct type of the file embeds a field or an interface
+    /// type of it embeds another, which `GoEmbedding` has work to do for.
+    var usesEmbedding = false
+
     /// Where Go reports `function`: at its name.
     func namePosition(of function: GoFunctionDeclaration) -> GoSourcePosition {
         namePositions[function.position.offset]?.first ?? function.position
@@ -218,6 +222,7 @@ public struct GoFile: Sendable, Equatable {
         file.importRenames = importRenames
         file.hasOpenLiterals = hasOpenLiterals
         file.branchErrors = branchErrors
+        file.usesEmbedding = usesEmbedding
         return file
     }
 
@@ -293,11 +298,24 @@ public struct GoStructFieldDeclaration: Sendable, Equatable {
     public let name: String
     public let type: GoTypeExpression
     public let position: GoSourcePosition
+    /// Whether the field is embedded: declared by its type alone, `T` or
+    /// `*T`, whose name without a package is the field's name.
+    var isEmbedded = false
+    /// The value of the string literal after the field, if it has one.
+    var tag: String? = nil
 
     public init(name: String, type: GoTypeExpression, position: GoSourcePosition) {
         self.name = name
         self.type = type
         self.position = position
+    }
+
+    /// The same field with its type as a pass rewrote it.
+    func with(type: GoTypeExpression) -> GoStructFieldDeclaration {
+        var field = GoStructFieldDeclaration(name: name, type: type, position: position)
+        field.isEmbedded = isEmbedded
+        field.tag = tag
+        return field
     }
 }
 

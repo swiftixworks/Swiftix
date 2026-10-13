@@ -8,10 +8,12 @@ enum GoNames {
     }
 
     /// The files of a whole program, each package of it resolved, with
-    /// every alias replaced by its type, and every composite literal given
-    /// what its type says of it.
+    /// every alias replaced by its type, every composite literal given
+    /// what its type says of it, every interface holding the methods of
+    /// those it embeds, and every struct type the methods its embedded
+    /// fields lend it.
     static func resolve(program files: [GoFile]) throws -> [GoFile] {
-        try GoCompositeLiterals.resolve(GoTypeAliases.resolve(files))
+        try GoEmbedding.resolve(GoCompositeLiterals.resolve(GoTypeAliases.resolve(files)))
     }
 
     /// Runs `body`, which works on the resolved `files`, and reports what

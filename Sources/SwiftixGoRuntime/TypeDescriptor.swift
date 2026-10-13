@@ -19,6 +19,8 @@
 ///     e error    a interface {}           I<n>:<text> another interface
 ///     [T slice   A<n>;T array             MKV map       *T pointer
 ///     S<n>;(<n>:<field>T)... struct       N<n>:<name> named type
+///         a field's T after `E` when it is embedded, and after
+///         `G<n>:<tag>` when it has a tag
 ///     C<d>T channel (0 both ways, 1 send-only, 2 receive-only)
 ///     O<n>:<text> a type that only has a name here (functions, handles)
 ///
@@ -48,6 +50,10 @@ indirect enum GoRuntimeType: Equatable, Sendable {
     struct Field: Equatable, Sendable {
         let name: String
         let type: GoRuntimeType
+        /// Whether the field is embedded, and its tag: Go prints both with
+        /// the type, of which they are part.
+        var isEmbedded = false
+        var tag: String? = nil
     }
 
     /// Whether a value of this type holds another value with its own type.
@@ -121,7 +127,10 @@ struct GoTypeDescriptor: Equatable, Sendable {
         case .structure(let fields):
             if fields.isEmpty { return "struct {}" }
             return "struct { "
-                + fields.map { $0.name + " " + name(of: $0.type) }.joined(separator: "; ") + " }"
+                + fields.map { field in
+                    (field.isEmbedded ? "" : field.name + " ") + name(of: field.type)
+                        + (field.tag.map { " " + GoFormat.quote($0, asciiOnly: false) } ?? "")
+                }.joined(separator: "; ") + " }"
         case .channel(let direction, let element):
             let prefix = direction == 1 ? "chan<- " : (direction == 2 ? "<-chan " : "chan ")
             return prefix + name(of: element)
@@ -321,8 +330,17 @@ struct GoTypeDescriptor: Equatable, Sendable {
                 }
                 var fields: [GoRuntimeType.Field] = []
                 for _ in 0..<count {
-                    guard let name = text(), let fieldType = type() else { return nil }
-                    fields.append(GoRuntimeType.Field(name: name, type: fieldType))
+                    guard let name = text() else { return nil }
+                    let isEmbedded = take(UInt8(ascii: "E"))
+                    var tag: String?
+                    if take(UInt8(ascii: "G")) {
+                        guard let found = text() else { return nil }
+                        tag = found
+                    }
+                    guard let fieldType = type() else { return nil }
+                    fields.append(
+                        GoRuntimeType.Field(
+                            name: name, type: fieldType, isEmbedded: isEmbedded, tag: tag))
                 }
                 return .structure(fields)
             case UInt8(ascii: "C"):

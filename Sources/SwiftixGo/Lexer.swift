@@ -57,6 +57,10 @@ private struct Scanner {
                 try scanRune()
                 continue
             }
+            if byte == 0x60 {
+                try scanRawString()
+                continue
+            }
             try scanPunctuation()
         }
 
@@ -207,6 +211,27 @@ private struct Scanner {
             }
             value.append(byte)
             advance()
+        }
+        throw GoDiagnostic(position: start, message: "string not terminated")
+    }
+
+    /// A raw string literal, between back quotes: every character between
+    /// them is itself, a backslash and a line break included, and only a
+    /// carriage return is left out, as Go's scanner leaves it out. The token
+    /// is a string, so everything after the lexer sees the text alone.
+    mutating func scanRawString() throws {
+        let start = position()
+        advance()
+        var value: [UInt8] = []
+        while index < bytes.count {
+            let byte = bytes[index]
+            advance()
+            if byte == 0x60 {
+                tokens.append(
+                    GoToken(kind: .string(String(decoding: value, as: UTF8.self)), position: start))
+                return
+            }
+            if byte != 0x0D { value.append(byte) }
         }
         throw GoDiagnostic(position: start, message: "string not terminated")
     }

@@ -82,7 +82,11 @@ struct GoTypeEncoder {
         case .map(let key, let value): return "M" + encode(key) + encode(value)
         case .structure(let fields):
             var text = "S\(fields.count);"
-            for field in fields { text += counted(field.name) + encode(field.type) }
+            for field in fields {
+                // What makes two struct types apart beyond names and types.
+                text += counted(field.name) + (field.isEmbedded ? "E" : "")
+                    + (field.tag.map { "G" + counted($0) } ?? "") + encode(field.type)
+            }
             return text
         case .channel(let direction, let element):
             let code: Int

@@ -696,7 +696,7 @@ private func compilerResolve(_ expression: GoTypeExpression) -> GoType {
     case .structure(let fields, _):
         return .structure(
             fields.map {
-                GoStructFieldType(name: $0.name, type: compilerResolve($0.type))
+                GoStructFieldType($0, type: compilerResolve($0.type))
             })
     case .pointer(let pointee, _):
         return .pointer(compilerResolve(pointee))
@@ -1644,6 +1644,137 @@ private struct IRLowerer {
         return functionValue(symbol: symbol, bound: pointers)
     }
 
+    /// `base.name` with the embedded fields between the two written out,
+    /// when an embedded field lends the struct `base` is the field or the
+    /// method `name`; nil when the struct has the name itself. The checker
+    /// has refused a name two fields lend alike. A method of the run-time
+    /// library that is selected and not called is left to the method
+    /// declared for it, which is a function where the library's is none.
+    func promotedSelector(
+        base: GoExpression, baseType: GoType, name: String, position: GoSourcePosition,
+        isCalled: Bool = false, isStarted: Bool = false
+    ) -> GoExpression? {
+        guard
+            case .found(let promotion) = GoEmbedding.promotion(
+                of: name, in: baseType, definitions: typeDefinitions)
+        else { return nil }
+        // The method declared for the promoted one does where the VM
+        // needs a function to name: for a method of the library that is
+        // not called, and for one of an interface that `go` or `defer`
+        // starts.
+        if promotion.isMethod,
+            promotion.holderKind == .library && !isCalled
+                || promotion.holderKind == .interface && isStarted,
+            (try? methodInfo(base: base, name: name)) != nil
+        {
+            return nil
+        }
+        return promotion.selector(name, of: base, position: position)
+    }
+
+    /// The same for a selector whose base is yet to be typed. `isStarted`
+    /// says that a `go` or `defer` statement calls it.
+    func promotedSelector(
+        _ expression: GoExpression, isCalled: Bool = false, isStarted: Bool = false
+    ) -> GoExpression? {
+        guard case .selector(let base, let name, let position) = expression,
+            let baseType = try? type(of: base)
+        else { return nil }
+        return promotedSelector(
+            base: base, baseType: baseType, name: name, position: position, isCalled: isCalled,
+            isStarted: isStarted)
+    }
+
+    // What follows asks `promotedSelector` on behalf of a function that
+    // lowers or types every kind of selector or call, and hands back what
+    // that function returns: the frames of those, which nest as deeply as
+    // expressions do, keep nothing for a name that nobody lends.
+
+    /// The type of `expression`, a selection from a value of `baseType`
+    /// or, without one, a call, when an embedded field lends what is
+    /// selected or called.
+    func promotedType(_ expression: GoExpression, baseType: GoType?) throws -> GoType? {
+        if let baseType {
+            guard case .selector(let base, let name, let position) = expression,
+                let promoted = promotedSelector(
+                    base: base, baseType: baseType, name: name, position: position)
+            else { return nil }
+            return try type(of: promoted)
+        }
+        guard case .call(let callee, let arguments, let position) = expression,
+            let promoted = promotedSelector(callee, isCalled: true)
+        else { return nil }
+        return try type(of: .call(callee: promoted, arguments: arguments, position: position))
+    }
+
+    /// The value of the selection `expression`, or with `address` a
+    /// pointer to what it selects, when an embedded field lends the name.
+    mutating func lowerPromotedSelector(
+        _ expression: GoExpression, address: Bool = false
+    ) throws -> Int? {
+        guard let promoted = promotedSelector(expression) else { return nil }
+        return try address ? lowerAddress(of: promoted) : lower(promoted)
+    }
+
+    /// Stores `value` in `target`, a selection from a value of `baseType`,
+    /// when an embedded field lends the field; false when none does.
+    mutating func storePromoted(
+        _ value: Int, to target: GoExpression, baseType: GoType
+    ) throws -> Bool {
+        guard case .selector(let base, let name, let position) = target,
+            let promoted = promotedSelector(
+                base: base, baseType: baseType, name: name, position: position)
+        else { return false }
+        try store(value, to: promoted)
+        return true
+    }
+
+    /// `pinned` for a target that an embedded field lends.
+    mutating func pinnedPromotedSelector(_ target: GoExpression) throws -> GoExpression? {
+        guard let promoted = promotedSelector(target) else { return nil }
+        return try pinned(promoted)
+    }
+
+    /// A register for each result of the call of `callee` when an embedded
+    /// field lends what is called, a method or a field that holds a
+    /// function; nil when the callee is anything else.
+    mutating func lowerPromotedCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> [Int]? {
+        guard let promoted = promotedSelector(callee, isCalled: true) else { return nil }
+        if multiReturnTypes(callee: promoted).count > 1,
+            let results = try lowerMultiReturnCall(callee: promoted, arguments: arguments)
+        {
+            return results
+        }
+        return try lowerCall(callee: promoted, arguments: arguments).map { [$0] } ?? []
+    }
+
+    /// Lowers the `go` or `defer` statement `statement` when it starts a
+    /// method an embedded field lends; false when it starts anything else.
+    mutating func lowerStartedPromotedCall(_ statement: GoStatement) throws -> Bool {
+        let started: GoExpression
+        switch statement {
+        case .deferStatement(let expression, _), .goStatement(let expression, _):
+            started = expression
+        default:
+            return false
+        }
+        guard case .call(let callee, let arguments, let callPosition) = started,
+            let promoted = promotedSelector(callee, isCalled: true, isStarted: true)
+        else { return false }
+        let call = GoExpression.call(callee: promoted, arguments: arguments, position: callPosition)
+        switch statement {
+        case .deferStatement(_, let position):
+            try lowerDeferStatement(.deferStatement(expression: call, position: position))
+        case .goStatement(_, let position):
+            try lowerGoStatement(.goStatement(expression: call, position: position))
+        default:
+            break
+        }
+        return true
+    }
+
     /// The method `T.m` or `(*T).m` names and the receiver it is written
     /// to take, or nil when `base` names no type of the program.
     func methodExpression(
@@ -1736,6 +1867,12 @@ private struct IRLowerer {
                 break
             }
             guard let baseType = try? type(of: base) else { return nil }
+            if let promoted = promotedSelector(
+                base: base, baseType: baseType, name: name, position: callee.position,
+                isCalled: true)
+            {
+                return valueCallSignature(promoted)
+            }
             calleeType = structFields(of: baseType)?.first { $0.name == name }?.type
         default:
             calleeType = try? type(of: callee)
@@ -1757,6 +1894,9 @@ private struct IRLowerer {
     mutating func lowerValueCall(
         callee: GoExpression, arguments: [GoExpression]
     ) throws -> [Int]? {
+        if let results = try lowerPromotedCall(callee: callee, arguments: arguments) {
+            return results
+        }
         guard let signature = valueCallSignature(callee) else { return nil }
         let operands = try lowerValueCallOperands(
             callee: callee, arguments: arguments, parameters: signature.parameters)
@@ -2164,6 +2304,7 @@ private struct IRLowerer {
                     position: position))
             return
         }
+        if try lowerStartedPromotedCall(statement) { return }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.deferCall(
                 function: wrapper.name, arguments: wrapper.registers))
@@ -2259,6 +2400,7 @@ private struct IRLowerer {
                     position: position))
             return
         }
+        if try lowerStartedPromotedCall(statement) { return }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.spawn(
                 function: wrapper.name, arguments: wrapper.registers))
@@ -3507,6 +3649,9 @@ private struct IRLowerer {
     }
 
     func multiReturnTypes(callee: GoExpression) -> [GoType] {
+        if let promoted = promotedSelector(callee, isCalled: true) {
+            return multiReturnTypes(callee: promoted)
+        }
         if let native = nativeFunction(for: callee) {
             return native.function.results
         }
@@ -3956,6 +4101,7 @@ private struct IRLowerer {
         if let function = try lowerLibraryFunctionValue(base: base, member: name) {
             return function
         }
+        if let lent = try lowerPromotedSelector(expression) { return lent }
         if let baseType = try? type(of: base),
             case .interface(let methods) = underlying(baseType),
             let method = methods.first(where: { $0.name == name })
@@ -4169,6 +4315,9 @@ private struct IRLowerer {
         {
             return true
         }
+        if let methods = addressedVariables.receivers[name], lendsPointerMethod(type, among: methods) {
+            return true
+        }
         if let methods = addressedVariables.nestedReceivers[name] {
             // A method of something inside the variable: one with a pointer
             // receiver, whatever its type, takes an address within it.
@@ -4177,6 +4326,18 @@ private struct IRLowerer {
             }
         }
         return false
+    }
+
+    /// Whether an embedded field lends a struct of `type` one of `methods`
+    /// that takes the address of the field, and so of the struct.
+    func lendsPointerMethod(_ type: GoType, among methods: Set<String>) -> Bool {
+        methods.contains { method in
+            guard
+                case .found(let promotion) = GoEmbedding.promotion(
+                    of: method, in: type, definitions: typeDefinitions)
+            else { return false }
+            return promotion.isMethod && promotion.hasPointerReceiver && !promotion.isIndirect
+        }
     }
 
     /// Makes `register` a new variable before a declaration stores in it,
@@ -4250,6 +4411,7 @@ private struct IRLowerer {
             }
             return .index(base: pinnedBase, index: try pin(index), position: position)
         case .selector(let base, let name, let position):
+            if let promoted = try pinnedPromotedSelector(target) { return promoted }
             if try type(of: base).pointee(in: typeDefinitions) != nil {
                 return .selector(base: try pin(base), name: name, position: position)
             }
@@ -4391,6 +4553,7 @@ private struct IRLowerer {
             throw GoDiagnostic(position: position, message: "undefined: \(name)")
         case .selector(let base, let name, _):
             let baseType = try type(of: base)
+            if try storePromoted(value, to: target, baseType: baseType) { return }
             let baseValue = try lower(base)
             if baseType.pointee(in: typeDefinitions) != nil {
                 let dereferenced = allocateRegister()
@@ -4458,7 +4621,7 @@ private struct IRLowerer {
         case .structure(let fields, _):
             return .structure(
                 fields.map {
-                    GoStructFieldType(name: $0.name, type: resolve($0.type))
+                    GoStructFieldType($0, type: resolve($0.type))
                 })
         case .pointer(let pointee, _):
             return .pointer(resolve(pointee))
@@ -4660,6 +4823,7 @@ private struct IRLowerer {
             }
             throw GoDiagnostic(position: position, message: "undefined: \(name)")
         case .selector(let base, let name, _):
+            if let lent = try lowerPromotedSelector(expression, address: true) { return lent }
             let pointer: Int
             if try type(of: base).pointee(in: typeDefinitions) != nil {
                 pointer = try lower(base)
@@ -4730,6 +4894,7 @@ private struct IRLowerer {
             }
             if let function = libraryFunction(base: base, member: name) { return function.type }
             let baseType = try type(of: base)
+            if let lent = try promotedType(expression, baseType: baseType) { return lent }
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 if let info = try methodInfo(base: base, name: name) {
                     return .function(parameters: info.parameterTypes, results: info.resultTypes)
@@ -4796,6 +4961,7 @@ private struct IRLowerer {
                 }
                 return try operandType(operation.operands[0], operation.operands[1])
             }
+            if let lent = try promotedType(expression, baseType: nil) { return lent }
             if let target = conversionTarget(callee) {
                 return target
             }
@@ -4966,6 +5132,8 @@ private struct IRLowerer {
     }
 
     mutating func lowerConversion(to target: GoType, argument: GoExpression) throws -> Int {
+        // To an interface type: the value with its type, as when assigned.
+        if isInterfaceType(target) { return try lowerConverted(argument, to: target) }
         let value = try lower(argument)
         if underlying(target) == .int {
             // Narrowing to a byte truncates; a byte source is already in range.

@@ -5,10 +5,34 @@ import SwiftixGoRuntime
 public struct GoStructFieldType: Sendable, Equatable {
     public let name: String
     public let type: GoType
+    /// Whether the field is embedded, and its tag: both are part of what
+    /// makes two struct types one type.
+    var isEmbedded = false
+    var tag: String? = nil
 
     public init(name: String, type: GoType) {
         self.name = name
         self.type = type
+    }
+
+    /// The field as Go writes it in a message: `name T`, an embedded field
+    /// by its type alone, and a tag after either, quoted.
+    var spelling: String {
+        let field = isEmbedded ? "\(type)" : "\(name) \(type)"
+        guard let tag else { return field }
+        var quoted = "\""
+        for character in tag {
+            if character == "\"" || character == "\\" { quoted.append("\\") }
+            quoted.append(character)
+        }
+        return field + " " + quoted + "\""
+    }
+
+    /// The field `declaration` declares, once its type is `type`.
+    init(_ declaration: GoStructFieldDeclaration, type: GoType) {
+        self.init(name: declaration.name, type: type)
+        isEmbedded = declaration.isEmbedded
+        tag = declaration.tag
     }
 }
 
@@ -49,8 +73,7 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
         case .named(let name): return name
         case .structure(let fields):
             // As Go writes a struct type in a message: `struct{a int; b string}`.
-            return "struct{"
-                + fields.map { "\($0.name) \($0.type)" }.joined(separator: "; ") + "}"
+            return "struct{" + fields.map(\.spelling).joined(separator: "; ") + "}"
         case .pointer(let pointee): return "*\(pointee)"
         case .nilType: return "nil"
         case .array(let length, let element):
@@ -82,6 +105,9 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
 public struct GoTypeDefinition: Sendable, Equatable {
     public let name: String
     public let underlying: GoType
+    /// What the type has for a struct that embeds it, in a program that
+    /// embeds anything: `GoEmbedding` finds promoted names by it.
+    var embedding: GoEmbeddedShape? = nil
 
     public init(name: String, underlying: GoType) {
         self.name = name
@@ -241,6 +267,12 @@ public enum GoTypeChecker {
         }
         for target in files.lazy.flatMap(\.aliasTargets) {
             _ = try resolve(target, availableTypes: availableTypes)
+        }
+        if files.contains(where: \.usesEmbedding) {
+            try GoEmbedding.validate(files)
+            for (name, shape) in GoEmbedding.shapes(of: files) {
+                typeDefinitions[name]?.embedding = shape
+            }
         }
         for definition in typeDefinitions.values {
             try rejectRecursiveValueType(
@@ -553,8 +585,7 @@ public enum GoTypeChecker {
                         message: "\(field.name) redeclared in this block")
                 }
                 return GoStructFieldType(
-                    name: field.name,
-                    type: try resolve(field.type, availableTypes: availableTypes))
+                    field, type: try resolve(field.type, availableTypes: availableTypes))
             }
             return .structure(resolvedFields)
         case .pointer(let pointee, _):
@@ -952,6 +983,81 @@ private struct FunctionChecker {
             }
         }
         return results
+    }
+
+    /// `base.name` with the embedded fields between the two written out,
+    /// when `name` is a field or a method that an embedded field lends the
+    /// struct `base` is; nil when the struct has the name itself or nobody
+    /// lends it. A method of the run-time library that is selected and not
+    /// called is left to the method declared for it, which is a function
+    /// where the library's is none.
+    func promotedSelector(
+        base: GoExpression, baseType: GoType, name: String, position: GoSourcePosition,
+        isCalled: Bool = false
+    ) throws -> GoExpression? {
+        switch GoEmbedding.promotion(of: name, in: baseType, definitions: typeDefinitions) {
+        case .none:
+            return nil
+        case .ambiguous:
+            throw GoDiagnostic(
+                position: position,
+                message: "ambiguous selector \(GoEmbedding.spelling(base)).\(name)")
+        case .found(let promotion):
+            if promotion.isMethod, promotion.holderKind == .library, !isCalled,
+                methodSignature(of: baseType, named: name) != nil
+            {
+                return nil
+            }
+            return promotion.selector(name, of: base, position: position)
+        }
+    }
+
+    /// The type of `base.name` when an embedded field lends the name, as a
+    /// value or, with `assignable`, as what a value is stored in. Each of
+    /// these is a function of its own so that the ones that ask, which call
+    /// themselves for every operand, keep nothing more in their frames.
+    mutating func promotedType(
+        base: GoExpression, baseType: GoType, name: String, at position: GoSourcePosition,
+        assignable: Bool = false
+    ) throws -> GoType? {
+        guard
+            let promoted = try promotedSelector(
+                base: base, baseType: baseType, name: name, position: position)
+        else { return nil }
+        return try assignable ? assignableType(of: promoted) : type(of: promoted)
+    }
+
+    /// The results of the call of `callee`, a selection from a value of
+    /// `baseType`, when an embedded field lends what is called: a method,
+    /// or a field that holds a function. `single` asks for the one value a
+    /// call has where a value is wanted.
+    mutating func promotedCallResults(
+        _ callee: GoExpression, baseType: GoType, arguments: [GoExpression],
+        position: GoSourcePosition, single: Bool
+    ) throws -> [GoType]? {
+        guard case .selector(let base, let name, let namePosition) = callee,
+            let promoted = try promotedSelector(
+                base: base, baseType: baseType, name: name, position: namePosition,
+                isCalled: true)
+        else { return nil }
+        if single {
+            return [try type(of: .call(callee: promoted, arguments: arguments, position: position))]
+        }
+        return try callResultTypes(callee: promoted, arguments: arguments, position: position)
+    }
+
+    /// The native method of the library that `callee` calls when an
+    /// embedded field lends it, checked against `arguments`.
+    mutating func promotedNativeCall(
+        _ callee: GoExpression, arguments: [GoExpression], position: GoSourcePosition
+    ) throws -> GoNativeFunction? {
+        guard case .selector(let base, let name, let namePosition) = callee,
+            let baseType = try? type(of: base),
+            let promoted = try promotedSelector(
+                base: base, baseType: baseType, name: name, position: namePosition,
+                isCalled: true)
+        else { return nil }
+        return try nativeCall(callee: promoted, arguments: arguments, position: position)
     }
 
     /// What the method `name` of a value of `type` takes and gives, without
@@ -2264,6 +2370,9 @@ private struct FunctionChecker {
         }
         let baseType = try type(of: base)
         try requireVisible(name, in: baseType, at: position)
+        if let lent = try promotedType(base: base, baseType: baseType, name: name, at: position) {
+            return lent
+        }
         guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
             // A method selected and not called is a function that has
             // its receiver.
@@ -3126,6 +3235,11 @@ private struct FunctionChecker {
         }
         let baseType = try type(of: base)
         try requireVisible(name, in: baseType, at: callee.position)
+        if let lent = try promotedCallResults(
+            callee, baseType: baseType, arguments: arguments, position: position, single: true)
+        {
+            return lent.first ?? .void
+        }
         let candidates: [String]
         switch baseType {
         case .named(let baseName):
@@ -3216,6 +3330,11 @@ private struct FunctionChecker {
         case .selector(let base, let name, let position):
             let baseType = try assignableType(of: base)
             try requireVisible(name, in: baseType, at: position)
+            if let lent = try promotedType(
+                base: base, baseType: baseType, name: name, at: position, assignable: true)
+            {
+                return lent
+            }
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
                 throw GoDiagnostic(
                     position: position,
@@ -3763,7 +3882,7 @@ private struct FunctionChecker {
                             position: field.position,
                             message: "\(field.name) redeclared in this block")
                     }
-                    return GoStructFieldType(name: field.name, type: try declaredType(field.type))
+                    return GoStructFieldType(field, type: try declaredType(field.type))
                 })
         case .pointer(let pointee, _):
             return .pointer(try declaredType(pointee))
@@ -4016,7 +4135,10 @@ private struct FunctionChecker {
             }
             return target
         case .interface, .structure, .array:
-            guard isConvertible(source, to: target) else { throw failure }
+            // `Reader(rw)`, `error(e)`, `any(x)`: whatever may be assigned
+            // to an interface converts to it; struct and array types
+            // convert by their structure.
+            guard source != .void, isConvertible(source, to: target) else { throw failure }
             return target
         default:
             throw failure
@@ -4118,7 +4240,7 @@ private struct FunctionChecker {
             function = native
             parameters = native.parameters.dropFirst()
         } else {
-            return nil
+            return try promotedNativeCall(callee, arguments: arguments, position: position)
         }
         guard function.isVariadic
             ? arguments.count >= parameters.count
@@ -4276,6 +4398,11 @@ private struct FunctionChecker {
     }
 
     func satisfies(_ type: GoType, interface methods: [GoInterfaceMethod]) -> Bool {
+        if case .interface(let own) = underlying(type) {
+            // A value of one interface type is one of another that asks
+            // for no method the first lacks: of `Reader`, a `ReadWriter`.
+            return methods.allSatisfy(own.contains)
+        }
         for method in methods {
             if let library = GoLibraryTypes.method(of: type, named: method.name) {
                 // A method of a library type, which the VM provides.
@@ -4621,6 +4748,11 @@ private struct FunctionChecker {
             }
             let baseType = try type(of: base)
             try requireVisible(name, in: baseType, at: callee.position)
+            if let lent = try promotedCallResults(
+                callee, baseType: baseType, arguments: arguments, position: position, single: false)
+            {
+                return lent
+            }
             let candidates: [String]
             switch baseType {
             case .named(let baseName):
@@ -5006,6 +5138,9 @@ extension FunctionChecker {
     /// its package's path, and the root package's names have none.
     func isHidden(_ name: String, in type: GoType) -> Bool {
         guard !GoModuleLinker.isExported(name) else { return false }
+        // The method the compiler declares for a promoted one selects what
+        // its type was lent, whichever package that is from.
+        guard lookup(GoEmbedding.receiverName) == nil else { return false }
         let owner = type.pointee(in: typeDefinitions) ?? type
         guard case .named(let typeName) = owner, typeDefinitions[typeName] != nil else {
             return false
