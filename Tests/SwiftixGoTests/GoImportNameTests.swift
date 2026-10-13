@@ -353,7 +353,7 @@ struct GoImportNameTests: GoTestHarness {
         // A name a declaration hides is that declaration.
         #expect(
             diagnostic(program(" f \"fmt\"", " f.Print()\n f := 3\n f.Println(f)"))
-                == "main.go:8:3: int has no field or method Println")
+                == "main.go:8:4: int has no field or method Println")
     }
 
     @Test func anImportMustBeUsed() {
@@ -395,11 +395,11 @@ struct GoImportNameTests: GoTestHarness {
         // By the file's name for the package, where Go says `undefined: t.Nope`.
         #expect(
             diagnostic("package main\nimport t \"time\"\nfunc main() {\n t.Nope()\n}\n")
-                == "main.go:4:3: undefined: t.Nope")
+                == "main.go:4:4: undefined: t.Nope")
         #expect(
             diagnostic(
                 "package main\nimport (\n f \"fmt\"\n web \"net/http\"\n)\nfunc main() {\n f.Println(web.Nope)\n}\n")
-                == "main.go:7:15: undefined: web.Nope")
+                == "main.go:7:16: undefined: web.Nope")
         #expect(
             diagnostic(
                 "package main\nimport (\n f \"fmt\"\n s \"strings\"\n)\nfunc main() {\n f.Println(s.ToUpper(\"a\", \"b\"))\n}\n")
@@ -408,7 +408,7 @@ struct GoImportNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 "package main\nimport (\n f \"fmt\"\n \"fmt\"\n)\nfunc main() {\n fmt.Println(f.Nope())\n}\n")
-                == "main.go:7:15: undefined: f.Nope")
+                == "main.go:7:16: undefined: f.Nope")
         // A type goes by its package's own name, as Go prints it.
         #expect(
             diagnostic(
@@ -418,7 +418,7 @@ struct GoImportNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 "package main\nimport (\n \"fmt\"\n \"os\"\n)\nfunc main() {\n fmt.Println(os.Nope)\n}\n")
-                == "main.go:7:16: undefined: os.Nope")
+                == "main.go:7:17: undefined: os.Nope")
     }
 
     @Test func aPackageIsNoValue() {
@@ -729,7 +729,7 @@ struct GoImportNameTests: GoTestHarness {
                 == "/m/main.go:7:25: undefined: lib")
         #expect(
             moduleDiagnostic(main(" \"fmt\"\n l \"example/m/lib\"", " fmt.Println(l.Missing())"))
-                == "/m/main.go:7:14: undefined: l.Missing")
+                == "/m/main.go:7:16: undefined: l.Missing")
         #expect(
             moduleDiagnostic(main(" \"fmt\"\n l \"example/m/lib\"", " fmt.Println(l)"))
                 == "/m/main.go:7:14: use of package l not in selector")

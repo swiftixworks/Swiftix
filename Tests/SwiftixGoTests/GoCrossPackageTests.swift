@@ -603,7 +603,7 @@ struct GoCrossPackageTests: GoTestHarness {
                 ("main.go", "package main\nimport \"example/m/lib\"\nfunc main() {\n\t\(body)\n}\n"),
             ]))
         }
-        #expect(message("lib.helper()") == "/m/main.go:4:2: cannot refer to unexported name lib.helper")
+        #expect(message("lib.helper()") == "/m/main.go:4:6: cannot refer to unexported name lib.helper")
         #expect(message("x := lib.hidden")?.hasSuffix("cannot refer to unexported name lib.hidden") == true)
         #expect(message("x := lib.limit")?.hasSuffix("cannot refer to unexported name lib.limit") == true)
         #expect(message("var s lib.secret")?.hasSuffix("cannot refer to unexported name lib.secret") == true)

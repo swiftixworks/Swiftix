@@ -482,7 +482,7 @@ struct GoLocalTypeTests: GoTestHarness {
                 == "main.go:7:12: cannot use T as U value")
         #expect(
             diagnostic(program(" type T struct{ A int }\n var v T\n v.B = 1\n fmt.Println(v)"))
-                == "main.go:6:3: T has no field or method B")
+                == "main.go:6:4: T has no field or method B")
         #expect(
             diagnostic(program(" type T struct{ A int }\n fmt.Println(T{B: 1})"))
                 == "main.go:5:16: unknown field B in struct literal of type T")

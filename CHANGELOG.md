@@ -165,7 +165,11 @@ format, behavior and platform changes are recorded here.
   renames it wherever the file has it, declarations included
   (`total -> sum`).
 - A type declaration is reported at its name (`main.go:3:6`), where Go
-  reports it, not at the `type` keyword.
+  reports it, not at the `type` keyword. So is a function, where it used to
+  be reported at `func`; `missing return` is reported where the body ends;
+  a repeated result at its name; and a selection `x.f` at `f`, not at the
+  `.`. A method declared twice is reported in Go's words,
+  `method T.M already declared at main.go:3:12`.
 - A diagnostic about an import is reported where Go reports it, at the
   import's name or else its path (`main.go:3:8`), not at the `import` keyword
   (`main.go:3:1`). A package named where a value is expected is

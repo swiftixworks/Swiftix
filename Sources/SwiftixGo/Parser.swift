@@ -58,8 +58,11 @@ private struct Parser {
     /// Whether a function body declared a type.
     var declaresLocalTypes = false
     /// The names of each declaration of several names, which the tree keeps
-    /// as text.
+    /// as text. For a function: its name, the end of its body, and the names
+    /// of its results.
     var namePositions: [Int: [GoSourcePosition]] = [:]
+    /// The names of the results of the function being parsed.
+    var resultNamePositions: [GoSourcePosition] = []
 
     mutating func parseFile() throws -> GoFile {
         try expect(.package, message: "expected 'package'")
@@ -465,6 +468,7 @@ private struct Parser {
                 position: receiverPosition)
             try expect(.rightParen, message: "expected ')' after receiver")
         }
+        let namePosition = current.position
         let name = try expectIdentifier(message: "expected function name")
         try expect(.leftParen, message: "expected '('")
         var parameters: [GoParameter] = []
@@ -499,6 +503,7 @@ private struct Parser {
         }
         advance()
         try requireFinalVariadic(parameters)
+        resultNamePositions = []
         var resultNames: [String?] = []
         var resultTypes: [GoTypeExpression] = []
         if case .identifier = current.kind {
@@ -531,13 +536,18 @@ private struct Parser {
             }
             advance()
         }
+        let body = try parseBlock()
+        // Go reports a function by its name, and a return it lacks where
+        // its body ends.
+        namePositions[position.offset] =
+            [namePosition, tokens[index - 1].position] + resultNamePositions
         return GoFunctionDeclaration(
             name: name,
             receiver: receiver,
             parameters: parameters,
             resultNames: resultNames,
             resultTypes: resultTypes,
-            body: try parseBlock(),
+            body: body,
             position: position)
     }
 
@@ -556,6 +566,7 @@ private struct Parser {
         }
         guard isTypeStart(lookahead(cursor).kind) else { return nil }
         for _ in names.indices {
+            resultNamePositions.append(current.position)
             advance()
             if names.count > 1, check(.comma) { advance() }
         }
@@ -1168,8 +1179,11 @@ private struct Parser {
                         base: expression, type: assertedType, position: position)
                     continue
                 }
+                // A selection is where the selected name is: the place Go
+                // reports it by.
+                let namePosition = current.position
                 let name = try expectIdentifier(message: "expected selector name")
-                expression = .selector(base: expression, name: name, position: position)
+                expression = .selector(base: expression, name: name, position: namePosition)
                 continue
             }
             if check(.leftParen) {

@@ -466,8 +466,13 @@ private struct FileRewriter {
             if let dot = name.firstIndex(of: ".") {
                 let qualifier = String(name[..<dot])
                 let member = String(name[name.index(after: dot)...])
+                // Reported where the member is, as a selection is.
+                let width = qualifier.utf8.count + 1
+                let memberPosition = GoSourcePosition(
+                    path: position.path, offset: position.offset + width, line: position.line,
+                    column: position.column + width)
                 if let symbol = try memberSymbol(
-                    qualifier: qualifier, member: member, position: position)
+                    qualifier: qualifier, member: member, position: memberPosition)
                 {
                     return .named(symbol, position: position)
                 }
@@ -628,8 +633,7 @@ private struct FileRewriter {
             return .identifier(renamed(name), position: position)
         case .selector(let base, let name, let position):
             if case .identifier(let qualifier, let basePosition) = base,
-                let symbol = try memberSymbol(
-                    qualifier: qualifier, member: name, position: basePosition)
+                let symbol = try memberSymbol(qualifier: qualifier, member: name, position: position)
             {
                 return .identifier(symbol, position: basePosition)
             }

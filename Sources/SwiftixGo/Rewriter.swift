@@ -487,7 +487,7 @@ public enum GoSourceRewriter {
             end = start + name.utf8.count
         case .selector(let base, let name, let position):
             start = operandRange(base, bytes: bytes)?.lowerBound ?? position.offset
-            end = position.offset + 1 + name.utf8.count
+            end = position.offset + name.utf8.count
         case .typeAssertion(let base, _, let position):
             start = operandRange(base, bytes: bytes)?.lowerBound ?? position.offset
             guard let open = nextByte(0x28, from: position.offset, bytes: bytes),

@@ -137,7 +137,7 @@ struct GoPackageNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 main: imports + "func main() {\n fmt.Println(geometry.Missing, api.Request{})\n}\n")
-                == "/m/main.go:8:14: undefined: geometry.Missing")
+                == "/m/main.go:8:23: undefined: geometry.Missing")
         // Without a name of the file's, the package goes by its own.
         #expect(
             diagnostic(

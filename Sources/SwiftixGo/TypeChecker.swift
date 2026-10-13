@@ -213,7 +213,8 @@ public enum GoTypeChecker {
                     names: &packageNames)
             }
             for function in file.functions where function.receiver == nil && function.name != "init" {
-                try reservePackageName(function.name, at: function.position, names: &packageNames)
+                try reservePackageName(
+                    function.name, at: file.namePosition(of: function), names: &packageNames)
             }
         }
 
@@ -239,14 +240,15 @@ public enum GoTypeChecker {
 
         var functionSignatures: [String: FunctionSignature] = [:]
         var methodSignatures: [String: FunctionSignature] = [:]
-        for function in files.flatMap(\.functions) {
+        var methodPositions: [String: GoSourcePosition] = [:]
+        for (file, function) in files.flatMap({ file in file.functions.map { (file, $0) } }) {
             if function.name == "init" {
                 guard function.receiver == nil,
                     function.parameters.isEmpty,
                     function.resultTypes.isEmpty
                 else {
                     throw GoDiagnostic(
-                        position: function.position,
+                        position: file.namePosition(of: function),
                         message: "func init must have no arguments and no return values")
                 }
                 continue
@@ -278,12 +280,15 @@ public enum GoTypeChecker {
                         pointer: true,
                         method: function.name),
                 ]
-                guard receiverMethodKeys.allSatisfy({ methodSignatures[$0] == nil }) else {
+                if let earlier = receiverMethodKeys.lazy.compactMap({ methodPositions[$0] }).first {
                     throw GoDiagnostic(
-                        position: function.position,
-                        message: "method \(function.name) already declared for type \(identity.baseName)")
+                        position: file.namePosition(of: function),
+                        message:
+                            "method \(identity.baseName).\(function.name) already declared at "
+                            + "\(earlier.path):\(earlier.line):\(earlier.column)")
                 }
                 methodSignatures[key] = signature
+                methodPositions[key] = file.namePosition(of: function)
             } else {
                 functionSignatures[function.name] = signature
             }
@@ -365,8 +370,9 @@ public enum GoTypeChecker {
             !main.parameters.isEmpty || !main.results.isEmpty
         {
             let position =
-                files.flatMap(\.functions).first { $0.name == "main" }?.position
-                ?? syntheticPosition(path: first.path)
+                files.lazy.compactMap { file in
+                    file.functions.first { $0.name == "main" }.map(file.namePosition(of:))
+                }.first ?? syntheticPosition(path: first.path)
             throw GoDiagnostic(
                 position: position,
                 message: "func main must have no arguments and no return values")
@@ -792,6 +798,9 @@ private struct FunctionChecker {
     }
 
     mutating func check(_ function: GoFunctionDeclaration) throws {
+        // Where the parser saw the function's name, the end of its body, and
+        // the names of its results.
+        let positions = namePositions[function.position.offset]
         let signature: FunctionSignature?
         if function.name == "init", function.receiver == nil {
             signature = FunctionSignature(parameters: [], results: [])
@@ -826,11 +835,14 @@ private struct FunctionChecker {
                 type: parameterType.parameterType,
                 isConstant: false)
         }
-        for (name, resultType) in zip(function.resultNames, signature.results) {
+        for (index, (name, resultType)) in zip(function.resultNames, signature.results).enumerated() {
             guard let name else { continue }
             guard scopes[scopes.count - 1][name] == nil else {
+                // The names of the results follow the two places above.
+                let named = function.resultNames.prefix(index).compactMap { $0 }.count + 2
                 throw GoDiagnostic(
-                    position: function.position,
+                    position: positions.flatMap { named < $0.count ? $0[named] : $0.first }
+                        ?? function.position,
                     message: "\(name) redeclared in this block")
             }
             scopes[scopes.count - 1][name] = Binding(type: resultType, isConstant: false)
@@ -838,7 +850,7 @@ private struct FunctionChecker {
         }
         if namedResultCount > 0, namedResultCount != signature.results.count {
             throw GoDiagnostic(
-                position: function.position,
+                position: positions?.first ?? function.position,
                 message: "mixed named and unnamed parameters")
         }
         let entry = self
@@ -858,7 +870,9 @@ private struct FunctionChecker {
         endScope()
         if let diagnostic = unusedVariable() { throw diagnostic }
         if !signature.results.isEmpty, !blockTerminates(function.body) {
-            throw GoDiagnostic(position: function.position, message: "missing return")
+            // Go reports the return a function lacks where its body ends.
+            throw GoDiagnostic(
+                position: positions?.last ?? function.position, message: "missing return")
         }
     }
 
@@ -1647,660 +1661,11 @@ private struct FunctionChecker {
             endScope()
             return .function(parameters: parameterTypes, results: resolvedResults)
         case .call(let callee, let arguments, let position):
-            if case .functionLiteral = callee,
-                case .function(let parameters, let results) = try type(of: callee)
-            {
-                guard arguments.count == parameters.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in function literal call")
-                }
-                for (argument, parameter) in zip(arguments, parameters) {
-                    try require(argument, assignableTo: parameter)
-                }
-                return results.first ?? .void
-            }
-            if let operation = expression.bitwiseOperation {
-                return try bitwiseResultType(
-                    operation.operator, operands: operation.operands, position: position)
-            }
-            if expression.spreadOperand != nil {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "can only use ... with final argument in list")
-            }
-            if let target = try conversionTarget(callee) {
-                return try conversionResultType(target, arguments: arguments, position: position)
-            }
-            if let native = try nativeCall(
-                callee: callee, arguments: arguments, position: position)
-            {
-                guard native.results.count <= 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "multiple-value \(native.goName)() in single-value context")
-                }
-                guard let result = native.results.first else { return .void }
-                return result
-            }
-            if case .identifier(let name, let namePosition) = callee {
-                if name == "len" || name == "cap" {
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(position: position, message: "invalid argument count for \(name)")
-                    }
-                    let argumentType = underlying(try type(of: arguments[0]))
-                    if name == "len" {
-                        guard argumentType == .string || isArrayOrSlice(argumentType)
-                            || isMap(argumentType) || isChannel(argumentType)
-                        else {
-                            throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for len")
-                        }
-                    } else {
-                        guard isArrayOrSlice(argumentType) || isChannel(argumentType) else {
-                            throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for cap")
-                        }
-                    }
-                    return .int
-                }
-                if name == "append" {
-                    guard arguments.count >= 2 else {
-                        throw GoDiagnostic(position: position, message: "not enough arguments in call to append")
-                    }
-                    let sliceType = try type(of: arguments[0])
-                    guard case .slice(let elementType) = underlying(sliceType) else {
-                        throw GoDiagnostic(
-                            position: arguments[0].position, message: "first argument to append must be slice")
-                    }
-                    if arguments.count == 2, let source = arguments[1].spreadOperand {
-                        let sourceType = try type(of: source)
-                        guard isElementSource(sourceType, of: elementType) else {
-                            throw GoDiagnostic(
-                                position: source.position,
-                                message: "cannot use \(sourceType) as \(sliceType) value in append")
-                        }
-                        return sliceType
-                    }
-                    for argument in arguments.dropFirst() {
-                        try require(argument, assignableTo: elementType)
-                    }
-                    return sliceType
-                }
-                if name == "make" {
-                    guard arguments.count >= 1 && arguments.count <= 3,
-                        case .typeExpression(let typeExpression, _) = arguments[0]
-                    else {
-                        throw GoDiagnostic(position: position, message: "invalid make call")
-                    }
-                    let madeType = try declaredType(typeExpression)
-                    switch underlying(madeType) {
-                    case .slice:
-                        guard arguments.count >= 2 else {
-                            throw GoDiagnostic(position: position, message: "missing len argument")
-                        }
-                        for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                            throw GoDiagnostic(position: argument.position, message: "make size must be integer")
-                        }
-                    case .map:
-                        if arguments.count > 2 {
-                            throw GoDiagnostic(position: position, message: "too many arguments to make")
-                        }
-                        for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                            throw GoDiagnostic(position: argument.position, message: "make size must be integer")
-                        }
-                    case .channel:
-                        if arguments.count > 2 {
-                            throw GoDiagnostic(position: position, message: "too many arguments to make")
-                        }
-                        for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                            throw GoDiagnostic(position: argument.position, message: "make channel size must be integer")
-                        }
-                    default:
-                        throw GoDiagnostic(position: arguments[0].position, message: "cannot make \(madeType)")
-                    }
-                    return madeType
-                }
-                if name == "panic" {
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(position: position, message: "panic takes exactly one argument")
-                    }
-                    _ = try type(of: arguments[0])
-                    return .void
-                }
-                if name == "recover" {
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to recover")
-                    }
-                    return .interface([])
-                }
-                if name == "delete" {
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(position: position, message: "delete takes exactly two arguments")
-                    }
-                    let mapType = try type(of: arguments[0])
-                    guard case .map(let keyType, _) = underlying(mapType) else {
-                        throw GoDiagnostic(
-                            position: arguments[0].position,
-                            message: "first argument to delete must be map")
-                    }
-                    let actualKeyType = try type(of: arguments[1])
-                    guard try isAssignable(arguments[1], ofType: actualKeyType, to: keyType) else {
-                        throw GoDiagnostic(
-                            position: arguments[1].position,
-                            message: "cannot use \(actualKeyType) as \(keyType) value in delete")
-                    }
-                    return .void
-                }
-                if name == "copy" {
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(position: position, message: "copy takes exactly two arguments")
-                    }
-                    let destinationType = try type(of: arguments[0])
-                    guard case .slice(let element) = underlying(destinationType) else {
-                        throw GoDiagnostic(
-                            position: arguments[0].position,
-                            message: "first argument to copy must be slice")
-                    }
-                    let sourceType = try type(of: arguments[1])
-                    guard isElementSource(sourceType, of: element) else {
-                        throw GoDiagnostic(
-                            position: arguments[1].position,
-                            message: "cannot copy \(sourceType) into \(destinationType)")
-                    }
-                    return .int
-                }
-                if name == "close" {
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(position: position, message: "close takes exactly one argument")
-                    }
-                    guard case .channel(let direction, _) = underlying(try type(of: arguments[0])) else {
-                        throw GoDiagnostic(
-                            position: arguments[0].position,
-                            message: "invalid operation: cannot close non-channel")
-                    }
-                    guard direction != .receiveOnly else {
-                        throw GoDiagnostic(
-                            position: arguments[0].position,
-                            message: "invalid operation: cannot close receive-only channel")
-                    }
-                    return .void
-                }
-                guard let signature = functionSignatures[name] else {
-                    // Allow calling variables of function type (e.g., context.CancelFunc)
-                    if let binding = lookup(name),
-                        binding.type == .named("context.CancelFunc")
-                    {
-                        use(name)
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to cancel function")
-                        }
-                        return .void
-                    }
-                    throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
-                }
-                let (arguments, parameters) = matched(arguments, to: signature.parameters)
-                guard arguments.count <= parameters.count else {
-                    throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
-                }
-                guard arguments.count == parameters.count else {
-                    throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
-                }
-                for (argument, parameterType) in zip(arguments, parameters) {
-                    let argumentType = try type(of: argument)
-                    guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
-                        throw GoDiagnostic(
-                            position: argument.position,
-                            message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
-                    }
-                }
-                return signature.results.first ?? .void
-            }
-            guard case .selector(let base, let name, _) = callee else {
-                throw GoDiagnostic(position: position, message: "unsupported function call")
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "fmt",
-                importedPaths.contains("fmt"),
-                name == "Print" || name == "Println"
-            {
-                try checkAnyOperands(arguments[...])
-                return .void
-            }
-            if case .identifier("os", _) = base,
-                importedPaths.contains("os"),
-                name == "Exit"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to os.Exit")
-                }
-                try require(arguments[0], assignableTo: .int)
-                return .void
-            }
-            if case .identifier("strconv", _) = base,
-                importedPaths.contains("strconv"),
-                name == "Atoi"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to strconv.Atoi")
-                }
-                try require(arguments[0], assignableTo: .string)
-                return .int
-            }
-            if case .identifier("userland", _) = base,
-                importedPaths.contains("swiftix/userland"),
-                name == "ReadInput"
-            {
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to userland.ReadInput")
-                }
-                try require(arguments[0], assignableTo: .string)
-                try require(arguments[1], assignableTo: .slice(.string))
-                return .string
-            }
-            if case .identifier("userland", _) = base,
-                importedPaths.contains("swiftix/userland"),
-                let results = try userlandTerminalResults(
-                    name, arguments: arguments, position: position)
-            {
-                return results.first ?? .void
-            }
-            if case .identifier("strings", _) = base,
-                importedPaths.contains("strings")
-            {
-                return try stringsCallResult(name, arguments: arguments, position: position)
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "time",
-                importedPaths.contains("time"),
-                name == "After"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to time.After")
-                }
-                try require(arguments[0], assignableTo: .int)
-                return .channel(direction: .receiveOnly, element: GoPredeclared.time)
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "time",
-                importedPaths.contains("time"),
-                name == "Sleep"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to time.Sleep")
-                }
-                try require(arguments[0], assignableTo: .int)
-                return .void
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "time",
-                importedPaths.contains("time"),
-                name == "Tick"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to time.Tick")
-                }
-                try require(arguments[0], assignableTo: .int)
-                return .channel(direction: .receiveOnly, element: GoPredeclared.time)
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "context",
-                importedPaths.contains("context"),
-                name == "Background"
-            {
-                guard arguments.isEmpty else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "too many arguments in call to context.Background")
-                }
-                return .named("context.Context")
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "context",
-                importedPaths.contains("context"),
-                name == "WithCancel"
-            {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to context.WithCancel")
-                }
-                try require(arguments[0], assignableTo: .named("context.Context"))
-                return .named("context.Context")
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "context",
-                importedPaths.contains("context"),
-                name == "WithTimeout"
-            {
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to context.WithTimeout")
-                }
-                try require(arguments[0], assignableTo: .named("context.Context"))
-                try require(arguments[1], assignableTo: .int)
-                return .named("context.Context")
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "net",
-                importedPaths.contains("net")
-            {
-                switch name {
-                case "Dial":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.Dial")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    try require(arguments[1], assignableTo: .string)
-                    return .named("net.Conn")
-                case "Listen":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.Listen")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    try require(arguments[1], assignableTo: .string)
-                    return .named("net.Listener")
-                case "LookupHost":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.LookupHost")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    return .slice(.string)
-                default:
-                    break
-                }
-            }
-            if case .identifier(let packageName, _) = base,
-                (packageName == "http" && importedPaths.contains("net/http"))
-            {
-                switch name {
-                case "HandleFunc":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to http.HandleFunc")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    return .void
-                case "ListenAndServe":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to http.ListenAndServe")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    return GoPredeclared.errorType
-                case "Get":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to http.Get")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    return .named("http.Response")
-                default:
-                    break
-                }
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "runtime",
-                importedPaths.contains("runtime"),
-                name == "GC"
-            {
-                guard arguments.isEmpty else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "too many arguments in call to runtime.GC")
-                }
-                return .void
-            }
-            if let syncReceiverType = try? type(of: base) {
-                let syncReceiverName: String?
-                let syncReceiverIsPointer: Bool
-                switch syncReceiverType {
-                case .named(let typeName):
-                    syncReceiverName = typeName
-                    syncReceiverIsPointer = false
-                case .pointer(.named(let typeName)):
-                    syncReceiverName = typeName
-                    syncReceiverIsPointer = true
-                default:
-                    syncReceiverName = nil
-                    syncReceiverIsPointer = false
-                }
-                if syncReceiverName == "sync.Mutex", name == "Lock" || name == "Unlock" {
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to \(name)")
-                    }
-                    guard syncReceiverIsPointer || isAddressable(base) else {
-                        throw GoDiagnostic(
-                            position: base.position,
-                            message: "cannot call pointer method on non-addressable value")
-                    }
-                    return .void
-                }
-                if syncReceiverName == "sync.WaitGroup" {
-                    guard syncReceiverIsPointer || isAddressable(base) else {
-                        throw GoDiagnostic(
-                            position: base.position,
-                            message: "cannot call pointer method on non-addressable value")
-                    }
-                    switch name {
-                    case "Add":
-                        guard arguments.count == 1 else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "wrong number of arguments in call to Add")
-                        }
-                        try require(arguments[0], assignableTo: .int)
-                        return .void
-                    case "Done", "Wait":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to \(name)")
-                        }
-                        return .void
-                    default:
-                        break
-                    }
-                }
-                if syncReceiverName == "context.Context" {
-                    switch name {
-                    case "Done":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to Done")
-                        }
-                        return .channel(direction: .receiveOnly, element: .int)
-                    case "Err":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to Err")
-                        }
-                        return GoPredeclared.errorType
-                    default:
-                        break
-                    }
-                }
-                if syncReceiverName == "net.Conn" {
-                    switch name {
-                    case "Read", "Write":
-                        guard arguments.count == 1 else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "wrong number of arguments in call to \(name)")
-                        }
-                        if try type(of: arguments[0]) != .slice(GoPredeclared.byte) {
-                            try require(arguments[0], assignableTo: .slice(.int))
-                        }
-                        return .int
-                    case "Close":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to Close")
-                        }
-                        return GoPredeclared.errorType
-                    default:
-                        break
-                    }
-                }
-                if syncReceiverName == "net.Listener" {
-                    switch name {
-                    case "Accept":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to Accept")
-                        }
-                        return .named("net.Conn")
-                    case "Close":
-                        guard arguments.isEmpty else {
-                            throw GoDiagnostic(
-                                position: position,
-                                message: "too many arguments in call to Close")
-                        }
-                        return GoPredeclared.errorType
-                    default:
-                        break
-                    }
-                }
-            }
-            if case .identifier(let baseName, _) = base,
-                lookup(baseName)?.type == .pointer(.named("testing.T"))
-            {
-                switch name {
-                case "Error", "Fatal":
-                    for argument in arguments where try type(of: argument) == .void {
-                        throw GoDiagnostic(
-                            position: argument.position, message: "no value used as value")
-                    }
-                    return .void
-                case "Run":
-                    guard arguments.count == 2,
-                        try type(of: arguments[0]) == .string,
-                        case .function(let parameters, let results) = try type(of: arguments[1]),
-                        parameters == [.pointer(.named("testing.T"))], results.isEmpty
-                    else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "invalid arguments in call to testing.T.Run")
-                    }
-                    return .bool
-                default:
-                    break
-                }
-            }
-            // Local package function call: pkg.Function(args...)
-            if case .identifier(let packageName, _) = base,
-                let export = resolvePackageExport(packageName),
-                let funcExport = export.functions[name]
-            {
-                guard arguments.count == funcExport.parameters.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to \(packageName).\(name)")
-                }
-                for (argument, paramType) in zip(arguments, funcExport.parameters) {
-                    let argType = try type(of: argument)
-                    guard try isAssignable(argument, ofType: argType, to: paramType) else {
-                        throw GoDiagnostic(
-                            position: argument.position,
-                            message: "cannot use \(argType) as \(paramType) value in argument to \(packageName).\(name)")
-                    }
-                }
-                return funcExport.results.first ?? .void
-            }
-            if case .identifier(let packageName, _) = base,
-                lookup(packageName) == nil,
-                importedPaths.contains(packageName),
-                GoStandardLibrary.supportedPackages.contains(packageName)
-            {
-                // Name the missing member instead of reporting the package
-                // itself as undefined.
-                throw GoDiagnostic(
-                    position: callee.position, message: "undefined: \(packageName).\(name)")
-            }
-            let baseType = try type(of: base)
-            let candidates: [String]
-            switch baseType {
-            case .named(let baseName):
-                candidates = [
-                    methodKey(baseName: baseName, pointer: false, method: name),
-                    methodKey(baseName: baseName, pointer: true, method: name),
-                ]
-            case .pointer(.named(let baseName)):
-                candidates = [
-                    methodKey(baseName: baseName, pointer: true, method: name),
-                    methodKey(baseName: baseName, pointer: false, method: name),
-                ]
-            default:
-                candidates = []
-            }
-            guard let match = candidates.first(where: { methodSignatures[$0] != nil }),
-                let signature = methodSignatures[match]
-            else {
-                // Check if it's an interface method call
-                if case .interface(let methods) = underlying(baseType),
-                    let method = methods.first(where: { $0.name == name })
-                {
-                    let (arguments, parameters) = matched(arguments, to: method.parameters)
-                    guard arguments.count == parameters.count else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to \(name)")
-                    }
-                    for (argument, parameterType) in zip(arguments, parameters) {
-                        try require(argument, assignableTo: parameterType)
-                    }
-                    return method.results.first ?? .void
-                }
-                throw GoDiagnostic(
-                    position: callee.position,
-                    message: "\(baseType) has no field or method \(name)")
-            }
-            if match.first == "*", case .named = baseType, !isAddressable(base) {
-                throw GoDiagnostic(
-                    position: base.position,
-                    message: "cannot call pointer method on non-addressable value")
-            }
-            let (arguments, parameters) = matched(arguments, to: signature.parameters)
-            guard arguments.count <= parameters.count else {
-                throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
-            }
-            guard arguments.count == parameters.count else {
-                throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
-            }
-            for (argument, parameterType) in zip(arguments, parameters) {
-                try require(argument, assignableTo: parameterType)
-            }
-            return signature.results.first ?? .void
+            // Typed in functions of their own. This one calls itself for
+            // every operand, so its frame is what each level of a nested
+            // expression costs, and the cases of a call are most of it.
+            return try callType(
+                of: expression, callee: callee, arguments: arguments, position: position)
         case .unary(let unaryOperator, let operand, let position):
             switch unaryOperator {
             case .plus, .minus:
@@ -2408,6 +1773,687 @@ private struct FunctionChecker {
                 return leftType
             }
         }
+    }
+
+    /// The type of the call `expression`.
+    mutating func callType(
+        of expression: GoExpression, callee: GoExpression, arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        if case .functionLiteral = callee,
+            case .function(let parameters, let results) = try type(of: callee)
+        {
+            guard arguments.count == parameters.count else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in function literal call")
+            }
+            for (argument, parameter) in zip(arguments, parameters) {
+                try require(argument, assignableTo: parameter)
+            }
+            return results.first ?? .void
+        }
+        if let operation = expression.bitwiseOperation {
+            return try bitwiseResultType(
+                operation.operator, operands: operation.operands, position: position)
+        }
+        if expression.spreadOperand != nil {
+            throw GoDiagnostic(
+                position: position,
+                message: "can only use ... with final argument in list")
+        }
+        if let target = try conversionTarget(callee) {
+            return try conversionResultType(target, arguments: arguments, position: position)
+        }
+        if let native = try nativeCall(
+            callee: callee, arguments: arguments, position: position)
+        {
+            guard native.results.count <= 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "multiple-value \(native.goName)() in single-value context")
+            }
+            guard let result = native.results.first else { return .void }
+            return result
+        }
+        if case .identifier(let name, let namePosition) = callee {
+            return try namedCallType(
+                name: name, namePosition: namePosition, arguments: arguments, position: position)
+        }
+        guard case .selector(let base, let name, _) = callee else {
+            throw GoDiagnostic(position: position, message: "unsupported function call")
+        }
+        return try selectorCallType(
+            base: base, name: name, callee: callee, arguments: arguments, position: position)
+    }
+
+    /// The type of a call of a builtin or of a function of the program by
+    /// its name.
+    mutating func namedCallType(
+        name: String, namePosition: GoSourcePosition, arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        if name == "len" || name == "cap" {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(position: position, message: "invalid argument count for \(name)")
+            }
+            let argumentType = underlying(try type(of: arguments[0]))
+            if name == "len" {
+                guard argumentType == .string || isArrayOrSlice(argumentType)
+                    || isMap(argumentType) || isChannel(argumentType)
+                else {
+                    throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for len")
+                }
+            } else {
+                guard isArrayOrSlice(argumentType) || isChannel(argumentType) else {
+                    throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for cap")
+                }
+            }
+            return .int
+        }
+        if name == "append" {
+            guard arguments.count >= 2 else {
+                throw GoDiagnostic(position: position, message: "not enough arguments in call to append")
+            }
+            let sliceType = try type(of: arguments[0])
+            guard case .slice(let elementType) = underlying(sliceType) else {
+                throw GoDiagnostic(
+                    position: arguments[0].position, message: "first argument to append must be slice")
+            }
+            if arguments.count == 2, let source = arguments[1].spreadOperand {
+                let sourceType = try type(of: source)
+                guard isElementSource(sourceType, of: elementType) else {
+                    throw GoDiagnostic(
+                        position: source.position,
+                        message: "cannot use \(sourceType) as \(sliceType) value in append")
+                }
+                return sliceType
+            }
+            for argument in arguments.dropFirst() {
+                try require(argument, assignableTo: elementType)
+            }
+            return sliceType
+        }
+        if name == "make" {
+            guard arguments.count >= 1 && arguments.count <= 3,
+                case .typeExpression(let typeExpression, _) = arguments[0]
+            else {
+                throw GoDiagnostic(position: position, message: "invalid make call")
+            }
+            let madeType = try declaredType(typeExpression)
+            switch underlying(madeType) {
+            case .slice:
+                guard arguments.count >= 2 else {
+                    throw GoDiagnostic(position: position, message: "missing len argument")
+                }
+                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
+                    throw GoDiagnostic(position: argument.position, message: "make size must be integer")
+                }
+            case .map:
+                if arguments.count > 2 {
+                    throw GoDiagnostic(position: position, message: "too many arguments to make")
+                }
+                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
+                    throw GoDiagnostic(position: argument.position, message: "make size must be integer")
+                }
+            case .channel:
+                if arguments.count > 2 {
+                    throw GoDiagnostic(position: position, message: "too many arguments to make")
+                }
+                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
+                    throw GoDiagnostic(position: argument.position, message: "make channel size must be integer")
+                }
+            default:
+                throw GoDiagnostic(position: arguments[0].position, message: "cannot make \(madeType)")
+            }
+            return madeType
+        }
+        if name == "panic" {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(position: position, message: "panic takes exactly one argument")
+            }
+            _ = try type(of: arguments[0])
+            return .void
+        }
+        if name == "recover" {
+            guard arguments.isEmpty else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "too many arguments in call to recover")
+            }
+            return .interface([])
+        }
+        if name == "delete" {
+            guard arguments.count == 2 else {
+                throw GoDiagnostic(position: position, message: "delete takes exactly two arguments")
+            }
+            let mapType = try type(of: arguments[0])
+            guard case .map(let keyType, _) = underlying(mapType) else {
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "first argument to delete must be map")
+            }
+            let actualKeyType = try type(of: arguments[1])
+            guard try isAssignable(arguments[1], ofType: actualKeyType, to: keyType) else {
+                throw GoDiagnostic(
+                    position: arguments[1].position,
+                    message: "cannot use \(actualKeyType) as \(keyType) value in delete")
+            }
+            return .void
+        }
+        if name == "copy" {
+            guard arguments.count == 2 else {
+                throw GoDiagnostic(position: position, message: "copy takes exactly two arguments")
+            }
+            let destinationType = try type(of: arguments[0])
+            guard case .slice(let element) = underlying(destinationType) else {
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "first argument to copy must be slice")
+            }
+            let sourceType = try type(of: arguments[1])
+            guard isElementSource(sourceType, of: element) else {
+                throw GoDiagnostic(
+                    position: arguments[1].position,
+                    message: "cannot copy \(sourceType) into \(destinationType)")
+            }
+            return .int
+        }
+        if name == "close" {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(position: position, message: "close takes exactly one argument")
+            }
+            guard case .channel(let direction, _) = underlying(try type(of: arguments[0])) else {
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "invalid operation: cannot close non-channel")
+            }
+            guard direction != .receiveOnly else {
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "invalid operation: cannot close receive-only channel")
+            }
+            return .void
+        }
+        guard let signature = functionSignatures[name] else {
+            // Allow calling variables of function type (e.g., context.CancelFunc)
+            if let binding = lookup(name),
+                binding.type == .named("context.CancelFunc")
+            {
+                use(name)
+                guard arguments.isEmpty else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "too many arguments in call to cancel function")
+                }
+                return .void
+            }
+            throw GoDiagnostic(position: namePosition, message: "undefined: \(name)")
+        }
+        let (arguments, parameters) = matched(arguments, to: signature.parameters)
+        guard arguments.count <= parameters.count else {
+            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
+        }
+        guard arguments.count == parameters.count else {
+            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
+        }
+        for (argument, parameterType) in zip(arguments, parameters) {
+            let argumentType = try type(of: argument)
+            guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
+                throw GoDiagnostic(
+                    position: argument.position,
+                    message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
+            }
+        }
+        return signature.results.first ?? .void
+    }
+
+    /// The type of a call `base.name(...)`: a function of a package or a
+    /// method.
+    mutating func selectorCallType(
+        base: GoExpression, name: String, callee: GoExpression, arguments: [GoExpression],
+        position: GoSourcePosition
+    ) throws -> GoType {
+        if case .identifier(let packageName, _) = base,
+            packageName == "fmt",
+            importedPaths.contains("fmt"),
+            name == "Print" || name == "Println"
+        {
+            try checkAnyOperands(arguments[...])
+            return .void
+        }
+        if case .identifier("os", _) = base,
+            importedPaths.contains("os"),
+            name == "Exit"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to os.Exit")
+            }
+            try require(arguments[0], assignableTo: .int)
+            return .void
+        }
+        if case .identifier("strconv", _) = base,
+            importedPaths.contains("strconv"),
+            name == "Atoi"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to strconv.Atoi")
+            }
+            try require(arguments[0], assignableTo: .string)
+            return .int
+        }
+        if case .identifier("userland", _) = base,
+            importedPaths.contains("swiftix/userland"),
+            name == "ReadInput"
+        {
+            guard arguments.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to userland.ReadInput")
+            }
+            try require(arguments[0], assignableTo: .string)
+            try require(arguments[1], assignableTo: .slice(.string))
+            return .string
+        }
+        if case .identifier("userland", _) = base,
+            importedPaths.contains("swiftix/userland"),
+            let results = try userlandTerminalResults(
+                name, arguments: arguments, position: position)
+        {
+            return results.first ?? .void
+        }
+        if case .identifier("strings", _) = base,
+            importedPaths.contains("strings")
+        {
+            return try stringsCallResult(name, arguments: arguments, position: position)
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "time",
+            importedPaths.contains("time"),
+            name == "After"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to time.After")
+            }
+            try require(arguments[0], assignableTo: .int)
+            return .channel(direction: .receiveOnly, element: GoPredeclared.time)
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "time",
+            importedPaths.contains("time"),
+            name == "Sleep"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to time.Sleep")
+            }
+            try require(arguments[0], assignableTo: .int)
+            return .void
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "time",
+            importedPaths.contains("time"),
+            name == "Tick"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to time.Tick")
+            }
+            try require(arguments[0], assignableTo: .int)
+            return .channel(direction: .receiveOnly, element: GoPredeclared.time)
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "context",
+            importedPaths.contains("context"),
+            name == "Background"
+        {
+            guard arguments.isEmpty else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "too many arguments in call to context.Background")
+            }
+            return .named("context.Context")
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "context",
+            importedPaths.contains("context"),
+            name == "WithCancel"
+        {
+            guard arguments.count == 1 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to context.WithCancel")
+            }
+            try require(arguments[0], assignableTo: .named("context.Context"))
+            return .named("context.Context")
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "context",
+            importedPaths.contains("context"),
+            name == "WithTimeout"
+        {
+            guard arguments.count == 2 else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to context.WithTimeout")
+            }
+            try require(arguments[0], assignableTo: .named("context.Context"))
+            try require(arguments[1], assignableTo: .int)
+            return .named("context.Context")
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "net",
+            importedPaths.contains("net")
+        {
+            switch name {
+            case "Dial":
+                guard arguments.count == 2 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to net.Dial")
+                }
+                try require(arguments[0], assignableTo: .string)
+                try require(arguments[1], assignableTo: .string)
+                return .named("net.Conn")
+            case "Listen":
+                guard arguments.count == 2 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to net.Listen")
+                }
+                try require(arguments[0], assignableTo: .string)
+                try require(arguments[1], assignableTo: .string)
+                return .named("net.Listener")
+            case "LookupHost":
+                guard arguments.count == 1 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to net.LookupHost")
+                }
+                try require(arguments[0], assignableTo: .string)
+                return .slice(.string)
+            default:
+                break
+            }
+        }
+        if case .identifier(let packageName, _) = base,
+            (packageName == "http" && importedPaths.contains("net/http"))
+        {
+            switch name {
+            case "HandleFunc":
+                guard arguments.count == 2 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to http.HandleFunc")
+                }
+                try require(arguments[0], assignableTo: .string)
+                return .void
+            case "ListenAndServe":
+                guard arguments.count == 2 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to http.ListenAndServe")
+                }
+                try require(arguments[0], assignableTo: .string)
+                return GoPredeclared.errorType
+            case "Get":
+                guard arguments.count == 1 else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to http.Get")
+                }
+                try require(arguments[0], assignableTo: .string)
+                return .named("http.Response")
+            default:
+                break
+            }
+        }
+        if case .identifier(let packageName, _) = base,
+            packageName == "runtime",
+            importedPaths.contains("runtime"),
+            name == "GC"
+        {
+            guard arguments.isEmpty else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "too many arguments in call to runtime.GC")
+            }
+            return .void
+        }
+        if let syncReceiverType = try? type(of: base) {
+            let syncReceiverName: String?
+            let syncReceiverIsPointer: Bool
+            switch syncReceiverType {
+            case .named(let typeName):
+                syncReceiverName = typeName
+                syncReceiverIsPointer = false
+            case .pointer(.named(let typeName)):
+                syncReceiverName = typeName
+                syncReceiverIsPointer = true
+            default:
+                syncReceiverName = nil
+                syncReceiverIsPointer = false
+            }
+            if syncReceiverName == "sync.Mutex", name == "Lock" || name == "Unlock" {
+                guard arguments.isEmpty else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "too many arguments in call to \(name)")
+                }
+                guard syncReceiverIsPointer || isAddressable(base) else {
+                    throw GoDiagnostic(
+                        position: base.position,
+                        message: "cannot call pointer method on non-addressable value")
+                }
+                return .void
+            }
+            if syncReceiverName == "sync.WaitGroup" {
+                guard syncReceiverIsPointer || isAddressable(base) else {
+                    throw GoDiagnostic(
+                        position: base.position,
+                        message: "cannot call pointer method on non-addressable value")
+                }
+                switch name {
+                case "Add":
+                    guard arguments.count == 1 else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "wrong number of arguments in call to Add")
+                    }
+                    try require(arguments[0], assignableTo: .int)
+                    return .void
+                case "Done", "Wait":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to \(name)")
+                    }
+                    return .void
+                default:
+                    break
+                }
+            }
+            if syncReceiverName == "context.Context" {
+                switch name {
+                case "Done":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to Done")
+                    }
+                    return .channel(direction: .receiveOnly, element: .int)
+                case "Err":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to Err")
+                    }
+                    return GoPredeclared.errorType
+                default:
+                    break
+                }
+            }
+            if syncReceiverName == "net.Conn" {
+                switch name {
+                case "Read", "Write":
+                    guard arguments.count == 1 else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "wrong number of arguments in call to \(name)")
+                    }
+                    if try type(of: arguments[0]) != .slice(GoPredeclared.byte) {
+                        try require(arguments[0], assignableTo: .slice(.int))
+                    }
+                    return .int
+                case "Close":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to Close")
+                    }
+                    return GoPredeclared.errorType
+                default:
+                    break
+                }
+            }
+            if syncReceiverName == "net.Listener" {
+                switch name {
+                case "Accept":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to Accept")
+                    }
+                    return .named("net.Conn")
+                case "Close":
+                    guard arguments.isEmpty else {
+                        throw GoDiagnostic(
+                            position: position,
+                            message: "too many arguments in call to Close")
+                    }
+                    return GoPredeclared.errorType
+                default:
+                    break
+                }
+            }
+        }
+        if case .identifier(let baseName, _) = base,
+            lookup(baseName)?.type == .pointer(.named("testing.T"))
+        {
+            switch name {
+            case "Error", "Fatal":
+                for argument in arguments where try type(of: argument) == .void {
+                    throw GoDiagnostic(
+                        position: argument.position, message: "no value used as value")
+                }
+                return .void
+            case "Run":
+                guard arguments.count == 2,
+                    try type(of: arguments[0]) == .string,
+                    case .function(let parameters, let results) = try type(of: arguments[1]),
+                    parameters == [.pointer(.named("testing.T"))], results.isEmpty
+                else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "invalid arguments in call to testing.T.Run")
+                }
+                return .bool
+            default:
+                break
+            }
+        }
+        // Local package function call: pkg.Function(args...)
+        if case .identifier(let packageName, _) = base,
+            let export = resolvePackageExport(packageName),
+            let funcExport = export.functions[name]
+        {
+            guard arguments.count == funcExport.parameters.count else {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "wrong number of arguments in call to \(packageName).\(name)")
+            }
+            for (argument, paramType) in zip(arguments, funcExport.parameters) {
+                let argType = try type(of: argument)
+                guard try isAssignable(argument, ofType: argType, to: paramType) else {
+                    throw GoDiagnostic(
+                        position: argument.position,
+                        message: "cannot use \(argType) as \(paramType) value in argument to \(packageName).\(name)")
+                }
+            }
+            return funcExport.results.first ?? .void
+        }
+        if case .identifier(let packageName, _) = base,
+            lookup(packageName) == nil,
+            importedPaths.contains(packageName),
+            GoStandardLibrary.supportedPackages.contains(packageName)
+        {
+            // Name the missing member instead of reporting the package
+            // itself as undefined.
+            throw GoDiagnostic(
+                position: callee.position, message: "undefined: \(packageName).\(name)")
+        }
+        let baseType = try type(of: base)
+        let candidates: [String]
+        switch baseType {
+        case .named(let baseName):
+            candidates = [
+                methodKey(baseName: baseName, pointer: false, method: name),
+                methodKey(baseName: baseName, pointer: true, method: name),
+            ]
+        case .pointer(.named(let baseName)):
+            candidates = [
+                methodKey(baseName: baseName, pointer: true, method: name),
+                methodKey(baseName: baseName, pointer: false, method: name),
+            ]
+        default:
+            candidates = []
+        }
+        guard let match = candidates.first(where: { methodSignatures[$0] != nil }),
+            let signature = methodSignatures[match]
+        else {
+            // Check if it's an interface method call
+            if case .interface(let methods) = underlying(baseType),
+                let method = methods.first(where: { $0.name == name })
+            {
+                let (arguments, parameters) = matched(arguments, to: method.parameters)
+                guard arguments.count == parameters.count else {
+                    throw GoDiagnostic(
+                        position: position,
+                        message: "wrong number of arguments in call to \(name)")
+                }
+                for (argument, parameterType) in zip(arguments, parameters) {
+                    try require(argument, assignableTo: parameterType)
+                }
+                return method.results.first ?? .void
+            }
+            throw GoDiagnostic(
+                position: callee.position,
+                message: "\(baseType) has no field or method \(name)")
+        }
+        if match.first == "*", case .named = baseType, !isAddressable(base) {
+            throw GoDiagnostic(
+                position: base.position,
+                message: "cannot call pointer method on non-addressable value")
+        }
+        let (arguments, parameters) = matched(arguments, to: signature.parameters)
+        guard arguments.count <= parameters.count else {
+            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
+        }
+        guard arguments.count == parameters.count else {
+            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
+        }
+        for (argument, parameterType) in zip(arguments, parameters) {
+            try require(argument, assignableTo: parameterType)
+        }
+        return signature.results.first ?? .void
     }
 
     /// The type of what `expression` names, which must be something a

@@ -147,6 +147,11 @@ public struct GoFile: Sendable, Equatable {
     /// that a diagnostic can say `f.Printl` as the source does.
     var importRenames: [GoImportRename] = []
 
+    /// Where Go reports `function`: at its name.
+    func namePosition(of function: GoFunctionDeclaration) -> GoSourcePosition {
+        namePositions[function.position.offset]?.first ?? function.position
+    }
+
     /// A file with the same source, after a pass rebuilt its declarations.
     func rebuilt(
         packageName: String? = nil,
