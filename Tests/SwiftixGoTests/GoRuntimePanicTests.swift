@@ -125,6 +125,79 @@ struct GoRuntimePanicTests: GoTestHarness {
         #expect(text("panic(label{Text: \"t\"})") == "label t")
     }
 
+    @Test func panicsThatFollowOneAnotherAreAllReported() {
+        // What Go 1.24.5 prints after the first `panic: `: a line for each
+        // panic that had begun and was not over, oldest first.
+        let declarations = """
+            type code int
+
+            type problem struct {
+                Code int
+            }
+
+            func (p problem) Error() string { return fmt.Sprint("problem ", p.Code) }
+
+            func inner() {
+                defer func() {
+                    panic("second")
+                }()
+                panic("first")
+            }
+
+            func recovering() {
+                defer func() {
+                    recover()
+                }()
+                panic("first")
+            }
+            """
+        func text(_ body: String) -> String? {
+            do {
+                _ = try runGoMain(body, declarations: declarations)
+                return nil
+            } catch GoRuntimeError.panicError(let message) {
+                return message
+            } catch {
+                return "unexpected error: \(error)"
+            }
+        }
+
+        // A deferred call that recovers and panics anew, and one that
+        // panics while the function is panicking.
+        #expect(
+            text("defer func() {\n recover()\n panic(\"second\")\n}()\npanic(\"first\")")
+                == "first [recovered]\n\tpanic: second")
+        #expect(
+            text("defer func() {\n panic(\"second\")\n}()\npanic(\"first\")")
+                == "first\n\tpanic: second")
+        #expect(
+            text("defer func() {\n panic(recover())\n}()\npanic(code(4))")
+                == "main.code(4) [recovered]\n\tpanic: main.code(4)")
+        #expect(
+            text(
+                "defer func() {\n panic(\"third\")\n}()\ndefer func() {\n panic(\"second\")\n}()\npanic(\"first\")")
+                == "first\n\tpanic: second\n\tpanic: third")
+        // The panics a function ended with travel with the last of them.
+        #expect(
+            text("defer func() {\n recover()\n panic(\"last\")\n}()\ninner()")
+                == "first\n\tpanic: second [recovered]\n\tpanic: last")
+        // Each is described as it would be alone: by a method of the
+        // program, or as the run-time error it is.
+        #expect(
+            text("defer func() {\n recover()\n panic(problem{Code: 2})\n}()\npanic(problem{Code: 1})")
+                == "problem 1 [recovered]\n\tpanic: problem 2")
+        #expect(
+            text("defer func() {\n panic(code(9))\n}()\nvar list []int\nfmt.Println(list[2])")
+                == "runtime error: index out of range [2] with length 0\n\tpanic: main.code(9)")
+
+        // A panic that was recovered and is over is not part of what
+        // follows.
+        #expect(text("recovering()\npanic(\"second\")") == "second")
+        #expect(
+            text("defer func() {\n panic(\"later\")\n}()\ndefer func() {\n recover()\n}()\npanic(\"first\")")
+                == "later")
+    }
+
     @Test func aPanicKeepsTheTypeOfItsValue() throws {
         #expect(
             try runGoMain(

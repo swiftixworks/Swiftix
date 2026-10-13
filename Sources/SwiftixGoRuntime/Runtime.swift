@@ -2046,6 +2046,35 @@ public struct GoVirtualMachine: Sendable {
             return decoded
         }
 
+        /// Ends the run with what Go prints for the panics of `report`, or
+        /// starts the method that has to say what the next of them is and
+        /// returns. Go prints an error it panicked with by its text and a
+        /// value that has a `String` method by that; the method is the
+        /// program's, so it runs as the goroutine's last frame, and the
+        /// report goes on when it returns.
+        func reportPanics(_ given: GoPanicReport) throws {
+            var report = given
+            while let record = report.pending.first {
+                if let message = try libraryError(record.value)?.message {
+                    report.describeFirst(as: message)
+                } else if !report.skipsMethod, let target = methodTarget(record.value),
+                    let function = GoFormat.textMethods.lazy
+                        .compactMap({ method($0, of: target.owner) }).first
+                {
+                    var frame = try makeFrame(
+                        function: function, stackBase: stack.count,
+                        arguments: [try methodReceiver(target.receiver, for: function)],
+                        heap: &heap)
+                    frame.panicReport = report
+                    frames.append(frame)
+                    return
+                } else {
+                    report.describeFirst(as: try panicText(record.value))
+                }
+            }
+            throw GoRuntimeError.panicError(report.lines.joined(separator: "\n\tpanic: "))
+        }
+
         /// What Go prints after `panic: ` for a value no method describes:
         /// a number, a string, or a truth value as it is, one of a named
         /// type as `main.code(4)`, and anything else by its type and where
@@ -3792,8 +3821,23 @@ public struct GoVirtualMachine: Sendable {
                     }
                     switch pendingExit {
                     case .returning(let values):
-                        if exiting.printsPanic != nil, case .string(let text)? = values.first {
-                            throw GoRuntimeError.panicError(text)
+                        if var report = exiting.panicReport {
+                            // The method has said what the panic is.
+                            if case .string(let text)? = values.first {
+                                report.describeFirst(as: text)
+                            } else {
+                                report.skipsMethod = true
+                            }
+                            try reportPanics(report)
+                            continue
+                        }
+                        if exiting.isDeferredCall, !frames.isEmpty,
+                            frames[frames.count - 1].recoveredPanic != nil
+                        {
+                            // The call that recovered has returned: that
+                            // panic, and those it had cut short, are over.
+                            frames[frames.count - 1].recoveredPanic = nil
+                            frames[frames.count - 1].earlierPanics = []
                         }
                         if exiting.function.returnCount > 0,
                             values.count != exiting.function.returnCount
@@ -3810,27 +3854,17 @@ public struct GoVirtualMachine: Sendable {
                         }
                     case .panicking(let value):
                         guard !frames.isEmpty else {
-                            // Go prints an error it panicked with by its
-                            // text, and a value that has a `String` method
-                            // by that. The method is the program's, so it
-                            // runs as the last frame, and its result ends
-                            // the program.
-                            if let message = try libraryError(value)?.message {
-                                throw GoRuntimeError.panicError(message)
+                            if var report = exiting.panicReport {
+                                // The method that was to describe a panic
+                                // panicked itself: its type and place do.
+                                report.skipsMethod = true
+                                try reportPanics(report)
+                            } else {
+                                try reportPanics(
+                                    GoPanicReport(
+                                        pending: exiting.earlierPanics
+                                            + [GoPanicRecord(value: value, isRecovered: false)]))
                             }
-                            guard exiting.printsPanic == nil, let target = methodTarget(value),
-                                let function = GoFormat.textMethods.lazy
-                                    .compactMap({ method($0, of: target.owner) }).first
-                            else {
-                                throw GoRuntimeError.panicError(
-                                    try panicText(exiting.printsPanic ?? value))
-                            }
-                            var frame = try makeFrame(
-                                function: function, stackBase: stack.count,
-                                arguments: [try methodReceiver(target.receiver, for: function)],
-                                heap: &heap)
-                            frame.printsPanic = value
-                            frames.append(frame)
                             continue
                         }
                         if frames[frames.count - 1].awaitsGuestCall,
@@ -3838,7 +3872,22 @@ public struct GoVirtualMachine: Sendable {
                         {
                             deliverGuestPanic(value)
                         } else {
-                            frames[frames.count - 1].pendingExit = .panicking(value)
+                            let parent = frames.count - 1
+                            if exiting.isDeferredCall {
+                                // The function was panicking when the call
+                                // ran, or the call had recovered its panic:
+                                // either comes before this one.
+                                if case .panicking(let interrupted)? = frames[parent].pendingExit {
+                                    frames[parent].earlierPanics.append(
+                                        GoPanicRecord(value: interrupted, isRecovered: false))
+                                } else if let recovered = frames[parent].recoveredPanic {
+                                    frames[parent].earlierPanics.append(
+                                        GoPanicRecord(value: recovered, isRecovered: true))
+                                    frames[parent].recoveredPanic = nil
+                                }
+                            }
+                            frames[parent].earlierPanics += exiting.earlierPanics
+                            frames[parent].pendingExit = .panicking(value)
                         }
                     case .testFatal:
                         if !frames.isEmpty {
@@ -4501,6 +4550,7 @@ public struct GoVirtualMachine: Sendable {
                         resultValues.append(heap[cell])
                     }
                     frames[frameIndex - 1].pendingExit = .returning(resultValues)
+                    frames[frameIndex - 1].recoveredPanic = value
                     stack.append(value)
                 case .makeMap(let entryCount):
                     guard entryCount >= 0 else {
@@ -7062,9 +7112,18 @@ private struct Frame {
     var awaitsGuestCall = false
     /// What becomes of a panic of the function being waited for.
     var guestCallRecovery = GoGuestCallRecovery.none
-    /// The value an unrecovered panic ended the goroutine with, when this
-    /// frame runs its `Error` or `String` method to say so.
-    var printsPanic: GoValue?
+    /// The panics that began before the one this frame is ending with and
+    /// were not done with when it began: a deferred call panicked while the
+    /// function was panicking, or after it had recovered. Go names them all
+    /// when the last one ends the program.
+    var earlierPanics: [GoPanicRecord] = []
+    /// The panic a deferred call of this frame has recovered, until that
+    /// call returns.
+    var recoveredPanic: GoValue?
+    /// The report of the panics that ended the goroutine, when this frame
+    /// runs the `Error` or `String` method that says what the first one
+    /// still to be described is.
+    var panicReport: GoPanicReport?
 
     init(
         function: GoBytecodeFunction,

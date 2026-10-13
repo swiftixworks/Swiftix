@@ -79,3 +79,33 @@ struct GoRuntimePanic: Error, Equatable, Sendable {
         return GoRuntimePanic(GoErrors.boundsErrorType, prefix + "slice bounds out of range " + text)
     }
 }
+
+/// A panic that had begun when a later one did.
+struct GoPanicRecord: Sendable, Equatable {
+    let value: GoValue
+    /// Whether a deferred call had recovered it before it panicked anew.
+    let isRecovered: Bool
+}
+
+/// What is printed when a goroutine ends panicking: a line for each panic
+/// in the order they began, as Go prints them,
+///
+///     panic: first [recovered]
+///         panic: second
+///
+/// The lines are made one at a time, because the text of a panic may be
+/// the result of a method of the program.
+struct GoPanicReport: Sendable, Equatable {
+    /// The panics still to be described, oldest first.
+    var pending: [GoPanicRecord]
+    var lines: [String] = []
+    /// Whether the first pending panic is described without its method,
+    /// which has failed.
+    var skipsMethod = false
+
+    mutating func describeFirst(as text: String) {
+        let record = pending.removeFirst()
+        lines.append(text + (record.isRecovered ? " [recovered]" : ""))
+        skipsMethod = false
+    }
+}

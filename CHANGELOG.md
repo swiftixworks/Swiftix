@@ -151,7 +151,10 @@ format, behavior and platform changes are recorded here.
 - An unrecovered panic prints its value as Go does: a value of a named type
   as `main.code(4)`, an error by its `Error` method and a value with a
   `String` method by that, and anything else by its type and address,
-  `(main.failure) 0xc000012000` (was the value alone, `{3}`).
+  `(main.failure) 0xc000012000` (was the value alone, `{3}`). A panic that
+  begins while another is not over is printed after it, with `[recovered]`
+  on one a deferred call had recovered:
+  `panic: first [recovered]`, then `panic: second` on the next line.
 - A diagnostic names a member of a package the way the file does:
   `undefined: t.Nope` after `import t "time"`. A member a package does not
   have is `undefined: os.Nope` (was `undefined: os`).
