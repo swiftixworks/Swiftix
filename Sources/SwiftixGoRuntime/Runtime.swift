@@ -3343,6 +3343,101 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// Run a native of `net/http`: see `GoHTTP`. Returns `false` when
+        /// `name` is not such a function.
+        func executeHTTPNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoHTTP.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            var second: Int64 = 0
+            if expectedCount == 2 {
+                guard case .int(let value) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                second = value
+            }
+            let operand = try pop(&stack)
+            func text() throws -> String {
+                guard case .string(let text) = operand else { throw GoRuntimeError.typeMismatch }
+                return text
+            }
+            switch name {
+            case "$http.CanonicalHeaderKey":
+                stack.append(.string(GoHTTP.canonicalHeaderKey(try text())))
+            case "$http.DetectContentType":
+                stack.append(.string(GoHTTP.detectContentType(try sliceBytes(operand))))
+            case "$http.lineEnd":
+                let start = Int(clamping: second)
+                stack.append(.int(Int64(GoHTTP.lineEnd(try sliceBytes(operand), from: start))))
+            case "$http.formatTime":
+                guard case .int(let seconds) = operand,
+                    let layout = GoHTTP.TimeLayout(rawValue: second)
+                else { throw GoRuntimeError.typeMismatch }
+                stack.append(.string(GoHTTP.formatTime(unixSeconds: seconds, layout: layout)))
+            case "$http.remoteAddr":
+                guard case .netConn(let connection) = operand else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                stack.append(.string(connection.remoteAddr))
+            case "$http.validToken":
+                stack.append(.bool(GoHTTP.isToken(try text())))
+            case "$http.validHeaderValue":
+                stack.append(.bool(GoHTTP.isHeaderValue(try text())))
+            default:
+                return false
+            }
+            return true
+        }
+
+        /// Run a native of `net/url`: see `GoURL`. Returns `false` when
+        /// `name` is not such a function.
+        func executeURLNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoURL.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            var mode = GoURL.Mode.path
+            if expectedCount == 2 {
+                guard case .int(let raw) = try pop(&stack), let named = GoURL.Mode(rawValue: raw)
+                else { throw GoRuntimeError.typeMismatch }
+                mode = named
+            }
+            guard case .string(let text) = try pop(&stack) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            switch name {
+            case "$url.unescape":
+                // The text, then what was wrong with it and which kind of
+                // error that is: none, an escape, or a host.
+                switch GoURL.unescape(text, mode) {
+                case .success(let bytes):
+                    stack.append(contentsOf: [
+                        .string(GoNative.string(fromBytes: bytes)), .string(""), .int(0),
+                    ])
+                case .failure(.escape(let bad)):
+                    stack.append(contentsOf: [.string(""), .string(bad), .int(1)])
+                case .failure(.host(let bad)):
+                    stack.append(contentsOf: [.string(""), .string(bad), .int(2)])
+                }
+            case "$url.escape":
+                let escaped = GoURL.escape(text, mode)
+                guard escaped.utf8.count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                stack.append(.string(escaped))
+            case "$url.validEncoded":
+                stack.append(.bool(GoURL.isValidEncoded(text, mode)))
+            case "$url.hasControlByte":
+                stack.append(.bool(GoURL.hasControlByte(text)))
+            default:
+                return false
+            }
+            return true
+        }
+
         /// Run an `os` file native: opening and closing files, positional I/O,
         /// seeking, and directory entries. Arguments are the top
         /// `argumentCount` stack entries in call order. A failed system call
@@ -4407,6 +4502,8 @@ public struct GoVirtualMachine: Sendable {
                                 || executeFormatNative(name, argumentCount: argumentCount)
                                 || executeErrorNative(name, argumentCount: argumentCount)
                                 || executeSliceNative(name, argumentCount: argumentCount)
+                                || executeHTTPNative(name, argumentCount: argumentCount)
+                                || executeURLNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }
@@ -5480,13 +5577,16 @@ public struct GoVirtualMachine: Sendable {
                     processContext.tcpAccept(listener.fd) { acceptedFD in
                         defer { endHostWait() }
                         guard executionIsActive, asynchronousError == nil else { return }
+                        // Who connected, as Go's `RemoteAddr` says it.
+                        let peer = processContext.tcpPeer(acceptedFD)
+                            .map { "\($0.address):\($0.port)" } ?? ""
                         do {
                             try wakeGoroutine(
                                 acceptingID,
                                 values: [
                                     .netConn(GoNetConnValue(
                                         fd: acceptedFD, network: "tcp",
-                                        remoteAddr: "")),
+                                        remoteAddr: peer)),
                                     .nilValue,
                                 ])
                         } catch let error as GoRuntimeError {

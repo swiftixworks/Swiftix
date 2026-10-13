@@ -351,7 +351,7 @@ struct GoFormatVerbTests: GoTestHarness {
                 == "wrong number of arguments in call to fmt.Sprintf")
         #expect(diagnostic("fmt.Println(fmt.Sprintf(5))") == "cannot use int as string value")
         #expect(
-            diagnostic("fmt.Fprintf(\"%d\", 1)") == "cannot use string as *os.File value")
+            diagnostic("fmt.Fprintf(\"%d\", 1)") == "cannot use string as io.Writer value in argument to fmt.Fprintf")
         #expect(
             diagnostic("fmt.Fprintf(os.Stdout)")
                 == "wrong number of arguments in call to fmt.Fprintf")

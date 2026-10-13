@@ -211,7 +211,7 @@ struct GoFileInterfaceTests: GoTestHarness {
         func diagnostic(_ body: String, declarations: String = "") -> String? {
             goMainDiagnostic(body, imports: ["fmt", "os"], declarations: declarations)
         }
-        #expect(diagnostic("fmt.Fprintln(1, \"x\")") == "cannot use int as *os.File value")
+        #expect(diagnostic("fmt.Fprintln(1, \"x\")") == "cannot use int as io.Writer value in argument to fmt.Fprintln")
         #expect(diagnostic("fmt.Fprint()") == "wrong number of arguments in call to fmt.Fprint")
         #expect(
             diagnostic("n, err := fmt.Fprintln(os.Stdout, \"x\")\nfmt.Println(n, err)") == nil)

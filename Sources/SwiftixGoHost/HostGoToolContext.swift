@@ -261,6 +261,7 @@ public final class HostGoToolContext: GoToolContext {
         let workspace = try snapshotWorkspace()
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
+        Self.attachLoopback(to: kernel)
         var result: Result<Int32, Error>?
         kernel.spawn(arguments.first ?? "swiftix-go", args: arguments) { context in
             self.installRuntimeStandardIO(on: context)
@@ -307,6 +308,27 @@ public final class HostGoToolContext: GoToolContext {
             arguments: [programName] + arguments
         ) { text in
             _ = self.write(1, Array(text.utf8))
+        }
+    }
+
+    /// Gives the kernel a program runs on the interface `lo`, 127.0.0.1/8,
+    /// whose frames come back to it: a program that listens can then be
+    /// reached by itself, which is how a server is tried out with `go run`.
+    /// Nothing leaves the process; the host's network is not involved.
+    private static func attachLoopback(to kernel: Kernel) {
+        let stack = kernel.netns.stack
+        let index = stack.interfaceCount
+        stack.configure(
+            .addInterface(
+                NetworkInterfaceConfiguration(
+                    address: IPv4Address(127, 0, 0, 1),
+                    mac: MACAddress("00:00:00:00:00:00")!,
+                    prefixLength: 8)))
+        guard let loopback = stack.interface(at: index) else { return }
+        let loop = kernel.loop
+        loopback.onEgress = { [weak stack, weak loopback] frame in
+            guard let stack, let loopback else { return }
+            loop.schedule(after: 0) { stack.receive(frame, on: loopback) }
         }
     }
 

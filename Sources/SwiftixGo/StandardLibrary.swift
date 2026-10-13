@@ -34,6 +34,7 @@ enum GoStandardLibrary {
         "context", "errors", "io", "net", "net/http", "os", "sort", "strconv", "strings",
         "swiftix/userland",
         "math", "unicode", "unicode/utf8",
+        "net/url",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -253,6 +254,10 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$time.Unix", goName: "time.Unix", parameters: [.int, .int],
                 results: [GoPredeclared.time])
+        case ("http", _):
+            return httpNativeFunction(member)
+        case ("url", _):
+            return urlNativeFunction(member)
         default:
             return GoNumberLibrary.nativeFunction(package: package, member: member)
         }
@@ -354,6 +359,7 @@ extension GoStandardLibrary {
             || name.hasPrefix(GoPredeclared.liveResults)
             || GoLibraryTypes.nativeCallNames.contains(name)
             || GoNumberLibrary.isCallName(name)
+            || httpNativeCallNames.contains(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(

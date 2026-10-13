@@ -450,7 +450,7 @@ extension ProcessContext {
     }
 
     /// The remote endpoint of a connected TCP descriptor.
-    func tcpPeer(_ fd: Int) -> (address: IPv4Address, port: UInt16)? {
+    public func tcpPeer(_ fd: Int) -> (address: IPv4Address, port: UInt16)? {
         guard let connection = (process.fileDescriptors.object(fd) as? TCPSocket)?.connection else {
             return nil
         }

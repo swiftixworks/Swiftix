@@ -509,9 +509,10 @@ struct GoLibraryFunctionValueTests: GoTestHarness {
                 == "6:14: undefined: strings.NoSuch")
     }
 
-    /// `errors.As` is compiled with the type of its target, and the functions
-    /// of `net/http` with the name of their handler: neither is a function a
-    /// value could name. Go has both as values.
+    /// `errors.As` is compiled with the type of its target: it is no
+    /// function a value could name, though Go has it as one. The functions
+    /// of `net/http` are Go text of the library, and values like any
+    /// function of a package.
     @Test func whatCannotBeAValueSaysSo() {
         #expect(
             goMainDiagnostic(
@@ -528,6 +529,6 @@ struct GoLibraryFunctionValueTests: GoTestHarness {
                 fmt.Println(f)
                 """,
                 imports: ["fmt", "net/http"])
-                == "http.HandleFunc is a function of the run-time library, which can only be called: wrap the call in a function literal to pass it")
+                == nil)
     }
 }

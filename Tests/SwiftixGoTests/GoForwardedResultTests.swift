@@ -1446,7 +1446,7 @@ struct GoForwardedResultTests: GoTestHarness {
                 == "5:18: cannot use int as string value")
         #expect(
             firstError("fmt.Fprintln(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:14: cannot use int as *os.File value")
+                == "5:14: cannot use int as io.Writer value in argument to fmt.Fprintln")
         #expect(
             firstError("fmt.Println(strings.Repeat(two()))", imports: ["fmt", "strings"],
                 declarations: "func two() (int, string) { return 1, \"a\" }")

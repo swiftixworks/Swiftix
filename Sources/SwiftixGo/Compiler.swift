@@ -276,7 +276,14 @@ public enum GoCompiler {
         importedPackages: [String: GoCompiledPackage],
         packageOrder: [String] = []
     ) throws -> GoExecutable {
-        let parsed = try GoNames.resolve(try sources.map(GoParser.parse))
+        let syntax = try sources.map(GoParser.parse)
+        if importedPackages.isEmpty, try GoEmbeddedLibrary.isNeeded(by: syntax) {
+            // A package of the library that is written in Go is linked with
+            // the program, as a local package of a module is.
+            return try compile(
+                packages: [GoPackageSource(importPath: "main", sources: sources)], root: "main")
+        }
+        let parsed = try GoNames.resolve(syntax)
         if importedPackages.isEmpty {
             return try compile(
                 units: [
@@ -1890,6 +1897,21 @@ struct IRLowerer {
         return (parameters, results)
     }
 
+    /// What a method of an interface value takes and gives, when `callee`
+    /// selects one. `defer i.m(x)` and `go i.m(x)` start it through its
+    /// method value: the interface and the arguments are read at the
+    /// statement, and which method it is, is found when the call runs.
+    func interfaceMethodSignature(
+        _ callee: GoExpression
+    ) -> (parameters: [GoType], results: [GoType])? {
+        guard case .selector(let base, let name, _) = callee,
+            let baseType = try? type(of: base),
+            case .interface(let methods) = underlying(baseType),
+            let method = methods.first(where: { $0.name == name })
+        else { return nil }
+        return (method.parameters, method.results)
+    }
+
     /// The function value and the arguments of a call through it.
     mutating func lowerValueCallOperands(
         callee: GoExpression, arguments: [GoExpression], parameters: [GoType]
@@ -2317,10 +2339,19 @@ struct IRLowerer {
             return
         }
         if try lowerStartedPromotedCall(statement) { return }
+        if let write = writerFormatCall(callee: callee, arguments: arguments) {
+            return try lowerDeferStatement(
+                .deferStatement(
+                    expression: .call(
+                        callee: write.callee, arguments: write.arguments, position: callPosition),
+                    position: position))
+        }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.deferCall(
                 function: wrapper.name, arguments: wrapper.registers))
-        } else if !isLiftedLiteral(callee), let signature = valueCallSignature(callee) {
+        } else if !isLiftedLiteral(callee),
+            let signature = valueCallSignature(callee) ?? interfaceMethodSignature(callee)
+        {
             // The value is read now, with the arguments; the call waits.
             operations.append(
                 .deferCall(
@@ -2413,10 +2444,19 @@ struct IRLowerer {
             return
         }
         if try lowerStartedPromotedCall(statement) { return }
+        if let write = writerFormatCall(callee: callee, arguments: arguments) {
+            return try lowerGoStatement(
+                .goStatement(
+                    expression: .call(
+                        callee: write.callee, arguments: write.arguments, position: callPosition),
+                    position: position))
+        }
         if let wrapper = try nativeWrapper(callee: callee, arguments: arguments) {
             operations.append(.spawn(
                 function: wrapper.name, arguments: wrapper.registers))
-        } else if !isLiftedLiteral(callee), let signature = valueCallSignature(callee) {
+        } else if !isLiftedLiteral(callee),
+            let signature = valueCallSignature(callee) ?? interfaceMethodSignature(callee)
+        {
             operations.append(
                 .spawn(
                     function: GoPredeclared.callFunctionValue,
@@ -3084,6 +3124,10 @@ struct IRLowerer {
                     .call(
                         callee: forwarded.callee, arguments: forwarded.arguments,
                         position: position))
+                return
+            }
+            if let write = writerFormatCall(callee: callee, arguments: arguments) {
+                _ = try lowerCall(callee: write.callee, arguments: write.arguments)
                 return
             }
             if let native = nativeFunction(for: callee),
@@ -5367,6 +5411,26 @@ struct IRLowerer {
         return false
     }
 
+    /// The function a `go` or `defer` of the builtin `close` runs: the
+    /// channel is read at the statement, and closed when the call runs.
+    mutating func closeWrapper(
+        callee: GoExpression, arguments: [GoExpression]
+    ) throws -> (name: String, registers: [Int])? {
+        guard case .identifier("close", _) = callee, arguments.count == 1,
+            lookup("close") == nil, globalInfos["close"] == nil,
+            functionParameterTypes["close"] == nil
+        else { return nil }
+        let name = "$native.\(wrapperNamespace).$close"
+        if nativeWrappers[name] == nil {
+            nativeWrappers[name] = GoIRFunction(
+                name: name,
+                parameterCount: 1,
+                registerCount: 1,
+                operations: [.closeChannel(channel: 0), .return])
+        }
+        return (name, [try lower(arguments[0])])
+    }
+
     /// The function a `go` or `defer` of `fmt.Print` or `fmt.Println` runs:
     /// the `print` instruction over its parameters, so the operands are
     /// formatted in a frame of their own like any other call.
@@ -5415,12 +5479,31 @@ struct IRLowerer {
         return marked
     }
 
+    /// The method call a `fmt.Fprint`, `Fprintln`, or `Fprintf` to a writer
+    /// that is no file is compiled as, `w.Write([]byte(fmt.Sprint(...)))`;
+    /// nil for a call to a file and for any other call. See
+    /// `GoWriterFormat`.
+    func writerFormatCall(
+        callee: GoExpression, arguments: [GoExpression]
+    ) -> (callee: GoExpression, arguments: [GoExpression])? {
+        guard let native = nativeFunction(for: callee), native.receiver == nil,
+            native.function.formatsOperands,
+            native.function.parameters.first == GoPredeclared.filePointer,
+            let writer = arguments.first, let writerType = staticType(of: writer),
+            writerType != GoPredeclared.filePointer, writerType != .nilType
+        else { return nil }
+        return GoWriterFormat.call(callee: callee, arguments: arguments)
+    }
+
     /// Lowers a native library call and returns one register per result, or
     /// nil when `callee` is not a native function.
     mutating func lowerNativeCall(
         callee: GoExpression,
         arguments: [GoExpression]
     ) throws -> [Int]? {
+        if let write = writerFormatCall(callee: callee, arguments: arguments) {
+            return try lowerMultiReturnCall(callee: write.callee, arguments: write.arguments)
+        }
         guard let native = nativeFunction(for: callee) else { return nil }
         let registers = try lowerNativeOperands(
             native.function, receiver: native.receiver, arguments: arguments)
@@ -5441,6 +5524,7 @@ struct IRLowerer {
         arguments: [GoExpression]
     ) throws -> (name: String, registers: [Int])? {
         if let wrapper = try clearWrapper(callee: callee, arguments: arguments) { return wrapper }
+        if let closing = try closeWrapper(callee: callee, arguments: arguments) { return closing }
         guard let native = nativeFunction(for: callee) else { return nil }
         let registers = try lowerNativeOperands(
             native.function, receiver: native.receiver, arguments: arguments)

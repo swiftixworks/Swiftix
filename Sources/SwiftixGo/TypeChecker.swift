@@ -4306,11 +4306,37 @@ struct FunctionChecker {
                 position: position,
                 message: "wrong number of arguments in call to \(function.goName)")
         }
-        for (argument, parameter) in zip(arguments, parameters) {
+        // The writer of `fmt.Fprint` is a file or anything with `Write`.
+        let writes = try checkFormatWriter(function, arguments: arguments, position: position)
+        for (argument, parameter) in zip(arguments, parameters).dropFirst(writes ? 1 : 0) {
             try requireArgument(argument, assignableTo: parameter, ofCall: callee)
         }
         try checkAnyOperands(arguments.dropFirst(parameters.count))
         return function
+    }
+
+    /// Whether the call of `function` is `fmt.Fprint`, `Fprintln`, or
+    /// `Fprintf` to a writer that is no file: a value with the method
+    /// `Write([]byte) (int, error)`, which the call is compiled to call. See
+    /// `GoWriterFormat`. A first argument that is neither is reported as Go
+    /// reports it, as no `io.Writer`.
+    mutating func checkFormatWriter(
+        _ function: GoNativeFunction, arguments: [GoExpression], position: GoSourcePosition
+    ) throws -> Bool {
+        guard function.formatsOperands, function.parameters.first == GoPredeclared.filePointer,
+            let writer = arguments.first
+        else { return false }
+        let writerType = try type(of: writer)
+        if writerType == GoPredeclared.filePointer || writerType == .nilType { return false }
+        let write = GoWriterFormat.write(.string("", position: position), to: writer)
+        let results = try? callResultTypes(
+            callee: write.callee, arguments: write.arguments, position: position)
+        guard results == [.int, GoPredeclared.errorType] else {
+            throw GoDiagnostic(
+                position: writer.position,
+                message: "cannot use \(writerType) as io.Writer value in argument to \(function.goName)")
+        }
+        return true
     }
 
     /// Checks the operands of a `...any` parameter: any number of values, or

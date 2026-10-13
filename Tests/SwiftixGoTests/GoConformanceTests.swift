@@ -189,6 +189,10 @@ struct GoConformanceTests {
     @Test func sizedIntegersRunesAndConstants() throws {
         try expectSameOutput(sizedIntegersRunesAndConstantsSource, sizedIntegersRunesAndConstantsExpected)
     }
+
+    @Test func deferAndGoOfInterfaceMethodsAndClose() throws {
+        try expectSameOutput(deferAndGoOfInterfaceMethodsAndCloseSource, deferAndGoOfInterfaceMethodsAndCloseExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -4808,5 +4812,96 @@ true <nil> 18446744073709551615 15 6148914691236517205 true 98 info 98
 rune x; byte 7; wide -5; wide 18446744073709551615; level warn; wait 1.5s; uint16; int;\#u{20}
 int32 uint8 info 2 世 U+4E16 00000101 ffffffffffffffff
 [0 0 500] 3 true
+
+"""#
+
+private let deferAndGoOfInterfaceMethodsAndCloseSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+)
+
+type closer interface {
+	Close() error
+	Note(format string, args ...any) (int, error)
+}
+
+type file struct {
+	name string
+	log  *[]string
+}
+
+func (f *file) Close() error {
+	*f.log = append(*f.log, "close "+f.name)
+	if f.name == "bad" {
+		return errors.New("bad close")
+	}
+	return nil
+}
+
+func (f *file) Note(format string, args ...any) (int, error) {
+	line := fmt.Sprintf(format, args...)
+	*f.log = append(*f.log, f.name+": "+line)
+	return len(line), nil
+}
+
+func use(c closer, n int) (err error) {
+	defer c.Close()
+	defer c.Note("done %d", n)
+	if n > 1 {
+		return errors.New("too many")
+	}
+	return nil
+}
+
+func drain(r io.Reader) (text string, err error) {
+	rc := io.NopCloser(r)
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	return string(data), err
+}
+
+func main() {
+	var log []string
+	a, b := &file{"a", &log}, &file{"bad", &log}
+	fmt.Println(use(a, 1), use(b, 2))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var c closer = a
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mu.Lock()
+			defer mu.Unlock()
+			c.Note("worker %d", i)
+		}()
+	}
+	wg.Wait()
+	done := make(chan bool)
+	go c.Note("spawned %s", "x")
+	go func() { defer close(done); c.Close() }()
+	<-done
+	fmt.Println(len(log), log[:4])
+	fmt.Println(drain(strings.NewReader("body")))
+
+	defer func() { fmt.Println("recovered:", recover()) }()
+	var none closer
+	defer none.Close()
+	fmt.Println("unreached")
+}
+"""#
+
+private let deferAndGoOfInterfaceMethodsAndCloseExpected = #"""
+<nil> too many
+8 [a: done 1 close a bad: done 2 close bad]
+body <nil>
+recovered: runtime error: invalid memory address or nil pointer dereference
 
 """#
