@@ -132,6 +132,8 @@ enum GoSourceLibrary {
             }
         case "http": return GoStandardLibrary.httpNativeFunction(name)
         case "url": return GoStandardLibrary.urlNativeFunction(name)
+        case "bufio", "bytes":
+            return GoStandardLibrary.bytesNativeFunction(package: package, member: name)
         default: return nil
         }
     }
@@ -139,6 +141,7 @@ enum GoSourceLibrary {
     /// The call names of those, which the linker leaves for the VM.
     static let nativeCallNames =
         ["$sort.length", "$sort.swap"] + GoStandardLibrary.httpNativeCallNames
+        + GoStandardLibrary.bytesNativeCallNames
 
     // MARK: What the text declares
 

@@ -201,6 +201,10 @@ struct GoConformanceTests {
     @Test func locksAtomicsLogsTimersAndTheEnvironment() throws {
         try expectSameOutput(locksAtomicsLogsTimersAndTheEnvironmentSource, locksAtomicsLogsTimersAndTheEnvironmentExpected)
     }
+
+    @Test func aRedisProtocolOverBufioAndBytes() throws {
+        try expectSameOutput(aRedisProtocolOverBufioAndBytesSource, aRedisProtocolOverBufioAndBytesExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -5111,5 +5115,108 @@ private let locksAtomicsLogsTimersAndTheEnvironmentExpected = #"""
 kv: mode=test hits=8 ticks=3 seen=1
 kv: first
 second
+
+"""#
+
+private let aRedisProtocolOverBufioAndBytesSource = #"""
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// A parser and writer for the RESP protocol of redis, over any reader and writer.
+func readCommand(r *bufio.Reader) ([]string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	line = strings.TrimSuffix(line, "\r\n")
+	if !strings.HasPrefix(line, "*") {
+		return strings.Fields(line), nil
+	}
+	n, err := strconv.Atoi(line[1:])
+	if err != nil {
+		return nil, err
+	}
+	args := make([]string, 0, n)
+	for range n {
+		head, err := r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		size, _ := strconv.Atoi(strings.TrimSpace(head[1:]))
+		buf := make([]byte, size+2)
+		if _, err := r.Read(buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:size]))
+	}
+	return args, nil
+}
+
+func reply(w *bufio.Writer, v any) {
+	switch x := v.(type) {
+	case nil:
+		w.WriteString("$-1\r\n")
+	case string:
+		fmt.Fprintf(w, "$%d\r\n%s\r\n", len(x), x)
+	case int:
+		fmt.Fprintf(w, ":%d\r\n", x)
+	case error:
+		w.WriteString("-ERR " + x.Error() + "\r\n")
+	}
+}
+
+func main() {
+	input := "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*2\r\n$3\r\nGET\r\n$3\r\nkey\r\nINCR n\r\nINCR n\r\nGET missing\r\n"
+	r := bufio.NewReader(strings.NewReader(input))
+	var out bytes.Buffer
+	w := bufio.NewWriter(&out)
+	data := map[string]string{}
+	for {
+		args, err := readCommand(r)
+		if err != nil {
+			break
+		}
+		switch strings.ToUpper(args[0]) {
+		case "SET":
+			data[args[1]] = args[2]
+			w.WriteString("+OK\r\n")
+		case "GET":
+			if v, ok := data[args[1]]; ok {
+				reply(w, v)
+			} else {
+				reply(w, nil)
+			}
+		case "INCR":
+			n, _ := strconv.Atoi(data[args[1]])
+			n++
+			data[args[1]] = strconv.Itoa(n)
+			reply(w, n)
+		}
+	}
+	w.Flush()
+	sc := bufio.NewScanner(&out)
+	stdout := bufio.NewWriter(os.Stdout)
+	defer stdout.Flush()
+	for sc.Scan() {
+		fmt.Fprintf(stdout, "%q\n", sc.Text())
+	}
+}
+"""#
+
+private let aRedisProtocolOverBufioAndBytesExpected = #"""
+"+OK"
+"$5"
+"value"
+":1"
+":2"
+"$-1"
 
 """#

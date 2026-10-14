@@ -4000,6 +4000,27 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// Run a native of `bytes` or `bufio`: see `GoBytes`. The slices
+        /// are read where they lie. Returns `false` when `name` is not such
+        /// a function.
+        func executeBytesNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoBytes.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            let second = try pop(&stack)
+            let first = try sliceElements(try pop(&stack))
+            // The second operand is a slice, or the byte to find.
+            var other: ArraySlice<GoValue> = []
+            if case .int = second {} else { other = try sliceElements(second) }
+            guard let result = GoBytes.result(name, first, other, byte: second) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            stack.append(result)
+            return true
+        }
+
         /// Run a native of `net/http`: see `GoHTTP`. Returns `false` when
         /// `name` is not such a function.
         func executeHTTPNative(_ name: String, argumentCount: Int) throws -> Bool {
@@ -5167,6 +5188,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeSliceNative(name, argumentCount: argumentCount)
                                 || executeHTTPNative(name, argumentCount: argumentCount)
                                 || executeURLNative(name, argumentCount: argumentCount)
+                                || executeBytesNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }

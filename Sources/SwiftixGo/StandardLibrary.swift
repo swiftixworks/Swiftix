@@ -33,6 +33,7 @@ enum GoStandardLibrary {
         "math", "unicode", "unicode/utf8",
         "net/url",
         "log", "sync/atomic",
+        "bufio", "bytes",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {

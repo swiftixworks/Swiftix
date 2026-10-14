@@ -56,6 +56,22 @@ type StringWriter interface {
 	WriteString(s string) (n int, err error)
 }
 
+// ReaderFrom is a writer that can fill itself from a reader: ReadFrom reads
+// r to its end and returns the number of bytes read.
+type ReaderFrom interface {
+	ReadFrom(r Reader) (n int64, err error)
+}
+
+// WriterTo is a reader that can empty itself into a writer: WriteTo writes
+// to w until there is no more and returns the number of bytes written.
+type WriterTo interface {
+	WriteTo(w Writer) (n int64, err error)
+}
+
+// ErrNoProgress is what a reader of a Reader returns when many calls of
+// Read in a row gave no data and no error.
+var ErrNoProgress = errors.New("multiple Read calls return no data or error")
+
 // ErrUnexpectedEOF is the end of the data where more was promised.
 var ErrUnexpectedEOF = errors.New("unexpected EOF")
 
@@ -94,6 +110,16 @@ func ReadAll(r Reader) ([]byte, error) {
 // Copy writes to dst what it reads from src until src ends, and returns
 // the number of bytes written. The end of src is not an error.
 func Copy(dst Writer, src Reader) (written int, err error) {
+	// A source that writes itself out, or a destination that reads for
+	// itself, does the whole copy without a buffer between them.
+	if wt, ok := src.(WriterTo); ok {
+		n, err := wt.WriteTo(dst)
+		return int(n), err
+	}
+	if rf, ok := dst.(ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		return int(n), err
+	}
 	buf := make([]byte, 4096)
 	for {
 		nr, rerr := src.Read(buf)
