@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,10 @@ type Request struct {
 
 	// RemoteAddr is the address the request came from, as "IP:port".
 	RemoteAddr string
+
+	// TLS is the state of the TLS connection the request came on, which
+	// for this library's servers is none: nil.
+	TLS *tls.ConnectionState
 
 	// RequestURI is the target of the request line as the client sent it.
 	RequestURI string

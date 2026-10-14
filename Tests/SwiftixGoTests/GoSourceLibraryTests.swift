@@ -191,7 +191,8 @@ struct GoSourceLibraryTests: GoTestHarness {
         #expect(header.contains("net/http.Header.Set"))
         #expect(!header.contains("net/http.ListenAndServe"))
         #expect(!header.contains { $0.contains("Server") || $0.contains("Client") })
-        #expect(!header.contains { $0.hasPrefix("net/url.") || $0.hasPrefix("io.") })
+        // Header brings its Write, which reaches io; not net/url.
+        #expect(!header.contains { $0.hasPrefix("net/url.") })
 
         let server = try functionNames(
             "http.ListenAndServe(\":80\", nil)", imports: ["net/http"])
@@ -223,7 +224,9 @@ struct GoSourceLibraryTests: GoTestHarness {
 
         let paths = units.map(\.importPath)
         #expect(paths.first == "main")
-        #expect(Set(paths.dropFirst()) == ["context", "io", "net/http", "net/url", "sort"])
+        #expect(
+            Set(paths.dropFirst())
+                == ["context", "crypto/tls", "io", "net/http", "net/url", "sort", "strings"])
         #expect(try #require(paths.firstIndex(of: "net/url")) < (try #require(paths.firstIndex(of: "net/http"))))
         #expect(try #require(paths.firstIndex(of: "io")) < (try #require(paths.firstIndex(of: "net/http"))))
         #expect(units.map(\.isLibrary) == [false] + Array(repeating: true, count: units.count - 1))

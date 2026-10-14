@@ -3,7 +3,10 @@
 // numbers and texts, which the run-time library reports.
 package syscall
 
-import "io/fs"
+import (
+	"errors"
+	"io/fs"
+)
 
 // An Errno is the error number of a failed system call.
 type Errno uintptr
@@ -126,6 +129,8 @@ func (e Errno) Is(target error) bool {
 		return e == EEXIST || e == ENOTEMPTY
 	case fs.ErrNotExist:
 		return e == ENOENT
+	case errors.ErrUnsupported:
+		return e == ENOSYS || e == ENOTSUP || e == EOPNOTSUPP
 	}
 	return false
 }

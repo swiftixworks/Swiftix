@@ -62,6 +62,9 @@ type Client struct {
 	// the response's body included; zero is no limit. A request that takes
 	// longer fails with an error whose Timeout method reports true.
 	Timeout time.Duration
+
+	// Transport sends each request; nil is DefaultTransport.
+	Transport RoundTripper
 }
 
 // DefaultClient is the Client that Get, Head, and Post use.
@@ -268,7 +271,7 @@ func (c *Client) do(req *Request, rc *requestCanceler) (*Response, error) {
 
 		reqs = append(reqs, req)
 		var err error
-		resp, err = send(req, rc)
+		resp, err = c.send(req, rc)
 		if err != nil {
 			if rc != nil {
 				err = rc.requestError(err, "exceeded while awaiting headers")
@@ -361,7 +364,24 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // send sends one request on a connection of its own and reads the header
 // of the response. The connection is closed when the body of the response
 // has been read to its end, or is closed.
-func send(req *Request, rc *requestCanceler) (*Response, error) {
+// send sends req through the client's transport: Transport's own path
+// watched by rc, or another RoundTripper's RoundTrip.
+func (c *Client) send(req *Request, rc *requestCanceler) (*Response, error) {
+	switch t := c.Transport.(type) {
+	case nil:
+		return send(req, rc, nil)
+	case *Transport:
+		return send(req, rc, t)
+	default:
+		resp, err := t.RoundTrip(req)
+		if resp == nil && err == nil {
+			return nil, errors.New("http: RoundTripper implementation (" + fmt.Sprintf("%T", t) + ") returned a nil *Response with a nil error")
+		}
+		return resp, err
+	}
+}
+
+func send(req *Request, rc *requestCanceler, t *Transport) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, errors.New("http: nil Request.URL")
@@ -412,7 +432,13 @@ func send(req *Request, rc *requestCanceler) (*Response, error) {
 		closeBody(req)
 		return nil, err
 	}
-	conn, err := net.Dial("tcp", hostname+":"+port)
+	var conn net.Conn
+	var err error
+	if t != nil && t.DialContext != nil {
+		conn, err = t.DialContext(req.Context(), "tcp", hostname+":"+port)
+	} else {
+		conn, err = net.Dial("tcp", hostname+":"+port)
+	}
 	if err != nil {
 		closeBody(req)
 		return nil, err

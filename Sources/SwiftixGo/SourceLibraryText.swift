@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "encoding", "encoding/base64", "encoding/binary", "encoding/json", "flag", "fmt", "hash", "hash/crc32", "hash/fnv", "io", "io/fs", "log", "math/bits", "math/rand", "mime", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "crypto/tls", "encoding", "encoding/base64", "encoding/binary", "encoding/json", "errors", "flag", "fmt", "hash", "hash/crc32", "hash/fnv", "io", "io/fs", "log", "math/bits", "math/rand", "mime", "net", "net/http", "net/http/httputil", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -50,6 +50,9 @@ enum GoSourceLibraryText {
             "parentCancelCtx", "removeChild", "stringer", "stringify", "timerCtx", "todoCtx",
             "value", "valueCtx", "withCancel", "withoutCancelCtx",
         ],
+        "crypto/tls": [
+            "ConnectionState", "VersionTLS10", "VersionTLS11", "VersionTLS12", "VersionTLS13",
+        ],
         "encoding": [
             "BinaryMarshaler", "BinaryUnmarshaler", "TextMarshaler", "TextUnmarshaler",
         ],
@@ -82,6 +85,9 @@ enum GoSourceLibraryText {
             "tokenArrayComma", "tokenArrayStart", "tokenArrayValue", "tokenObjectColon",
             "tokenObjectComma", "tokenObjectKey", "tokenObjectStart", "tokenObjectValue",
             "tokenTopValue", "unmarshal", "withContext",
+        ],
+        "errors": [
+            "ErrUnsupported",
         ],
         "flag": [
             "Arg", "Args", "Bool", "BoolFunc", "BoolVar", "CommandLine", "ContinueOnError",
@@ -186,30 +192,33 @@ enum GoSourceLibraryText {
             "typeFiles", "unhex", "upperhex", "writeQString",
         ],
         "net": [
-            "Addr", "AddrError", "Conn", "DNSError", "Dial", "DialTimeout", "ErrClosed", "Error",
-            "IP", "IPv4", "IPv4len", "IPv6len", "IPv6loopback", "IPv6unspecified", "IPv6zero",
-            "JoinHostPort", "Listen", "Listener", "OpError", "ParseIP", "ResolveTCPAddr",
-            "SplitHostPort", "TCPAddr", "TCPConn", "TCPListener", "UnknownNetworkError",
-            "checkNetwork", "codeAddrInUse", "codeClosed", "codeEOF", "codeError", "codeNoAddress",
-            "codeRefused", "codeReset", "codeTimedOut", "codeTimeout", "codeUnavailable", "conn",
-            "dialTCP", "errNetClosing", "hexDigit", "hexValue", "hostIPv4", "indexByte",
-            "isConnError", "isZeros", "lastIndexByte", "listenTCP", "netFD", "newTCPConn",
-            "parseIPv4", "parseIPv6", "parsePort", "readDeadline", "resolveTCPAddr", "temporary",
-            "timeout", "writeDeadline",
+            "Addr", "AddrError", "Conn", "DNSError", "Dial", "DialTimeout", "Dialer", "ErrClosed",
+            "Error", "IP", "IPv4", "IPv4len", "IPv6len", "IPv6loopback", "IPv6unspecified",
+            "IPv6zero", "JoinHostPort", "Listen", "Listener", "OpError", "ParseIP",
+            "ResolveTCPAddr", "SplitHostPort", "TCPAddr", "TCPConn", "TCPListener",
+            "UnknownNetworkError", "checkNetwork", "codeAddrInUse", "codeClosed", "codeEOF",
+            "codeError", "codeNoAddress", "codeRefused", "codeReset", "codeTimedOut", "codeTimeout",
+            "codeUnavailable", "conn", "dialTCP", "errCanceled", "errNetClosing", "errTimeout",
+            "hexDigit", "hexValue", "hostIPv4", "indexByte", "isConnError", "isZeros",
+            "lastIndexByte", "listenTCP", "mapErr", "netFD", "newTCPConn", "parseIPv4", "parseIPv6",
+            "parsePort", "readDeadline", "resolveTCPAddr", "temporary", "timeout", "timeoutError",
+            "writeDeadline",
         ],
         "net/http": [
-            "CanonicalHeaderKey", "Client", "ConnState", "DefaultClient", "DefaultMaxHeaderBytes",
-            "DefaultServeMux", "DetectContentType", "ErrAbortHandler", "ErrBodyNotAllowed",
-            "ErrBodyReadAfterClose", "ErrContentLength", "ErrHandlerTimeout", "ErrLineTooLong",
-            "ErrServerClosed", "ErrUseLastResponse", "Error", "Flusher", "Get", "Handle",
-            "HandleFunc", "Handler", "HandlerFunc", "Head", "Header", "ListenAndServe",
-            "MaxBytesError", "MaxBytesReader", "MethodConnect", "MethodDelete", "MethodGet",
-            "MethodHead", "MethodOptions", "MethodPatch", "MethodPost", "MethodPut", "MethodTrace",
-            "NewRequest", "NewRequestWithContext", "NewServeMux", "NoBody", "NotFound",
-            "NotFoundHandler", "ParseHTTPVersion", "Post", "PostForm", "Redirect",
-            "RedirectHandler", "Request", "Response", "ResponseWriter", "Serve", "ServeMux",
-            "Server", "ServerContextKey", "StateActive", "StateClosed", "StateHijacked",
-            "StateIdle", "StateNew", "StatusAccepted", "StatusAlreadyReported", "StatusBadGateway",
+            "CanonicalHeaderKey", "Client", "CloseNotifier", "ConnState", "DefaultClient",
+            "DefaultMaxHeaderBytes", "DefaultServeMux", "DefaultTransport", "DetectContentType",
+            "ErrAbortHandler", "ErrBodyNotAllowed", "ErrBodyReadAfterClose", "ErrContentLength",
+            "ErrHandlerTimeout", "ErrLineTooLong", "ErrNotSupported", "ErrServerClosed",
+            "ErrUseLastResponse", "Error", "Flusher", "Get", "Handle", "HandleFunc", "Handler",
+            "HandlerFunc", "Head", "Header", "Hijacker", "ListenAndServe", "MaxBytesError",
+            "MaxBytesReader", "MethodConnect", "MethodDelete", "MethodGet", "MethodHead",
+            "MethodOptions", "MethodPatch", "MethodPost", "MethodPut", "MethodTrace", "NewRequest",
+            "NewRequestWithContext", "NewResponseController", "NewServeMux", "NoBody", "NotFound",
+            "NotFoundHandler", "ParseHTTPVersion", "Post", "PostForm", "ProtocolError",
+            "ProxyFromEnvironment", "Redirect", "RedirectHandler", "Request", "Response",
+            "ResponseController", "ResponseWriter", "RoundTripper", "Serve", "ServeMux", "Server",
+            "ServerContextKey", "StateActive", "StateClosed", "StateHijacked", "StateIdle",
+            "StateNew", "StatusAccepted", "StatusAlreadyReported", "StatusBadGateway",
             "StatusBadRequest", "StatusConflict", "StatusContinue", "StatusCreated",
             "StatusEarlyHints", "StatusExpectationFailed", "StatusFailedDependency",
             "StatusForbidden", "StatusFound", "StatusGatewayTimeout", "StatusGone",
@@ -229,28 +238,40 @@ enum GoSourceLibraryText {
             "StatusUnauthorized", "StatusUnavailableForLegalReasons", "StatusUnprocessableEntity",
             "StatusUnsupportedMediaType", "StatusUpgradeRequired", "StatusUseProxy",
             "StatusVariantAlsoNegotiates", "StripPrefix", "TimeFormat", "TimeoutHandler",
-            "TrailerPrefix", "badRequestError", "badStringError", "body", "bodyAllowedForStatus",
-            "bodyEOFSignal", "bodySignal", "bufferBeforeChunkingSize", "cleanPath", "cloneValues",
-            "closeBody", "closeConn", "combineRelationships", "commonPath", "compareSegments",
-            "conn", "connReader", "connWriteBufferSize", "contextKey", "deadlineError",
-            "defaultMaxHeaderBytes", "describeConflict", "differencePath", "discardBody",
-            "disjoint", "equivalent", "errDeadline", "errMissingHost", "errTooLarge",
-            "errTrailerEOF", "errorHeaders", "exactMatch", "expectContinueReader",
-            "globalOptionsHandler", "hasToken", "hexEscapeNonASCII", "htmlEscape",
-            "inverseRelationship", "isAbortHandler", "isProtocolSwitchResponse", "isSpace",
-            "isTokenBoundary", "isUnsupportedTEError", "isValidWildcardName", "matchMethodAndPath",
-            "matchPath", "matchingPath", "matchingSegment", "maxBytesReader", "maxFormSize",
-            "maxPostHandlerReadBytes", "moreGeneral", "moreSpecific", "muxEntry", "newConnReader",
-            "newRequest", "newRequestCanceler", "noBody", "outgoingLength", "overlaps",
-            "parseContentLength", "parseHTTPVersion", "parseHexUint", "parsePattern",
+            "TrailerPrefix", "Transport", "badRequestError", "badStringError", "body",
+            "bodyAllowedForStatus", "bodyEOFSignal", "bodySignal", "bufferBeforeChunkingSize",
+            "chunkedWriter", "cleanPath", "cloneValues", "closeBody", "closeConn",
+            "combineRelationships", "commonPath", "compareSegments", "conn", "connReader",
+            "connWriteBufferSize", "contextKey", "deadlineError", "defaultMaxHeaderBytes",
+            "describeConflict", "differencePath", "discardBody", "disjoint", "equivalent",
+            "errDeadline", "errMissingHost", "errNotSupported", "errTooLarge", "errTrailerEOF",
+            "errorHeaders", "exactMatch", "expectContinueReader", "globalOptionsHandler",
+            "hasToken", "headerNewlineToSpace", "hexEscapeNonASCII", "htmlEscape",
+            "inverseRelationship", "isAbortHandler", "isChunked", "isIdentity",
+            "isProtocolSwitchResponse", "isSpace", "isTokenBoundary", "isUnsupportedTEError",
+            "isValidWildcardName", "matchMethodAndPath", "matchPath", "matchingPath",
+            "matchingSegment", "maxBytesReader", "maxFormSize", "maxPostHandlerReadBytes",
+            "moreGeneral", "moreSpecific", "muxEntry", "newConnReader", "newRequest",
+            "newRequestCanceler", "newResponseTransferWriter", "noBody", "outgoingLength",
+            "overlaps", "parseContentLength", "parseHTTPVersion", "parseHexUint", "parsePattern",
             "parsePostForm", "parseRequest", "pathClean", "pathUnescape", "pattern", "pendingRead",
-            "protocolError", "readRequest", "readResponse", "redirectHandler", "refererForURL",
-            "relationship", "requestBody", "requestCanceler", "requestPath", "response", "segment",
+            "protocolError", "readCloser", "readRequest", "readResponse", "redirectHandler",
+            "refererForURL", "relationship", "requestBody", "requestCanceler", "requestPath",
+            "respExcludeHeader", "response", "responseTransferWriter", "rwUnwrapper", "segment",
             "send", "serverCtx", "shouldClose", "shutdownPollIntervalMax", "splitHostPort",
             "splitPath", "statusError", "statusLine", "stripHostPort", "stripPassword",
             "timeoutError", "timeoutHandler", "timeoutWriter", "trackedListener", "transfer",
             "transportError", "trimOWS", "trimString", "unsupportedTEError", "urlErrorOp",
             "validHeaderKey", "validHostHeader", "valuesContainToken", "writeRequest",
+        ],
+        "net/http/httputil": [
+            "BufferPool", "NewSingleHostReverseProxy", "ProxyRequest", "ReverseProxy",
+            "asciiEqualFold", "asciiIsPrint", "cleanQueryParams", "copyHeader",
+            "headerValueContainsToken", "headerValuesContainsToken", "hopHeaders", "inOurTests",
+            "isASCIISpace", "isOWS", "ishex", "joinURLPath", "lower", "lowerASCII",
+            "maxLatencyWriter", "removeHopByHopHeaders", "rewriteRequestURL",
+            "shouldPanicOnCopyError", "singleJoiningSlash", "switchProtocolCopier", "tokenEqual",
+            "trimOWS", "trimString", "upgradeType", "utf8RuneSelf",
         ],
         "net/url": [
             "Error", "EscapeError", "InvalidHostError", "Parse", "ParseQuery", "ParseRequestURI",
@@ -367,10 +388,12 @@ enum GoSourceLibraryText {
         case "container/list": return Self.containerList
         case "container/ring": return Self.containerRing
         case "context": return Self.context
+        case "crypto/tls": return Self.cryptoTls
         case "encoding": return Self.encoding
         case "encoding/base64": return Self.encodingBase64
         case "encoding/binary": return Self.encodingBinary
         case "encoding/json": return Self.encodingJson
+        case "errors": return Self.errors
         case "flag": return Self.flag
         case "fmt": return Self.fmt
         case "hash": return Self.hash
@@ -384,6 +407,7 @@ enum GoSourceLibraryText {
         case "mime": return Self.mime
         case "net": return Self.net
         case "net/http": return Self.netHttp
+        case "net/http/httputil": return Self.netHttpHttputil
         case "net/url": return Self.netUrl
         case "os": return Self.os
         case "os/signal": return Self.osSignal
@@ -3627,6 +3651,76 @@ func value(c Context, key any) any {
 }
 
 extension GoSourceLibraryText {
+    static let cryptoTls: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/crypto/tls/tls.go",
+            text: #"""
+// Package tls is the part of Go's crypto/tls that a program meets without
+// making a connection of TLS: the state of one, which this library's
+// servers and clients never have, so a request's TLS is always nil.
+// Connections, configurations, and certificates are not provided.
+package tls
+
+// ConnectionState records basic TLS details about the connection. It has
+// Go's fields but those of the certificates (PeerCertificates and
+// VerifiedChains), which need crypto/x509.
+type ConnectionState struct {
+	// Version is the TLS version used by the connection (e.g. VersionTLS12).
+	Version uint16
+
+	// HandshakeComplete is true if the handshake has concluded.
+	HandshakeComplete bool
+
+	// DidResume is true if this connection was successfully resumed from a
+	// previous session with a session ticket or similar mechanism.
+	DidResume bool
+
+	// CipherSuite is the cipher suite negotiated for the connection (e.g.
+	// TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_AES_128_GCM_SHA256).
+	CipherSuite uint16
+
+	// NegotiatedProtocol is the application protocol negotiated with ALPN.
+	NegotiatedProtocol string
+
+	// NegotiatedProtocolIsMutual used to indicate a mutual NPN negotiation.
+	//
+	// Deprecated: this value is always true.
+	NegotiatedProtocolIsMutual bool
+
+	// ServerName is the value of the Server Name Indication extension sent by
+	// the client. It's available both on the server and on the client side.
+	ServerName string
+
+	// SignedCertificateTimestamps is a list of SCTs provided by the peer
+	// through the TLS handshake for the leaf certificate, if any.
+	SignedCertificateTimestamps [][]byte
+
+	// OCSPResponse is a stapled Online Certificate Status Protocol (OCSP)
+	// response provided by the peer for the leaf certificate, if any.
+	OCSPResponse []byte
+
+	// TLSUnique contains the "tls-unique" channel binding value (see RFC 5929,
+	// Section 3).
+	TLSUnique []byte
+
+	// ECHAccepted indicates if Encrypted Client Hello was offered by the client
+	// and accepted by the server.
+	ECHAccepted bool
+}
+
+// The versions of TLS, as Go numbers them.
+const (
+	VersionTLS10 = 0x0301
+	VersionTLS11 = 0x0302
+	VersionTLS12 = 0x0303
+	VersionTLS13 = 0x0304
+)
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
     static let encoding: [GoSourceFile] = [
         GoSourceFile(
             path: "$GOROOT/src/encoding/encoding.go",
@@ -5970,6 +6064,37 @@ func isSpace(c byte) bool {
 func (dec *Decoder) InputOffset() int64 {
 	return dec.scanned + int64(dec.scanp)
 }
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let errors: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/errors/errors.go",
+            text: #"""
+// Package errors is the part of errors that is written in Go. New, Is, As,
+// Unwrap, and Join belong to the run-time library, which this file imports
+// under the same path.
+package errors
+
+import "errors"
+
+// ErrUnsupported indicates that a requested operation cannot be performed,
+// because it is unsupported. For example, a call to [os.Link] when using a
+// file system that does not support hard links.
+//
+// Functions and methods should not return this error but should instead
+// return an error including appropriate context that satisfies
+//
+//	errors.Is(err, errors.ErrUnsupported)
+//
+// either by directly wrapping ErrUnsupported or by implementing an [Is] method.
+//
+// Functions and methods should document the cases in which an error
+// wrapping this will be returned.
+var ErrUnsupported = errors.New("unsupported operation")
 
 """#),
     ]
@@ -13600,6 +13725,87 @@ func initMimeForTests() map[string]string {
 extension GoSourceLibraryText {
     static let net: [GoSourceFile] = [
         GoSourceFile(
+            path: "$GOROOT/src/net/dialer.go",
+            text: #"""
+package net
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// A Dialer contains options for connecting to an address. It has Go's
+// fields; this library dials TCP over IPv4 at once, so Timeout, Deadline,
+// LocalAddr, DualStack, FallbackDelay, KeepAlive, and Control change
+// nothing.
+//
+// The zero value for each field is equivalent to dialing
+// without that option. Dialing with the zero value of Dialer
+// is therefore equivalent to just calling the [Dial] function.
+//
+// It is safe to call Dialer's methods concurrently.
+type Dialer struct {
+	Timeout       time.Duration
+	Deadline      time.Time
+	LocalAddr     Addr
+	DualStack     bool
+	FallbackDelay time.Duration
+	KeepAlive     time.Duration
+}
+
+// errCanceled is Go's error of a dial whose context was canceled.
+var errCanceled = errors.New("operation was canceled")
+
+// mapErr maps from the context errors to the historical internal net
+// error values.
+func mapErr(err error) error {
+	switch err {
+	case context.Canceled:
+		return errCanceled
+	case context.DeadlineExceeded:
+		return errTimeout
+	default:
+		return err
+	}
+}
+
+// Dial connects to the address on the named network.
+func (d *Dialer) Dial(network, address string) (Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
+// DialContext connects to the address on the named network using
+// the provided context. A context that is done before the connection is
+// made ends the dial with Go's error for it.
+func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn, error) {
+	if ctx == nil {
+		panic("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: mapErr(err)}
+	}
+	return Dial(network, address)
+}
+
+// errTimeout exists to return the historical "i/o timeout" string
+// for context.DeadlineExceeded. See mapErr.
+// It is also used when Dialer.Deadline is exceeded.
+// error.Is(errTimeout, context.DeadlineExceeded) returns true.
+var errTimeout error = &timeoutError{}
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
+func (e *timeoutError) Is(err error) bool {
+	return err == context.DeadlineExceeded
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/ip.go",
             text: #"""
 package net
@@ -14880,6 +15086,9 @@ type Client struct {
 	// the response's body included; zero is no limit. A request that takes
 	// longer fails with an error whose Timeout method reports true.
 	Timeout time.Duration
+
+	// Transport sends each request; nil is DefaultTransport.
+	Transport RoundTripper
 }
 
 // DefaultClient is the Client that Get, Head, and Post use.
@@ -15086,7 +15295,7 @@ func (c *Client) do(req *Request, rc *requestCanceler) (*Response, error) {
 
 		reqs = append(reqs, req)
 		var err error
-		resp, err = send(req, rc)
+		resp, err = c.send(req, rc)
 		if err != nil {
 			if rc != nil {
 				err = rc.requestError(err, "exceeded while awaiting headers")
@@ -15179,7 +15388,24 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // send sends one request on a connection of its own and reads the header
 // of the response. The connection is closed when the body of the response
 // has been read to its end, or is closed.
-func send(req *Request, rc *requestCanceler) (*Response, error) {
+// send sends req through the client's transport: Transport's own path
+// watched by rc, or another RoundTripper's RoundTrip.
+func (c *Client) send(req *Request, rc *requestCanceler) (*Response, error) {
+	switch t := c.Transport.(type) {
+	case nil:
+		return send(req, rc, nil)
+	case *Transport:
+		return send(req, rc, t)
+	default:
+		resp, err := t.RoundTrip(req)
+		if resp == nil && err == nil {
+			return nil, errors.New("http: RoundTripper implementation (" + fmt.Sprintf("%T", t) + ") returned a nil *Response with a nil error")
+		}
+		return resp, err
+	}
+}
+
+func send(req *Request, rc *requestCanceler, t *Transport) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, errors.New("http: nil Request.URL")
@@ -15230,7 +15456,13 @@ func send(req *Request, rc *requestCanceler) (*Response, error) {
 		closeBody(req)
 		return nil, err
 	}
-	conn, err := net.Dial("tcp", hostname+":"+port)
+	var conn net.Conn
+	var err error
+	if t != nil && t.DialContext != nil {
+		conn, err = t.DialContext(req.Context(), "tcp", hostname+":"+port)
+	} else {
+		conn, err = net.Dial("tcp", hostname+":"+port)
+	}
 	if err != nil {
 		closeBody(req)
 		return nil, err
@@ -15963,12 +16195,94 @@ const (
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/net/http/protocol.go",
+            text: #"""
+package http
+
+import (
+	"bufio"
+	"errors"
+	"net"
+	"time"
+)
+
+// ProtocolError represents an HTTP protocol error.
+//
+// Deprecated: Not all errors in the http package related to protocol errors
+// are of type ProtocolError.
+type ProtocolError struct {
+	ErrorString string
+}
+
+func (pe *ProtocolError) Error() string { return pe.ErrorString }
+
+// Is lets http.ErrNotSupported match errors.ErrUnsupported.
+func (pe *ProtocolError) Is(err error) bool {
+	return pe == ErrNotSupported && err == errors.ErrUnsupported
+}
+
+// ErrNotSupported indicates that a feature is not supported.
+//
+// It is returned by ResponseController methods to indicate that
+// the handler does not support the method, and by the Push method
+// of Pusher implementations to indicate that HTTP/2 Push support
+// is not available.
+var ErrNotSupported = &ProtocolError{"feature not supported"}
+
+// The Hijacker interface is implemented by ResponseWriters that allow
+// an HTTP handler to take over the connection. The server of this library
+// does not: its ResponseController's Hijack is ErrNotSupported.
+type Hijacker interface {
+	// Hijack lets the caller take over the connection.
+	Hijack() (net.Conn, *bufio.ReadWriter, error)
+}
+
+// The CloseNotifier interface is implemented by ResponseWriters which
+// allow detecting when the underlying connection has gone away.
+//
+// Deprecated: the CloseNotifier interface predates Go's context package.
+// New code should use [Request.Context] instead.
+type CloseNotifier interface {
+	// CloseNotify returns a channel that receives at most a
+	// single value (true) when the client connection has gone
+	// away.
+	CloseNotify() <-chan bool
+}
+
+// FlushError is Flush that reports what stopped the response being sent.
+func (w *response) FlushError() error {
+	w.Flush()
+	return w.conn.werr
+}
+
+// SetReadDeadline sets the deadline for reading the request's body.
+func (w *response) SetReadDeadline(deadline time.Time) error {
+	return w.conn.rwc.SetReadDeadline(deadline)
+}
+
+// SetWriteDeadline sets the deadline for sending the response; the zero
+// time is none.
+func (w *response) SetWriteDeadline(deadline time.Time) error {
+	w.conn.hasWriteDeadline = !deadline.IsZero()
+	w.conn.writeDeadline = deadline
+	return nil
+}
+
+// EnableFullDuplex lets the handler read the request body while writing
+// the response, which this server does anyway.
+func (w *response) EnableFullDuplex() error {
+	return nil
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/http/request.go",
             text: #"""
 package http
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -16033,6 +16347,10 @@ type Request struct {
 
 	// RemoteAddr is the address the request came from, as "IP:port".
 	RemoteAddr string
+
+	// TLS is the state of the TLS connection the request came on, which
+	// for this library's servers is none: nil.
+	TLS *tls.ConnectionState
 
 	// RequestURI is the target of the request line as the client sent it.
 	RequestURI string
@@ -16413,6 +16731,547 @@ func parseContentLength(values []string) (int, error) {
 		return 0, badStringError("bad Content-Length", cl)
 	}
 	return n, nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/net/http/response_write.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package http
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Write writes a header in wire format.
+func (h Header) Write(w io.Writer) error {
+	return h.writeSubset(w, nil)
+}
+
+// WriteSubset writes a header in wire format.
+// If exclude is not nil, keys where exclude[key] == true are not written.
+// Keys are not canonicalized before checking the exclude map.
+func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
+	return h.writeSubset(w, exclude)
+}
+
+var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
+
+func (h Header) writeSubset(w io.Writer, exclude map[string]bool) error {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		if !exclude[k] {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !validHeaderKey(key) {
+			// This could be an error. In the common case of
+			// writing response headers, however, we have no good
+			// way to provide the error back to the server
+			// handler, so just drop invalid headers instead.
+			continue
+		}
+		for _, v := range h[key] {
+			v = headerNewlineToSpace.Replace(v)
+			v = strings.Trim(v, " \t\n\r")
+			if _, err := io.WriteString(w, key+": "+v+"\r\n"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+var respExcludeHeader = map[string]bool{
+	"Content-Length":    true,
+	"Transfer-Encoding": true,
+	"Trailer":           true,
+}
+
+// ProtoAtLeast reports whether the HTTP protocol used
+// in the response is at least major.minor.
+func (r *Response) ProtoAtLeast(major, minor int) bool {
+	return r.ProtoMajor > major ||
+		r.ProtoMajor == major && r.ProtoMinor >= minor
+}
+
+// Write writes r to w in the HTTP/1.x server response format,
+// including the status line, headers, body, and optional trailer.
+//
+// This method consults the following fields of the response r:
+//
+//	StatusCode
+//	ProtoMajor
+//	ProtoMinor
+//	Request.Method
+//	TransferEncoding
+//	Trailer
+//	Body
+//	ContentLength
+//	Header, values for non-canonical keys will have unpredictable behavior
+//
+// The Response Body is closed after it is sent.
+func (r *Response) Write(w io.Writer) error {
+	// Status line
+	text := r.Status
+	if text == "" {
+		text = StatusText(r.StatusCode)
+		if text == "" {
+			text = "status code " + strconv.Itoa(r.StatusCode)
+		}
+	} else {
+		// Just to reduce stutter, if user set r.Status to "200 OK" and StatusCode to 200.
+		// Not important.
+		text = strings.TrimPrefix(text, strconv.Itoa(r.StatusCode)+" ")
+	}
+
+	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %03d %s\r\n", r.ProtoMajor, r.ProtoMinor, r.StatusCode, text); err != nil {
+		return err
+	}
+
+	// Clone it, so we can modify r1 as needed.
+	r1 := new(Response)
+	*r1 = *r
+	if r1.ContentLength == 0 && r1.Body != nil {
+		// Is it actually 0 length? Or just unknown?
+		var buf [1]byte
+		n, err := r1.Body.Read(buf[:])
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			// Reset it to a known zero reader, in case underlying one
+			// is unhappy being read repeatedly.
+			r1.Body = NoBody
+		} else {
+			r1.ContentLength = -1
+			// Go writes struct{ io.Reader; io.Closer } in place here.
+			r1.Body = readCloser{
+				io.MultiReader(bytes.NewReader(buf[:1]), r.Body),
+				r.Body,
+			}
+		}
+	}
+	// If we're sending a non-chunked HTTP/1.1 response without a
+	// content-length, the only way to do that is the old HTTP/1.0
+	// way, by noting the EOF with a connection close, so we need
+	// to set Close.
+	if r1.ContentLength == -1 && !r1.Close && r1.ProtoAtLeast(1, 1) && !isChunked(r1.TransferEncoding) && !r1.Uncompressed {
+		r1.Close = true
+	}
+
+	// Process Body,ContentLength,Close,Trailer
+	tw := newResponseTransferWriter(r1)
+	if err := tw.writeHeader(w); err != nil {
+		return err
+	}
+
+	// Rest of header
+	if err := r.Header.WriteSubset(w, respExcludeHeader); err != nil {
+		return err
+	}
+
+	// contentLengthAlreadySent may have been already sent for
+	// POST/PUT requests, even if zero length. See Issue 8180.
+	contentLengthAlreadySent := tw.shouldSendContentLength()
+	if r1.ContentLength == 0 && !isChunked(r1.TransferEncoding) && !contentLengthAlreadySent && bodyAllowedForStatus(r.StatusCode) {
+		if _, err := io.WriteString(w, "Content-Length: 0\r\n"); err != nil {
+			return err
+		}
+	}
+
+	// End-of-header
+	if _, err := io.WriteString(w, "\r\n"); err != nil {
+		return err
+	}
+
+	// Write body and trailer
+	return tw.writeBody(w)
+}
+
+// responseTransferWriter is the part of Go's transferWriter that writes a
+// response.
+type responseTransferWriter struct {
+	method           string
+	body             io.Reader
+	bodyCloser       io.Closer
+	responseToHEAD   bool
+	contentLength    int64
+	close            bool
+	transferEncoding []string
+	header           Header
+	trailer          Header
+}
+
+func newResponseTransferWriter(rr *Response) *responseTransferWriter {
+	t := &responseTransferWriter{}
+	if rr.Request != nil {
+		t.method = rr.Request.Method
+	}
+	t.body = rr.Body
+	t.bodyCloser = rr.Body
+	t.contentLength = rr.ContentLength
+	t.close = rr.Close
+	t.transferEncoding = rr.TransferEncoding
+	t.header = rr.Header
+	t.trailer = rr.Trailer
+	t.responseToHEAD = t.method == "HEAD"
+	if rr.Body == nil {
+		t.body = nil
+		t.bodyCloser = nil
+	}
+
+	// Sanitize Body,ContentLength,TransferEncoding
+	if t.responseToHEAD {
+		t.body = nil
+		if isChunked(t.transferEncoding) {
+			t.contentLength = -1
+		}
+	} else {
+		if !rr.ProtoAtLeast(1, 1) || t.body == nil {
+			t.transferEncoding = nil
+		}
+		if isChunked(t.transferEncoding) {
+			t.contentLength = -1
+		} else if t.body == nil { // no chunking, no body
+			t.contentLength = 0
+		}
+	}
+
+	// Sanitize Trailer
+	if !isChunked(t.transferEncoding) {
+		t.trailer = nil
+	}
+	return t
+}
+
+func (t *responseTransferWriter) shouldSendContentLength() bool {
+	if isChunked(t.transferEncoding) {
+		return false
+	}
+	if t.contentLength > 0 {
+		return true
+	}
+	if t.contentLength < 0 {
+		return false
+	}
+	// Many servers expect a Content-Length for these methods
+	if t.method == "POST" || t.method == "PUT" || t.method == "PATCH" {
+		return true
+	}
+	if t.contentLength == 0 && isIdentity(t.transferEncoding) {
+		if t.method == "GET" || t.method == "HEAD" {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func (t *responseTransferWriter) writeHeader(w io.Writer) error {
+	if t.close && !hasToken(t.header.get("Connection"), "close") {
+		if _, err := io.WriteString(w, "Connection: close\r\n"); err != nil {
+			return err
+		}
+	}
+
+	// Write Content-Length and/or Transfer-Encoding whose values are a
+	// function of the sanitized field triple (Body, ContentLength,
+	// TransferEncoding).
+	if t.shouldSendContentLength() {
+		if _, err := io.WriteString(w, "Content-Length: "+strconv.FormatInt(t.contentLength, 10)+"\r\n"); err != nil {
+			return err
+		}
+	} else if isChunked(t.transferEncoding) {
+		if _, err := io.WriteString(w, "Transfer-Encoding: chunked\r\n"); err != nil {
+			return err
+		}
+	}
+	if t.trailer != nil {
+		keys := make([]string, 0, len(t.trailer))
+		for k := range t.trailer {
+			k = CanonicalHeaderKey(k)
+			switch k {
+			case "Transfer-Encoding", "Trailer", "Content-Length":
+				return badStringError("invalid Trailer key", k)
+			}
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 {
+			sort.Strings(keys)
+			// TODO: could do better allocation-wise here, but trailers are rare,
+			// so being lazy for now.
+			if _, err := io.WriteString(w, "Trailer: "+strings.Join(keys, ",")+"\r\n"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t *responseTransferWriter) writeBody(w io.Writer) (err error) {
+	var ncopy int64
+	closed := false
+	defer func() {
+		if closed || t.bodyCloser == nil {
+			return
+		}
+		if closeErr := t.bodyCloser.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if !t.responseToHEAD && t.body != nil {
+		if isChunked(t.transferEncoding) {
+			cw := &chunkedWriter{w}
+			_, err = io.Copy(cw, t.body)
+			if err == nil {
+				err = cw.Close()
+			}
+		} else if t.contentLength == -1 {
+			ncopy, err = io.Copy(w, t.body)
+		} else {
+			ncopy, err = io.Copy(w, io.LimitReader(t.body, t.contentLength))
+			if err != nil {
+				return err
+			}
+			var nextra int64
+			nextra, err = io.Copy(io.Discard, t.body)
+			ncopy += nextra
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if t.bodyCloser != nil {
+		closed = true
+		if err := t.bodyCloser.Close(); err != nil {
+			return err
+		}
+	}
+
+	if !t.responseToHEAD && t.contentLength != -1 && t.contentLength != ncopy {
+		return fmt.Errorf("http: ContentLength=%d with Body length %d",
+			t.contentLength, ncopy)
+	}
+
+	if isChunked(t.transferEncoding) {
+		// Write Trailer header
+		if t.trailer != nil {
+			if err := t.trailer.Write(w); err != nil {
+				return err
+			}
+		}
+		// Last chunk, empty trailer
+		_, err = io.WriteString(w, "\r\n")
+	}
+	return err
+}
+
+// isChunked checks whether chunked is part of the encodings stack.
+func isChunked(te []string) bool { return len(te) > 0 && te[0] == "chunked" }
+
+// isIdentity checks whether the encoding stack is a single "identity".
+func isIdentity(te []string) bool { return len(te) == 1 && te[0] == "identity" }
+
+// chunkedWriter writes in the chunked transfer encoding of HTTP/1.1.
+type chunkedWriter struct {
+	w io.Writer
+}
+
+func (cw *chunkedWriter) Write(data []byte) (n int, err error) {
+	// Don't send 0-length data. It looks like EOF for chunked encoding.
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if _, err = fmt.Fprintf(cw.w, "%x\r\n", len(data)); err != nil {
+		return 0, err
+	}
+	if n, err = cw.w.Write(data); err != nil {
+		return
+	}
+	if n != len(data) {
+		err = io.ErrShortWrite
+		return
+	}
+	if _, err = io.WriteString(cw.w, "\r\n"); err != nil {
+		return
+	}
+	return
+}
+
+func (cw *chunkedWriter) Close() error {
+	_, err := io.WriteString(cw.w, "0\r\n")
+	return err
+}
+
+// readCloser is a reader and the closer that goes with it.
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/net/http/responsecontroller.go",
+            text: #"""
+// Copyright 2022 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package http
+
+import (
+	"bufio"
+	"fmt"
+	"net"
+	"time"
+)
+
+// A ResponseController is used by an HTTP handler to control the response.
+//
+// A ResponseController may not be used after the [Handler.ServeHTTP] method has returned.
+type ResponseController struct {
+	rw ResponseWriter
+}
+
+// NewResponseController creates a [ResponseController] for a request.
+//
+// The ResponseWriter should be the original value passed to the [Handler.ServeHTTP] method,
+// or have an Unwrap method returning the original ResponseWriter.
+//
+// If the ResponseWriter implements any of the following methods, the ResponseController
+// will call them as appropriate:
+//
+//	Flush()
+//	FlushError() error // alternative Flush returning an error
+//	Hijack() (net.Conn, *bufio.ReadWriter, error)
+//	SetReadDeadline(deadline time.Time) error
+//	SetWriteDeadline(deadline time.Time) error
+//	EnableFullDuplex() error
+//
+// If the ResponseWriter does not support a method, ResponseController returns
+// an error matching [ErrNotSupported].
+func NewResponseController(rw ResponseWriter) *ResponseController {
+	return &ResponseController{rw}
+}
+
+type rwUnwrapper interface {
+	Unwrap() ResponseWriter
+}
+
+// Flush flushes buffered data to the client.
+func (c *ResponseController) Flush() error {
+	rw := c.rw
+	for {
+		switch t := rw.(type) {
+		case interface{ FlushError() error }:
+			return t.FlushError()
+		case Flusher:
+			t.Flush()
+			return nil
+		case rwUnwrapper:
+			rw = t.Unwrap()
+		default:
+			return errNotSupported()
+		}
+	}
+}
+
+// Hijack lets the caller take over the connection.
+// See the Hijacker interface for details.
+func (c *ResponseController) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	rw := c.rw
+	for {
+		switch t := rw.(type) {
+		case Hijacker:
+			return t.Hijack()
+		case rwUnwrapper:
+			rw = t.Unwrap()
+		default:
+			return nil, nil, errNotSupported()
+		}
+	}
+}
+
+// SetReadDeadline sets the deadline for reading the entire request, including the body.
+// Reads from the request body after the deadline has been exceeded will return an error.
+// A zero value means no deadline.
+//
+// Setting the read deadline after it has been exceeded will not extend it.
+func (c *ResponseController) SetReadDeadline(deadline time.Time) error {
+	rw := c.rw
+	for {
+		switch t := rw.(type) {
+		case interface{ SetReadDeadline(time.Time) error }:
+			return t.SetReadDeadline(deadline)
+		case rwUnwrapper:
+			rw = t.Unwrap()
+		default:
+			return errNotSupported()
+		}
+	}
+}
+
+// SetWriteDeadline sets the deadline for writing the response.
+// Writes to the response body after the deadline has been exceeded will not block,
+// but may succeed if the data has been buffered.
+// A zero value means no deadline.
+//
+// Setting the write deadline after it has been exceeded will not extend it.
+func (c *ResponseController) SetWriteDeadline(deadline time.Time) error {
+	rw := c.rw
+	for {
+		switch t := rw.(type) {
+		case interface{ SetWriteDeadline(time.Time) error }:
+			return t.SetWriteDeadline(deadline)
+		case rwUnwrapper:
+			rw = t.Unwrap()
+		default:
+			return errNotSupported()
+		}
+	}
+}
+
+// EnableFullDuplex indicates that the request handler will interleave reads from [Request.Body]
+// with writes to the [ResponseWriter].
+//
+// For HTTP/1 requests, the Go HTTP server by default consumes any unread portion of
+// the request body before beginning to write the response, preventing handlers from
+// concurrently reading from the request and writing the response.
+// Calling EnableFullDuplex disables this behavior and permits handlers to continue to read
+// from the request while concurrently writing the response.
+//
+// For HTTP/2 requests, the Go HTTP server always permits concurrent reads and responses.
+func (c *ResponseController) EnableFullDuplex() error {
+	rw := c.rw
+	for {
+		switch t := rw.(type) {
+		case interface{ EnableFullDuplex() error }:
+			return t.EnableFullDuplex()
+		case rwUnwrapper:
+			rw = t.Unwrap()
+		default:
+			return errNotSupported()
+		}
+	}
+}
+
+// errNotSupported returns an error that Is ErrNotSupported,
+// but is not == to it.
+func errNotSupported() error {
+	return fmt.Errorf("%w", ErrNotSupported)
 }
 
 """#),
@@ -20100,6 +20959,1065 @@ func (t *transfer) trailerKeys() (Header, error) {
 		return nil, nil
 	}
 	return trailer, nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/net/http/transport.go",
+            text: #"""
+package http
+
+import (
+	"context"
+	"net"
+	"net/url"
+	"time"
+)
+
+// RoundTripper is an interface representing the ability to execute a
+// single HTTP transaction, obtaining the [Response] for a given [Request].
+//
+// A RoundTripper must be safe for concurrent use by multiple
+// goroutines.
+type RoundTripper interface {
+	// RoundTrip executes a single HTTP transaction, returning
+	// a Response for the provided Request.
+	//
+	// RoundTrip should not attempt to interpret the response. In
+	// particular, RoundTrip must return err == nil if it obtained
+	// a response, regardless of the response's HTTP status code.
+	// A non-nil err should be reserved for failure to obtain a
+	// response. Similarly, RoundTrip should not attempt to
+	// handle higher-level protocol details such as redirects,
+	// authentication, or cookies.
+	RoundTrip(*Request) (*Response, error)
+}
+
+// DefaultTransport is the default implementation of [Transport] and is
+// used by [DefaultClient].
+var DefaultTransport RoundTripper = &Transport{
+	Proxy:                 ProxyFromEnvironment,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
+// Transport is an implementation of [RoundTripper] that sends a request on
+// a connection of its own and reads the response. It has Go's fields; this
+// library uses DialContext and keeps no idle connections, and the others
+// change nothing: there is no proxy, TLS, or HTTP/2.
+type Transport struct {
+	// Proxy specifies a function to return a proxy for a given
+	// Request. This library connects to the host of the request.
+	Proxy func(*Request) (*url.URL, error)
+
+	// DialContext specifies the dial function for creating unencrypted TCP
+	// connections. If DialContext is nil, the transport dials using
+	// package net.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	TLSHandshakeTimeout    time.Duration
+	DisableKeepAlives      bool
+	DisableCompression     bool
+	MaxIdleConns           int
+	MaxIdleConnsPerHost    int
+	MaxConnsPerHost        int
+	IdleConnTimeout        time.Duration
+	ResponseHeaderTimeout  time.Duration
+	ExpectContinueTimeout  time.Duration
+	MaxResponseHeaderBytes int64
+	WriteBufferSize        int
+	ReadBufferSize         int
+	ForceAttemptHTTP2      bool
+}
+
+// RoundTrip implements the [RoundTripper] interface.
+func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+	rc := newRequestCanceler(req.ctx, 0)
+	resp, err := send(req, rc, t)
+	if rc != nil {
+		if es, ok := bodySignal(resp); ok && err == nil {
+			// The body is read under the same watch.
+			es.cancel = rc
+		} else {
+			rc.finish()
+		}
+	}
+	return resp, err
+}
+
+// CloseIdleConnections closes any connections which were previously
+// connected from previous requests but are now sitting idle in a
+// "keep-alive" state. It does not interrupt any connections currently in
+// use. This transport keeps none.
+func (t *Transport) CloseIdleConnections() {}
+
+// ProxyFromEnvironment returns the URL of the proxy to use for a given
+// request. This library uses no proxy: it returns nil.
+func ProxyFromEnvironment(req *Request) (*url.URL, error) {
+	return nil, nil
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let netHttpHttputil: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/net/http/httputil/reverseproxy.go",
+            text: #"""
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// HTTP reverse proxy handler
+
+package httputil
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+)
+
+// A ProxyRequest contains a request to be rewritten by a [ReverseProxy].
+type ProxyRequest struct {
+	// In is the request received by the proxy.
+	// The Rewrite function must not modify In.
+	In *http.Request
+
+	// Out is the request which will be sent by the proxy.
+	// The Rewrite function may modify or replace this request.
+	// Hop-by-hop headers are removed from this request
+	// before Rewrite is called.
+	Out *http.Request
+}
+
+// SetURL routes the outbound request to the scheme, host, and base path
+// provided in target. If the target's path is "/base" and the incoming
+// request was for "/dir", the target request will be for "/base/dir".
+//
+// SetURL rewrites the outbound Host header to match the target's host.
+// To preserve the inbound request's Host header (the default behavior
+// of [NewSingleHostReverseProxy]):
+//
+//	rewriteFunc := func(r *httputil.ProxyRequest) {
+//		r.SetURL(url)
+//		r.Out.Host = r.In.Host
+//	}
+func (r *ProxyRequest) SetURL(target *url.URL) {
+	rewriteRequestURL(r.Out, target)
+	r.Out.Host = ""
+}
+
+// SetXForwarded sets the X-Forwarded-For, X-Forwarded-Host, and
+// X-Forwarded-Proto headers of the outbound request.
+//
+//   - The X-Forwarded-For header is set to the client IP address.
+//   - The X-Forwarded-Host header is set to the host name requested
+//     by the client.
+//   - The X-Forwarded-Proto header is set to "http" or "https", depending
+//     on whether the inbound request was made on a TLS-enabled connection.
+//
+// If the outbound request contains an existing X-Forwarded-For header,
+// SetXForwarded appends the client IP address to it. To append to the
+// inbound request's X-Forwarded-For header (the default behavior of
+// [ReverseProxy] when using a Director function), copy the header
+// from the inbound request before calling SetXForwarded:
+//
+//	rewriteFunc := func(r *httputil.ProxyRequest) {
+//		r.Out.Header["X-Forwarded-For"] = r.In.Header["X-Forwarded-For"]
+//		r.SetXForwarded()
+//	}
+func (r *ProxyRequest) SetXForwarded() {
+	clientIP, _, err := net.SplitHostPort(r.In.RemoteAddr)
+	if err == nil {
+		prior := r.Out.Header["X-Forwarded-For"]
+		if len(prior) > 0 {
+			clientIP = strings.Join(prior, ", ") + ", " + clientIP
+		}
+		r.Out.Header.Set("X-Forwarded-For", clientIP)
+	} else {
+		r.Out.Header.Del("X-Forwarded-For")
+	}
+	r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
+	if r.In.TLS == nil {
+		r.Out.Header.Set("X-Forwarded-Proto", "http")
+	} else {
+		r.Out.Header.Set("X-Forwarded-Proto", "https")
+	}
+}
+
+// ReverseProxy is an HTTP Handler that takes an incoming request and
+// sends it to another server, proxying the response back to the
+// client.
+//
+// 1xx responses are forwarded to the client if the underlying
+// transport supports ClientTrace.Got1xxResponse.
+type ReverseProxy struct {
+	// Rewrite must be a function which modifies
+	// the request into a new request to be sent
+	// using Transport. Its response is then copied
+	// back to the original client unmodified.
+	// Rewrite must not access the provided ProxyRequest
+	// or its contents after returning.
+	//
+	// The Forwarded, X-Forwarded, X-Forwarded-Host,
+	// and X-Forwarded-Proto headers are removed from the
+	// outbound request before Rewrite is called. See also
+	// the ProxyRequest.SetXForwarded method.
+	//
+	// Unparsable query parameters are removed from the
+	// outbound request before Rewrite is called.
+	// The Rewrite function may copy the inbound URL's
+	// RawQuery to the outbound URL to preserve the original
+	// parameter string. Note that this can lead to security
+	// issues if the proxy's interpretation of query parameters
+	// does not match that of the downstream server.
+	//
+	// At most one of Rewrite or Director may be set.
+	Rewrite func(*ProxyRequest)
+
+	// Director is a function which modifies
+	// the request into a new request to be sent
+	// using Transport. Its response is then copied
+	// back to the original client unmodified.
+	// Director must not access the provided Request
+	// after returning.
+	//
+	// By default, the X-Forwarded-For header is set to the
+	// value of the client IP address. If an X-Forwarded-For
+	// header already exists, the client IP is appended to the
+	// existing values. As a special case, if the header
+	// exists in the Request.Header map but has a nil value
+	// (such as when set by the Director func), the X-Forwarded-For
+	// header is not modified.
+	//
+	// To prevent IP spoofing, be sure to delete any pre-existing
+	// X-Forwarded-For header coming from the client or
+	// an untrusted proxy.
+	//
+	// Hop-by-hop headers are removed from the request after
+	// Director returns, which can remove headers added by
+	// Director. Use a Rewrite function instead to ensure
+	// modifications to the request are preserved.
+	//
+	// Unparsable query parameters are removed from the outbound
+	// request if Request.Form is set after Director returns.
+	//
+	// At most one of Rewrite or Director may be set.
+	Director func(*http.Request)
+
+	// The transport used to perform proxy requests.
+	// If nil, http.DefaultTransport is used.
+	Transport http.RoundTripper
+
+	// FlushInterval specifies the flush interval
+	// to flush to the client while copying the
+	// response body.
+	// If zero, no periodic flushing is done.
+	// A negative value means to flush immediately
+	// after each write to the client.
+	// The FlushInterval is ignored when ReverseProxy
+	// recognizes a response as a streaming response, or
+	// if its ContentLength is -1; for such responses, writes
+	// are flushed to the client immediately.
+	FlushInterval time.Duration
+
+	// ErrorLog specifies an optional logger for errors
+	// that occur when attempting to proxy the request.
+	// If nil, logging is done via the log package's standard logger.
+	ErrorLog *log.Logger
+
+	// BufferPool optionally specifies a buffer pool to
+	// get byte slices for use by io.CopyBuffer when
+	// copying HTTP response bodies.
+	BufferPool BufferPool
+
+	// ModifyResponse is an optional function that modifies the
+	// Response from the backend. It is called if the backend
+	// returns a response at all, with any HTTP status code.
+	// If the backend is unreachable, the optional ErrorHandler is
+	// called without any call to ModifyResponse.
+	//
+	// If ModifyResponse returns an error, ErrorHandler is called
+	// with its error value. If ErrorHandler is nil, its default
+	// implementation is used.
+	ModifyResponse func(*http.Response) error
+
+	// ErrorHandler is an optional function that handles errors
+	// reaching the backend or errors from ModifyResponse.
+	//
+	// If nil, the default is to log the provided error and return
+	// a 502 Status Bad Gateway response.
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
+}
+
+// A BufferPool is an interface for getting and returning temporary
+// byte slices for use by [io.CopyBuffer].
+type BufferPool interface {
+	Get() []byte
+	Put([]byte)
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
+}
+
+func joinURLPath(a, b *url.URL) (path, rawpath string) {
+	if a.RawPath == "" && b.RawPath == "" {
+		return singleJoiningSlash(a.Path, b.Path), ""
+	}
+	// Same as singleJoiningSlash, but uses EscapedPath to determine
+	// whether a slash should be added
+	apath := a.EscapedPath()
+	bpath := b.EscapedPath()
+
+	aslash := strings.HasSuffix(apath, "/")
+	bslash := strings.HasPrefix(bpath, "/")
+
+	switch {
+	case aslash && bslash:
+		return a.Path + b.Path[1:], apath + bpath[1:]
+	case !aslash && !bslash:
+		return a.Path + "/" + b.Path, apath + "/" + bpath
+	}
+	return a.Path + b.Path, apath + bpath
+}
+
+// NewSingleHostReverseProxy returns a new [ReverseProxy] that routes
+// URLs to the scheme, host, and base path provided in target. If the
+// target's path is "/base" and the incoming request was for "/dir",
+// the target request will be for /base/dir.
+//
+// NewSingleHostReverseProxy does not rewrite the Host header.
+//
+// To customize the ReverseProxy behavior beyond what
+// NewSingleHostReverseProxy provides, use ReverseProxy directly
+// with a Rewrite function. The ProxyRequest SetURL method
+// may be used to route the outbound request. (Note that SetURL,
+// unlike NewSingleHostReverseProxy, rewrites the Host header
+// of the outbound request by default.)
+//
+//	proxy := &ReverseProxy{
+//		Rewrite: func(r *ProxyRequest) {
+//			r.SetURL(target)
+//			r.Out.Host = r.In.Host // if desired
+//		},
+//	}
+func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
+	director := func(req *http.Request) {
+		rewriteRequestURL(req, target)
+	}
+	return &ReverseProxy{Director: director}
+}
+
+func rewriteRequestURL(req *http.Request, target *url.URL) {
+	targetQuery := target.RawQuery
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.URL.Path, req.URL.RawPath = joinURLPath(target, req.URL)
+	if targetQuery == "" || req.URL.RawQuery == "" {
+		req.URL.RawQuery = targetQuery + req.URL.RawQuery
+	} else {
+		req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
+	}
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// Hop-by-hop headers. These are removed when sent to the backend.
+// As of RFC 7230, hop-by-hop headers are required to appear in the
+// Connection header field. These are the headers defined by the
+// obsoleted RFC 2616 (section 13.5.1) and are used for backward
+// compatibility.
+var hopHeaders = []string{
+	"Connection",
+	"Proxy-Connection", // non-standard but still sent by libcurl and rejected by e.g. google
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",      // canonicalized version of "TE"
+	"Trailer", // not Trailers per URL above; https://www.rfc-editor.org/errata_search.php?eid=4522
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func (p *ReverseProxy) defaultErrorHandler(rw http.ResponseWriter, req *http.Request, err error) {
+	p.logf("http: proxy error: %v", err)
+	rw.WriteHeader(http.StatusBadGateway)
+}
+
+func (p *ReverseProxy) getErrorHandler() func(http.ResponseWriter, *http.Request, error) {
+	if p.ErrorHandler != nil {
+		return p.ErrorHandler
+	}
+	return p.defaultErrorHandler
+}
+
+// modifyResponse conditionally runs the optional ModifyResponse hook
+// and reports whether the request should proceed.
+func (p *ReverseProxy) modifyResponse(rw http.ResponseWriter, res *http.Response, req *http.Request) bool {
+	if p.ModifyResponse == nil {
+		return true
+	}
+	if err := p.ModifyResponse(res); err != nil {
+		res.Body.Close()
+		p.getErrorHandler()(rw, req, err)
+		return false
+	}
+	return true
+}
+
+func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	transport := p.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	ctx := req.Context()
+	if ctx.Done() != nil {
+		// CloseNotifier predates context.Context, and has been
+		// entirely superseded by it. If the request contains
+		// a Context that carries a cancellation signal, don't
+		// bother spinning up a goroutine to watch the CloseNotify
+		// channel (if any).
+		//
+		// If the request Context has a nil Done channel (which
+		// means it is either context.Background, or a custom
+		// Context implementation with no cancellation signal),
+		// then consult the CloseNotifier if available.
+	} else if cn, ok := rw.(http.CloseNotifier); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		notifyChan := cn.CloseNotify()
+		go func() {
+			select {
+			case <-notifyChan:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	outreq := req.Clone(ctx)
+	if req.ContentLength == 0 {
+		outreq.Body = nil // Issue 16036: nil Body for http.Transport retries
+	}
+	if outreq.Body != nil {
+		// Reading from the request body after returning from a handler is not
+		// allowed, and the RoundTrip goroutine that reads the Body can outlive
+		// this handler. This can lead to a crash if the handler panics (see
+		// Issue 46866). Although calling Close doesn't guarantee there isn't
+		// any Read in flight after the handle returns, in practice it's safe to
+		// read after closing it.
+		defer outreq.Body.Close()
+	}
+	if outreq.Header == nil {
+		outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
+	}
+
+	if (p.Director != nil) == (p.Rewrite != nil) {
+		p.getErrorHandler()(rw, req, errors.New("ReverseProxy must have exactly one of Director or Rewrite set"))
+		return
+	}
+
+	if p.Director != nil {
+		p.Director(outreq)
+		if outreq.Form != nil {
+			outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
+		}
+	}
+	outreq.Close = false
+
+	reqUpType := upgradeType(outreq.Header)
+	if !asciiIsPrint(reqUpType) {
+		p.getErrorHandler()(rw, req, fmt.Errorf("client tried to switch to invalid protocol %q", reqUpType))
+		return
+	}
+	removeHopByHopHeaders(outreq.Header)
+
+	// Issue 21096: tell backend applications that care about trailer support
+	// that we support trailers. (We do, but we don't go out of our way to
+	// advertise that unless the incoming client request thought it was worth
+	// mentioning.) Note that we look at req.Header, not outreq.Header, since
+	// the latter has passed through removeHopByHopHeaders.
+	if headerValuesContainsToken(req.Header["Te"], "trailers") {
+		outreq.Header.Set("Te", "trailers")
+	}
+
+	// After stripping all the hop-by-hop connection headers above, add back any
+	// necessary for protocol upgrades, such as for websockets.
+	if reqUpType != "" {
+		outreq.Header.Set("Connection", "Upgrade")
+		outreq.Header.Set("Upgrade", reqUpType)
+	}
+
+	if p.Rewrite != nil {
+		// Strip client-provided forwarding headers.
+		// The Rewrite func may use SetXForwarded to set new values
+		// for these or copy the previous values from the inbound request.
+		outreq.Header.Del("Forwarded")
+		outreq.Header.Del("X-Forwarded-For")
+		outreq.Header.Del("X-Forwarded-Host")
+		outreq.Header.Del("X-Forwarded-Proto")
+
+		// Remove unparsable query parameters from the outbound request.
+		outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
+
+		pr := &ProxyRequest{
+			In:  req,
+			Out: outreq,
+		}
+		p.Rewrite(pr)
+		outreq = pr.Out
+	} else {
+		if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			// If we aren't the first proxy retain prior
+			// X-Forwarded-For information as a comma+space
+			// separated list and fold multiple headers into one.
+			prior, ok := outreq.Header["X-Forwarded-For"]
+			omit := ok && prior == nil // Issue 38079: nil now means don't populate the header
+			if len(prior) > 0 {
+				clientIP = strings.Join(prior, ", ") + ", " + clientIP
+			}
+			if !omit {
+				outreq.Header.Set("X-Forwarded-For", clientIP)
+			}
+		}
+	}
+
+	if _, ok := outreq.Header["User-Agent"]; !ok {
+		// If the outbound request doesn't have a User-Agent header set,
+		// don't send the default Go HTTP client User-Agent.
+		outreq.Header.Set("User-Agent", "")
+	}
+
+	// Go forwards each 1xx response the transport reads through a client
+	// trace; this library's transport reads past them.
+	res, err := transport.RoundTrip(outreq)
+	if err != nil {
+		p.getErrorHandler()(rw, outreq, err)
+		return
+	}
+
+	// Deal with 101 Switching Protocols responses: (WebSocket, h2c, etc)
+	if res.StatusCode == http.StatusSwitchingProtocols {
+		if !p.modifyResponse(rw, res, outreq) {
+			return
+		}
+		p.handleUpgradeResponse(rw, outreq, res)
+		return
+	}
+
+	removeHopByHopHeaders(res.Header)
+
+	if !p.modifyResponse(rw, res, outreq) {
+		return
+	}
+
+	copyHeader(rw.Header(), res.Header)
+
+	// The "Trailer" header isn't included in the Transport's response,
+	// at least for *http.Transport. Build it up from Trailer.
+	announcedTrailers := len(res.Trailer)
+	if announcedTrailers > 0 {
+		trailerKeys := make([]string, 0, len(res.Trailer))
+		for k := range res.Trailer {
+			trailerKeys = append(trailerKeys, k)
+		}
+		rw.Header().Add("Trailer", strings.Join(trailerKeys, ", "))
+	}
+
+	rw.WriteHeader(res.StatusCode)
+
+	err = p.copyResponse(rw, res.Body, p.flushInterval(res))
+	if err != nil {
+		defer res.Body.Close()
+		// Since we're streaming the response, if we run into an error all we can do
+		// is abort the request. Issue 23643: ReverseProxy should use ErrAbortHandler
+		// on read error while copying body.
+		if !shouldPanicOnCopyError(req) {
+			p.logf("suppressing panic for copyResponse error in test; copy error: %v", err)
+			return
+		}
+		panic(http.ErrAbortHandler)
+	}
+	res.Body.Close() // close now, instead of defer, to populate res.Trailer
+
+	if len(res.Trailer) > 0 {
+		// Force chunking if we saw a response trailer.
+		// This prevents net/http from calculating the length for short
+		// bodies and adding a Content-Length.
+		http.NewResponseController(rw).Flush()
+	}
+
+	if len(res.Trailer) == announcedTrailers {
+		copyHeader(rw.Header(), res.Trailer)
+		return
+	}
+
+	for k, vv := range res.Trailer {
+		k = http.TrailerPrefix + k
+		for _, v := range vv {
+			rw.Header().Add(k, v)
+		}
+	}
+}
+
+var inOurTests bool // whether we're in our own tests
+
+// shouldPanicOnCopyError reports whether the reverse proxy should
+// panic with http.ErrAbortHandler. This is the right thing to do by
+// default, but Go 1.10 and earlier did not, so existing unit tests
+// weren't expecting panics. Only panic in our own tests, or when
+// running under the HTTP server.
+func shouldPanicOnCopyError(req *http.Request) bool {
+	if inOurTests {
+		// Our tests know to handle this panic.
+		return true
+	}
+	if req.Context().Value(http.ServerContextKey) != nil {
+		// We seem to be running under an HTTP server, so
+		// it'll recover the panic.
+		return true
+	}
+	// Otherwise act like Go 1.10 and earlier to not break
+	// existing tests.
+	return false
+}
+
+// removeHopByHopHeaders removes hop-by-hop headers.
+func removeHopByHopHeaders(h http.Header) {
+	// RFC 7230, section 6.1: Remove headers listed in the "Connection" header.
+	for _, f := range h["Connection"] {
+		for _, sf := range strings.Split(f, ",") {
+			if sf = trimString(sf); sf != "" {
+				h.Del(sf)
+			}
+		}
+	}
+	// RFC 2616, section 13.5.1: Remove a set of known hop-by-hop headers.
+	// This behavior is superseded by the RFC 7230 Connection header, but
+	// preserve it for backwards compatibility.
+	for _, f := range hopHeaders {
+		h.Del(f)
+	}
+}
+
+// flushInterval returns the p.FlushInterval value, conditionally
+// overriding its value for a specific request/response.
+func (p *ReverseProxy) flushInterval(res *http.Response) time.Duration {
+	resCT := res.Header.Get("Content-Type")
+
+	// For Server-Sent Events responses, flush immediately.
+	// The MIME type is defined in https://www.w3.org/TR/eventsource/#text-event-stream
+	if baseCT, _, _ := mime.ParseMediaType(resCT); baseCT == "text/event-stream" {
+		return -1 // negative means immediately
+	}
+
+	// We might have the case of streaming for which Content-Length might be unset.
+	if res.ContentLength == -1 {
+		return -1
+	}
+
+	return p.FlushInterval
+}
+
+func (p *ReverseProxy) copyResponse(dst http.ResponseWriter, src io.Reader, flushInterval time.Duration) error {
+	var w io.Writer = dst
+
+	if flushInterval != 0 {
+		mlw := &maxLatencyWriter{
+			dst:     dst,
+			flush:   http.NewResponseController(dst).Flush,
+			latency: flushInterval,
+		}
+		defer mlw.stop()
+
+		// set up initial timer so headers get flushed even if body writes are delayed
+		mlw.flushPending = true
+		mlw.t = time.AfterFunc(flushInterval, mlw.delayedFlush)
+
+		w = mlw
+	}
+
+	var buf []byte
+	if p.BufferPool != nil {
+		buf = p.BufferPool.Get()
+		defer p.BufferPool.Put(buf)
+	}
+	_, err := p.copyBuffer(w, src, buf)
+	return err
+}
+
+// copyBuffer returns any write errors or non-EOF read errors, and the amount
+// of bytes written.
+func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+	if len(buf) == 0 {
+		buf = make([]byte, 32*1024)
+	}
+	var written int64
+	for {
+		nr, rerr := src.Read(buf)
+		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
+			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
+		}
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if werr != nil {
+				return written, werr
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				rerr = nil
+			}
+			return written, rerr
+		}
+	}
+}
+
+func (p *ReverseProxy) logf(format string, args ...any) {
+	if p.ErrorLog != nil {
+		p.ErrorLog.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+type maxLatencyWriter struct {
+	dst     io.Writer
+	flush   func() error
+	latency time.Duration // non-zero; negative means to flush immediately
+
+	mu           sync.Mutex // protects t, flushPending, and dst.Flush
+	t            *time.Timer
+	flushPending bool
+}
+
+func (m *maxLatencyWriter) Write(p []byte) (n int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n, err = m.dst.Write(p)
+	if m.latency < 0 {
+		m.flush()
+		return
+	}
+	if m.flushPending {
+		return
+	}
+	if m.t == nil {
+		m.t = time.AfterFunc(m.latency, m.delayedFlush)
+	} else {
+		m.t.Reset(m.latency)
+	}
+	m.flushPending = true
+	return
+}
+
+func (m *maxLatencyWriter) delayedFlush() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.flushPending { // if stop was called but AfterFunc already started this goroutine
+		return
+	}
+	m.flush()
+	m.flushPending = false
+}
+
+func (m *maxLatencyWriter) stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushPending = false
+	if m.t != nil {
+		m.t.Stop()
+	}
+}
+
+func upgradeType(h http.Header) string {
+	if !headerValuesContainsToken(h["Connection"], "Upgrade") {
+		return ""
+	}
+	return h.Get("Upgrade")
+}
+
+func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.Request, res *http.Response) {
+	reqUpType := upgradeType(req.Header)
+	resUpType := upgradeType(res.Header)
+	if !asciiIsPrint(resUpType) { // We know reqUpType is ASCII, it's checked by the caller.
+		p.getErrorHandler()(rw, req, fmt.Errorf("backend tried to switch to invalid protocol %q", resUpType))
+		return
+	}
+	if !asciiEqualFold(reqUpType, resUpType) {
+		p.getErrorHandler()(rw, req, fmt.Errorf("backend tried to switch protocol %q when %q was requested", resUpType, reqUpType))
+		return
+	}
+
+	backConn, ok := res.Body.(io.ReadWriteCloser)
+	if !ok {
+		p.getErrorHandler()(rw, req, fmt.Errorf("internal error: 101 switching protocols response with non-writable body"))
+		return
+	}
+
+	rc := http.NewResponseController(rw)
+	conn, brw, hijackErr := rc.Hijack()
+	if errors.Is(hijackErr, http.ErrNotSupported) {
+		p.getErrorHandler()(rw, req, fmt.Errorf("can't switch protocols using non-Hijacker ResponseWriter type %T", rw))
+		return
+	}
+
+	backConnCloseCh := make(chan bool)
+	go func() {
+		// Ensure that the cancellation of a request closes the backend.
+		// See issue https://golang.org/issue/35559.
+		select {
+		case <-req.Context().Done():
+		case <-backConnCloseCh:
+		}
+		backConn.Close()
+	}()
+	defer close(backConnCloseCh)
+
+	if hijackErr != nil {
+		p.getErrorHandler()(rw, req, fmt.Errorf("Hijack failed on protocol switch: %v", hijackErr))
+		return
+	}
+	defer conn.Close()
+
+	copyHeader(rw.Header(), res.Header)
+
+	res.Header = rw.Header()
+	res.Body = nil // so res.Write only writes the headers; we have res.Body in backConn above
+	if err := res.Write(brw); err != nil {
+		p.getErrorHandler()(rw, req, fmt.Errorf("response write: %v", err))
+		return
+	}
+	if err := brw.Flush(); err != nil {
+		p.getErrorHandler()(rw, req, fmt.Errorf("response flush: %v", err))
+		return
+	}
+	errc := make(chan error, 1)
+	spc := switchProtocolCopier{user: conn, backend: backConn}
+	go spc.copyToBackend(errc)
+	go spc.copyFromBackend(errc)
+	<-errc
+}
+
+// switchProtocolCopier exists so goroutines proxying data back and
+// forth have nice names in stacks.
+type switchProtocolCopier struct {
+	user, backend io.ReadWriter
+}
+
+func (c switchProtocolCopier) copyFromBackend(errc chan<- error) {
+	_, err := io.Copy(c.user, c.backend)
+	errc <- err
+}
+
+func (c switchProtocolCopier) copyToBackend(errc chan<- error) {
+	_, err := io.Copy(c.backend, c.user)
+	errc <- err
+}
+
+func cleanQueryParams(s string) string {
+	reencode := func(s string) string {
+		v, _ := url.ParseQuery(s)
+		return v.Encode()
+	}
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case ';':
+			return reencode(s)
+		case '%':
+			if i+2 >= len(s) || !ishex(s[i+1]) || !ishex(s[i+2]) {
+				return reencode(s)
+			}
+			i += 3
+		default:
+			i++
+		}
+	}
+	return s
+}
+
+func ishex(c byte) bool {
+	switch {
+	case '0' <= c && c <= '9':
+		return true
+	case 'a' <= c && c <= 'f':
+		return true
+	case 'A' <= c && c <= 'F':
+		return true
+	}
+	return false
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/net/http/httputil/text.go",
+            text: #"""
+// Copyright 2021 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package httputil
+
+import (
+	"strings"
+)
+
+// The helpers of net/http/internal/ascii, golang.org/x/net/http/httpguts,
+// and net/textproto that the reverse proxy uses, as Go writes them.
+
+// asciiEqualFold is [strings.EqualFold], ASCII only. It reports whether s
+// and t are equal, ASCII-case-insensitively.
+func asciiEqualFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if lower(s[i]) != lower(t[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// lower returns the ASCII lowercase version of b.
+func lower(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+// asciiIsPrint returns whether s is ASCII and printable according to
+// https://tools.ietf.org/html/rfc20#section-4.2.
+func asciiIsPrint(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
+}
+
+// headerValuesContainsToken reports whether any string in values
+// contains the provided token, ASCII case-insensitively.
+func headerValuesContainsToken(values []string, token string) bool {
+	for _, v := range values {
+		if headerValueContainsToken(v, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOWS reports whether b is an optional whitespace byte, as defined
+// by RFC 7230 section 3.2.3.
+func isOWS(b byte) bool { return b == ' ' || b == '\t' }
+
+// trimOWS returns x with all optional whitespace removes from the
+// beginning and end.
+func trimOWS(x string) string {
+	for len(x) > 0 && isOWS(x[0]) {
+		x = x[1:]
+	}
+	for len(x) > 0 && isOWS(x[len(x)-1]) {
+		x = x[:len(x)-1]
+	}
+	return x
+}
+
+// headerValueContainsToken reports whether v (assumed to be a
+// 0#element, in the ABNF extension described in RFC 7230 section 7)
+// contains token amongst its comma-separated tokens, ASCII
+// case-insensitively.
+func headerValueContainsToken(v string, token string) bool {
+	for comma := strings.IndexByte(v, ','); comma != -1; comma = strings.IndexByte(v, ',') {
+		if tokenEqual(trimOWS(v[:comma]), token) {
+			return true
+		}
+		v = v[comma+1:]
+	}
+	return tokenEqual(trimOWS(v), token)
+}
+
+// lowerASCII returns the ASCII lowercase version of b.
+func lowerASCII(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+// tokenEqual reports whether t1 and t2 are equal, ASCII case-insensitively.
+func tokenEqual(t1, t2 string) bool {
+	if len(t1) != len(t2) {
+		return false
+	}
+	for i, b := range t1 {
+		if b >= utf8RuneSelf {
+			// No UTF-8 or non-ASCII allowed in tokens.
+			return false
+		}
+		if lowerASCII(byte(b)) != lowerASCII(t2[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+const utf8RuneSelf = 0x80
+
+// trimString is textproto.TrimString: s without leading and trailing ASCII
+// space.
+func trimString(s string) string {
+	for len(s) > 0 && isASCIISpace(s[0]) {
+		s = s[1:]
+	}
+	for len(s) > 0 && isASCIISpace(s[len(s)-1]) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func isASCIISpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
 """#),
@@ -26934,7 +28852,10 @@ func Getpid() int { return native.getpid() }
 // numbers and texts, which the run-time library reports.
 package syscall
 
-import "io/fs"
+import (
+	"errors"
+	"io/fs"
+)
 
 // An Errno is the error number of a failed system call.
 type Errno uintptr
@@ -27057,6 +28978,8 @@ func (e Errno) Is(target error) bool {
 		return e == EEXIST || e == ENOTEMPTY
 	case fs.ErrNotExist:
 		return e == ENOENT
+	case errors.ErrUnsupported:
+		return e == ENOSYS || e == ENOTSUP || e == EOPNOTSUPP
 	}
 	return false
 }
