@@ -844,28 +844,19 @@ public struct GoVirtualMachine: Sendable {
         for initializer in executable.initializers where functions[initializer] == nil {
             throw GoRuntimeError.missingFunction(initializer)
         }
-        var heap = try ManagedHeap(
+        let vm = GoExecutionState(heap: try ManagedHeap(
             globalCount: executable.globalCount,
             maximumCells: resourceLimits.maximumHeapCells,
-            maximumBytes: resourceLimits.maximumHeapBytes)
+            maximumBytes: resourceLimits.maximumHeapBytes))
         var startupFunctions = executable.initializers + [executable.entryPoint]
-        var frames: [Frame] = []
-        var stack: [GoValue] = []
-        var executed = 0
-        var lastEventLoopYieldInstruction = 0
         var testFailureCount = 0
         var subtests: [(name: String, failuresAtStart: Int)] = []
-        var currentGoroutineID = 0
         var nextGoroutineID = 1
-        var goroutines: [Int: GoroutineContext] = [:]
-        var runQueue: [Int] = []
         var blockedGoroutines: Set<Int> = []
         var blockedSelects: [Int: BlockedSelect] = [:]
-        var currentBlocked = false
         // True once the current goroutine's context is already stored in
         // `goroutines` (parked, and possibly woken again) within this
         // instruction, so the scheduler must not store it a second time.
-        var currentParked = false
         var nextWaitSequence: UInt64 = 0
         var selectRandomState = selectSeed
         var asynchronousError: GoRuntimeError?
@@ -873,7 +864,6 @@ public struct GoVirtualMachine: Sendable {
         var nextRuntimeHandleID = 0
         var activeTimerCount = 0
         var activeDeferredCallCount = 0
-        var liveFrameLocalCount = 0
         var outputBytesWritten = 0
         var executionIsActive = true
         var httpHandlers: [String: String] = [:]
@@ -911,10 +901,8 @@ public struct GoVirtualMachine: Sendable {
         // descriptor, and the descriptors closed since (`GoParkedNetWait`).
         var parkedNetWaits: [Int: [GoParkedNetWait]] = [:]
         var closedNetDescriptors: Set<Int> = []
-        var yieldRequested = false
         var descriptorWrites: [Int: [PendingDescriptorWrite]] = [:]
         var standardInputCarry: [UInt8] = []
-        var sliceStartInstruction = 0
         var completedNormally = false
         var programEnabledRawMode = false
         func releaseExecution() {
@@ -940,15 +928,14 @@ public struct GoVirtualMachine: Sendable {
         }
         defer { if !isSuspended { releaseExecution() } }
 
-        var lastRuntimeMemoryReport: (bytes: Int, cells: Int, collections: Int)?
         func reportRuntimeMemoryIfChanged() throws {
             guard let processContext else { return }
-            let statistics = heap.statistics
+            let statistics = vm.heap.statistics
             let current = (
                 bytes: statistics.liveHeapBytes,
                 cells: statistics.liveHeapCells,
                 collections: statistics.garbageCollections)
-            if let previous = lastRuntimeMemoryReport,
+            if let previous = vm.lastRuntimeMemoryReport,
                previous.bytes == current.bytes,
                previous.cells == current.cells,
                previous.collections == current.collections { return }
@@ -960,7 +947,7 @@ public struct GoVirtualMachine: Sendable {
             else {
                 throw GoRuntimeError.resourceLimitExceeded("kernel runtime memory")
             }
-            lastRuntimeMemoryReport = current
+            vm.lastRuntimeMemoryReport = current
         }
         try reportRuntimeMemoryIfChanged()
 
@@ -1039,7 +1026,7 @@ public struct GoVirtualMachine: Sendable {
                     // process stops here; one that ignores the signal sees the
                     // error instead.
                     failure = "broken pipe"
-                    yieldRequested = true
+                    vm.yieldRequested = true
                 } catch {
                     failure = "write failed: \(String(describing: error))"
                 }
@@ -1130,17 +1117,17 @@ public struct GoVirtualMachine: Sendable {
                         failure = "write failed: \(String(describing: error))"
                     }
                 }
-                if let results { stack.append(contentsOf: results(accepted, failure)) }
+                if let results { vm.stack.append(contentsOf: results(accepted, failure)) }
                 return
             }
             descriptorWrites[fd, default: []].append(
                 PendingDescriptorWrite(
-                    goroutineID: currentGoroutineID, bytes: bytes, results: results))
+                    goroutineID: vm.currentGoroutineID, bytes: bytes, results: results))
             // The goroutine is parked before the pump can wake it.
-            goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
-            blockedGoroutines.insert(currentGoroutineID)
-            currentParked = true
-            currentBlocked = true
+            vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
+            blockedGoroutines.insert(vm.currentGoroutineID)
+            vm.currentParked = true
+            vm.currentBlocked = true
             if descriptorWrites[fd]!.count == 1 { pumpDescriptorWrites(fd) }
             if let asynchronousError { throw asynchronousError }
         }
@@ -1214,9 +1201,9 @@ public struct GoVirtualMachine: Sendable {
             heap: inout ManagedHeap,
             isDeferredCall: Bool = false
         ) throws -> Frame {
-            guard liveFrameLocalCount <= resourceLimits.maximumLiveFrameLocals,
+            guard vm.liveFrameLocalCount <= resourceLimits.maximumLiveFrameLocals,
                 function.localCount
-                    <= resourceLimits.maximumLiveFrameLocals - liveFrameLocalCount
+                    <= resourceLimits.maximumLiveFrameLocals - vm.liveFrameLocalCount
             else {
                 throw GoRuntimeError.resourceLimitExceeded("live frame locals")
             }
@@ -1226,12 +1213,12 @@ public struct GoVirtualMachine: Sendable {
                 arguments: arguments,
                 heap: &heap,
                 isDeferredCall: isDeferredCall)
-            liveFrameLocalCount += function.localCount
+            vm.liveFrameLocalCount += function.localCount
             return frame
         }
 
         func releaseFrame(_ frame: Frame) {
-            liveFrameLocalCount -= frame.function.localCount
+            vm.liveFrameLocalCount -= frame.function.localCount
         }
 
         func reserveTimer() throws {
@@ -1286,7 +1273,7 @@ public struct GoVirtualMachine: Sendable {
                 slice.start, slice.capacity, resource: "slice bounds")
             let lengthEnd = try checkedAdd(
                 slice.start, slice.length, resource: "slice bounds")
-            guard case .array(let backing) = try read(pointer: slice.backing, heap: heap),
+            guard case .array(let backing) = try read(pointer: slice.backing, heap: vm.heap),
                 capacityEnd <= backing.count,
                 lengthEnd <= capacityEnd
             else {
@@ -1327,9 +1314,9 @@ public struct GoVirtualMachine: Sendable {
 
         func localValue(_ index: Int, in frame: Frame) throws -> GoValue {
             guard frame.locals.indices.contains(index),
-                let cell = frame.locals[index], heap.contains(cell)
+                let cell = frame.locals[index], vm.heap.contains(cell)
             else { throw GoRuntimeError.invalidLocal(index) }
-            return heap[cell]
+            return vm.heap[cell]
         }
 
         func storeLocal(_ value: GoValue, at index: Int, in frame: inout Frame) throws {
@@ -1337,21 +1324,21 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.invalidLocal(index)
             }
             if let cell = frame.locals[index] {
-                guard heap.contains(cell) else { throw GoRuntimeError.invalidPointer }
-                try heap.replace(cell, with: value)
+                guard vm.heap.contains(cell) else { throw GoRuntimeError.invalidPointer }
+                try vm.heap.replace(cell, with: value)
             } else {
-                frame.locals[index] = try heap.allocate(value)
+                frame.locals[index] = try vm.heap.allocate(value)
             }
         }
 
         func resumeNextGoroutine() -> Bool {
-            guard !runQueue.isEmpty else { return false }
-            let next = runQueue.removeFirst()
-            guard let context = goroutines.removeValue(forKey: next) else { return false }
-            currentGoroutineID = next
-            frames = context.frames
-            stack = context.stack
-            currentBlocked = false
+            guard !vm.runQueue.isEmpty else { return false }
+            let next = vm.runQueue.removeFirst()
+            guard let context = vm.goroutines.removeValue(forKey: next) else { return false }
+            vm.currentGoroutineID = next
+            vm.frames = context.frames
+            vm.stack = context.stack
+            vm.currentBlocked = false
             return true
         }
 
@@ -1375,33 +1362,33 @@ public struct GoVirtualMachine: Sendable {
         }
 
         func scheduleNext(requeueCurrent: Bool) throws {
-            var quantumEnded = yieldRequested
-            if executed > 0,
-               executed != lastEventLoopYieldInstruction,
-               executed.isMultiple(of: instructionQuantum) {
-                lastEventLoopYieldInstruction = executed
+            var quantumEnded = vm.yieldRequested
+            if vm.executed > 0,
+               vm.executed != vm.lastEventLoopYieldInstruction,
+               vm.executed.isMultiple(of: instructionQuantum) {
+                vm.lastEventLoopYieldInstruction = vm.executed
                 quantumEnded = true
             }
-            yieldRequested = false
+            vm.yieldRequested = false
             // Record a parked goroutine before any host work runs: the turn
             // below may deliver the very wake-up it is waiting for.
-            if currentParked {
-                currentParked = false
+            if vm.currentParked {
+                vm.currentParked = false
             } else if !requeueCurrent {
-                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
-                blockedGoroutines.insert(currentGoroutineID)
+                vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
+                blockedGoroutines.insert(vm.currentGoroutineID)
             } else if cooperative, quantumEnded {
-                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
-                runQueue.append(currentGoroutineID)
+                vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
+                vm.runQueue.append(vm.currentGoroutineID)
             } else {
                 // The current goroutine keeps running unless others are ready.
                 if quantumEnded {
                     _ = eventLoop.runUntilIdle(stepBudget: 1)
                     if let asynchronousError { throw asynchronousError }
                 }
-                if runQueue.isEmpty { return }
-                goroutines[currentGoroutineID] = GoroutineContext(frames: frames, stack: stack)
-                runQueue.append(currentGoroutineID)
+                if vm.runQueue.isEmpty { return }
+                vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
+                vm.runQueue.append(vm.currentGoroutineID)
                 try driveEventLoopUntilRunnable()
                 return
             }
@@ -1433,7 +1420,7 @@ public struct GoVirtualMachine: Sendable {
             values: [GoValue] = [],
             panicValue: GoValue? = nil
         ) throws {
-            guard var context = goroutines[id], blockedGoroutines.remove(id) != nil else {
+            guard var context = vm.goroutines[id], blockedGoroutines.remove(id) != nil else {
                 throw GoRuntimeError.typeMismatch
             }
             guard context.stack.count <= resourceLimits.maximumValueStackEntries,
@@ -1447,8 +1434,8 @@ public struct GoVirtualMachine: Sendable {
                 guard !context.frames.isEmpty else { throw GoRuntimeError.typeMismatch }
                 context.frames[context.frames.count - 1].pendingExit = .panicking(panicValue)
             }
-            goroutines[id] = context
-            runQueue.append(id)
+            vm.goroutines[id] = context
+            vm.runQueue.append(id)
         }
 
         /// Park goroutine `id` until fd 0 yields a chunk that ends on a UTF-8
@@ -1550,7 +1537,7 @@ public struct GoVirtualMachine: Sendable {
             receiveOK: Bool = true
         ) throws -> GoValue? {
             guard let blocked = blockedSelects.removeValue(forKey: candidate.goroutineID),
-                var context = goroutines[candidate.goroutineID],
+                var context = vm.goroutines[candidate.goroutineID],
                 !context.frames.isEmpty,
                 blockedGoroutines.remove(candidate.goroutineID) != nil
             else { throw GoRuntimeError.typeMismatch }
@@ -1581,8 +1568,8 @@ public struct GoVirtualMachine: Sendable {
                 }
                 try jump(to: target, frame: &context.frames[context.frames.count - 1])
             }
-            goroutines[candidate.goroutineID] = context
-            runQueue.append(candidate.goroutineID)
+            vm.goroutines[candidate.goroutineID] = context
+            vm.runQueue.append(candidate.goroutineID)
             return sentValue
         }
 
@@ -1595,7 +1582,7 @@ public struct GoVirtualMachine: Sendable {
                 if base == .nilValue { return false }
                 guard case .channel(let channel) = base,
                     case .channelStorage(let storage) = try read(
-                        pointer: channel.storage, heap: heap)
+                        pointer: channel.storage, heap: vm.heap)
                 else { throw GoRuntimeError.typeMismatch }
                 return storage.closed
                     || !storage.receiveWaiters.isEmpty
@@ -1605,7 +1592,7 @@ public struct GoVirtualMachine: Sendable {
                 if base == .nilValue { return false }
                 guard case .channel(let channel) = base,
                     case .channelStorage(let storage) = try read(
-                        pointer: channel.storage, heap: heap)
+                        pointer: channel.storage, heap: vm.heap)
                 else { throw GoRuntimeError.typeMismatch }
                 return !storage.buffer.isEmpty
                     || !storage.sendWaiters.isEmpty
@@ -1622,7 +1609,7 @@ public struct GoVirtualMachine: Sendable {
             if base == .nilValue { return .blocked }
             guard case .channel(let channel) = base,
                 case .channelStorage(var storage) = try read(
-                    pointer: channel.storage, heap: heap)
+                    pointer: channel.storage, heap: vm.heap)
             else { throw GoRuntimeError.typeMismatch }
             if storage.closed { return .closed }
 
@@ -1634,7 +1621,7 @@ public struct GoVirtualMachine: Sendable {
             {
                 storage.receiveWaiters.removeFirst()
                 try writePointer(
-                    .channelStorage(storage), through: channel.storage, heap: &heap)
+                    .channelStorage(storage), through: channel.storage, heap: &vm.heap)
                 var values = [value]
                 if ordinary.commaOK { values.append(.bool(true)) }
                 try wakeGoroutine(ordinary.goroutineID, values: values)
@@ -1648,7 +1635,7 @@ public struct GoVirtualMachine: Sendable {
             if storage.buffer.count < storage.capacity {
                 storage.buffer.append(value)
                 try writePointer(
-                    .channelStorage(storage), through: channel.storage, heap: &heap)
+                    .channelStorage(storage), through: channel.storage, heap: &vm.heap)
                 return .sent
             }
             return .blocked
@@ -1662,7 +1649,7 @@ public struct GoVirtualMachine: Sendable {
             if base == .nilValue { return .blocked }
             guard case .channel(let channel) = base,
                 case .channelStorage(var storage) = try read(
-                    pointer: channel.storage, heap: heap)
+                    pointer: channel.storage, heap: vm.heap)
             else { throw GoRuntimeError.typeMismatch }
             if !storage.buffer.isEmpty {
                 let value = storage.buffer.removeFirst()
@@ -1680,7 +1667,7 @@ public struct GoVirtualMachine: Sendable {
                     storage.buffer.append(selectedValue)
                 }
                 try writePointer(
-                    .channelStorage(storage), through: channel.storage, heap: &heap)
+                    .channelStorage(storage), through: channel.storage, heap: &vm.heap)
                 return .received(value, true)
             }
 
@@ -1691,7 +1678,7 @@ public struct GoVirtualMachine: Sendable {
             {
                 storage.sendWaiters.removeFirst()
                 try writePointer(
-                    .channelStorage(storage), through: channel.storage, heap: &heap)
+                    .channelStorage(storage), through: channel.storage, heap: &vm.heap)
                 try wakeGoroutine(ordinary.goroutineID)
                 return .received(ordinary.value, true)
             }
@@ -1728,7 +1715,7 @@ public struct GoVirtualMachine: Sendable {
                 let selectedIndex = ready.indices[selectRandomIndex(count: ready.indices.count)]
                 let selected = ready.blocked.cases[selectedIndex]
                 guard blockedSelects.removeValue(forKey: ready.id) != nil,
-                    var context = goroutines[ready.id],
+                    var context = vm.goroutines[ready.id],
                     !context.frames.isEmpty,
                     blockedGoroutines.remove(ready.id) != nil
                 else { throw GoRuntimeError.typeMismatch }
@@ -1761,27 +1748,27 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimeError.typeMismatch
                     }
                 }
-                goroutines[ready.id] = context
-                runQueue.append(ready.id)
+                vm.goroutines[ready.id] = context
+                vm.runQueue.append(ready.id)
             }
         }
 
         func cancelContextTree(_ ctxPointer: GoPointer, message: String) throws {
             guard case .contextStorage(var ctxStorage) = try read(
-                pointer: ctxPointer, heap: heap)
+                pointer: ctxPointer, heap: vm.heap)
             else { return }
             guard !ctxStorage.cancelled else { return }
             ctxStorage.cancelled = true
             ctxStorage.errorMessage = message
-            try writePointer(.contextStorage(ctxStorage), through: ctxPointer, heap: &heap)
+            try writePointer(.contextStorage(ctxStorage), through: ctxPointer, heap: &vm.heap)
             // Close the done channel to signal cancellation
             guard case .channelStorage(var doneStorage) = try read(
-                pointer: ctxStorage.doneChannel, heap: heap)
+                pointer: ctxStorage.doneChannel, heap: vm.heap)
             else { return }
             if !doneStorage.closed {
                 doneStorage.closed = true
                 try writePointer(
-                    .channelStorage(doneStorage), through: ctxStorage.doneChannel, heap: &heap)
+                    .channelStorage(doneStorage), through: ctxStorage.doneChannel, heap: &vm.heap)
                 // Wake any goroutines blocked on receive from this done channel
                 for waiter in doneStorage.receiveWaiters {
                     try wakeGoroutine(waiter.goroutineID)
@@ -1799,7 +1786,7 @@ public struct GoVirtualMachine: Sendable {
             if value == .nilValue { return [] }
             guard case .slice(let slice) = value else { throw GoRuntimeError.typeMismatch }
             let range = try validatedSliceRange(slice)
-            guard case .array(let backing) = try read(pointer: slice.backing, heap: heap) else {
+            guard case .array(let backing) = try read(pointer: slice.backing, heap: vm.heap) else {
                 throw GoRuntimeError.typeMismatch
             }
             return backing[range]
@@ -1815,7 +1802,7 @@ public struct GoVirtualMachine: Sendable {
 
         func makeByteSlice(_ bytes: [UInt8]) throws -> GoValue {
             try requireCollectionCount(bytes.count, resource: "slice elements")
-            let cell = try heap.allocate(.array(bytes.map { .int(Int64($0)) }))
+            let cell = try vm.heap.allocate(.array(bytes.map { .int(Int64($0)) }))
             return .slice(
                 GoSliceValue(
                     backing: GoPointer(cell: cell),
@@ -1846,8 +1833,8 @@ public struct GoVirtualMachine: Sendable {
         func copiedLocks(_ value: GoValue) throws -> GoValue {
             guard GoLockCopies.holdsLock(value) else { return value }
             return try GoLockCopies.copied(
-                value, read: { try read(pointer: $0, heap: heap) },
-                allocate: { try heap.allocate($0) })
+                value, read: { try read(pointer: $0, heap: vm.heap) },
+                allocate: { try vm.heap.allocate($0) })
         }
 
         /// `values` with locks of their own, when they hold any: the
@@ -1863,7 +1850,7 @@ public struct GoVirtualMachine: Sendable {
             let range = try validatedSliceRange(destination)
             guard values.count <= range.count else { throw GoRuntimeError.invalidSliceBounds }
             if destination.backing.path.isEmpty,
-                try heap.replaceArrayElements(
+                try vm.heap.replaceArrayElements(
                     destination.backing.cell, from: range.lowerBound, with: values)
             {
                 return
@@ -1872,7 +1859,7 @@ public struct GoVirtualMachine: Sendable {
                 try writePointer(
                     value,
                     through: appending(index: range.lowerBound + offset, to: destination.backing),
-                    heap: &heap)
+                    heap: &vm.heap)
             }
         }
 
@@ -1897,10 +1884,10 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
 
             func descriptor(_ value: GoValue) throws -> Int {
                 guard let file = try resolveFile(value) else { throw GoRuntimeError.typeMismatch }
@@ -1916,7 +1903,7 @@ public struct GoVirtualMachine: Sendable {
             }
             // A nil `*os.File` is refused, as Go's methods refuse it.
             if operands[0] == .nilValue, name.hasPrefix("$os.File.") {
-                stack.append(contentsOf: [.int(0), errorValue(GoFiles.invalidFile)])
+                vm.stack.append(contentsOf: [.int(0), errorValue(GoFiles.invalidFile)])
                 return true
             }
             // A file the program closed fails as it does in Go instead of
@@ -1925,7 +1912,7 @@ public struct GoVirtualMachine: Sendable {
                 openFiles[handle] == nil
             {
                 let operation = name == "$os.File.Read" ? "read" : "write"
-                stack.append(contentsOf: [
+                vm.stack.append(contentsOf: [
                     .int(0), errorValue("\(operation): \(GoFiles.closedFile)"),
                 ])
                 return true
@@ -1959,7 +1946,7 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 guard capacity > 0, let destination else {
-                    stack.append(contentsOf: [.int(0), .nilValue])
+                    vm.stack.append(contentsOf: [.int(0), .nilValue])
                     break
                 }
                 func deliver(_ bytes: [UInt8]) throws -> [GoValue] {
@@ -1970,7 +1957,7 @@ public struct GoVirtualMachine: Sendable {
                         try writePointer(
                             .int(Int64(byte)),
                             through: appending(index: index, to: destination.backing),
-                            heap: &heap)
+                            heap: &vm.heap)
                     }
                     return [.int(Int64(bytes.count)), .nilValue]
                 }
@@ -1980,14 +1967,14 @@ public struct GoVirtualMachine: Sendable {
                     let count = min(capacity, standardInputCarry.count)
                     let bytes = Array(standardInputCarry[..<count])
                     standardInputCarry.removeFirst(count)
-                    stack.append(contentsOf: try deliver(bytes))
+                    vm.stack.append(contentsOf: try deliver(bytes))
                     break
                 }
                 guard let processContext, processContext.readiness(fd) != nil else {
-                    stack.append(contentsOf: [.int(0), errorValue("EOF")])
+                    vm.stack.append(contentsOf: [.int(0), errorValue("EOF")])
                     break
                 }
-                let readerID = currentGoroutineID
+                let readerID = vm.currentGoroutineID
                 pendingHostInputWaits += 1
                 beginHostWait()
                 processContext.read(fd, max: min(capacity, 65_536)) { bytes in
@@ -2001,13 +1988,13 @@ public struct GoVirtualMachine: Sendable {
                     }
                     if !cooperative { resumeIfSuspended() }
                 }
-                currentBlocked = true
+                vm.currentBlocked = true
             case "$os.ReadFile":
                 guard case .string(let path) = operands[0] else {
                     throw GoRuntimeError.typeMismatch
                 }
                 guard let processContext else {
-                    stack.append(contentsOf: [.nilValue, errorValue("open \(path): no file system")])
+                    vm.stack.append(contentsOf: [.nilValue, errorValue("open \(path): no file system")])
                     break
                 }
                 var bytes: [UInt8] = []
@@ -2027,19 +2014,19 @@ public struct GoVirtualMachine: Sendable {
                 } catch let error as GoRuntimeError {
                     throw error
                 } catch {
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .nilValue, errorValue("open \(path): \(String(describing: error))"),
                     ])
                     break
                 }
-                stack.append(contentsOf: [try makeByteSlice(bytes), .nilValue])
+                vm.stack.append(contentsOf: [try makeByteSlice(bytes), .nilValue])
             default:
                 guard case .string(let path) = operands[0],
                     case .int(let permissions) = operands[2]
                 else { throw GoRuntimeError.typeMismatch }
                 let contents = try sliceBytes(operands[1])
                 guard let processContext else {
-                    stack.append(errorValue("open \(path): no file system"))
+                    vm.stack.append(errorValue("open \(path): no file system"))
                     break
                 }
                 var failure: String?
@@ -2073,7 +2060,7 @@ public struct GoVirtualMachine: Sendable {
                 } catch {
                     failure = "open \(path): \(String(describing: error))"
                 }
-                stack.append(errorValue(failure))
+                vm.stack.append(errorValue(failure))
             }
             return true
         }
@@ -2105,10 +2092,10 @@ public struct GoVirtualMachine: Sendable {
                 locals = Array(resultStart..<resultEnd)
             }
             return try locals.map { localIndex in
-                guard let cell = frame.locals[localIndex], heap.contains(cell) else {
+                guard let cell = frame.locals[localIndex], vm.heap.contains(cell) else {
                     throw GoRuntimeError.invalidLocal(localIndex)
                 }
-                return heap[cell]
+                return vm.heap[cell]
             }
         }
 
@@ -2145,12 +2132,12 @@ public struct GoVirtualMachine: Sendable {
                     let function = GoFormat.textMethods.lazy
                         .compactMap({ method($0, of: target.owner) }).first
                 {
-                    var frame = try makeFrame(
-                        function: function, stackBase: stack.count,
+                    let frame = try makeFrame(
+                        function: function, stackBase: vm.stack.count,
                         arguments: [try methodReceiver(target.receiver, for: function)],
-                        heap: &heap)
+                        heap: &vm.heap)
                     frame.panicReport = report
-                    frames.append(frame)
+                    vm.frames.append(frame)
                     return
                 } else {
                     report.describeFirst(as: try panicText(record.value))
@@ -2269,7 +2256,7 @@ public struct GoVirtualMachine: Sendable {
                 return "[\(elements.count)]" + element(elements.first ?? .nilValue)
             case .map: return "map[interface {}]interface {}"
             case .pointer(let pointer):
-                return "*" + ((try? read(pointer: pointer, heap: heap)).map(inferredTypeName)
+                return "*" + ((try? read(pointer: pointer, heap: vm.heap)).map(inferredTypeName)
                     ?? "interface {}")
             case .channel: return "chan interface {}"
             case .interface(let boxed):
@@ -2389,7 +2376,7 @@ public struct GoVirtualMachine: Sendable {
                     // A library type's `String` is native: its text needs
                     // no frame, and no second pass of this call.
                     if let text = try GoLibraryMethods.text(
-                        of: value, owner: owner, read: { try read(pointer: $0, heap: heap) })
+                        of: value, owner: owner, read: { try read(pointer: $0, heap: vm.heap) })
                     {
                         return value == .nilValue ? text : GoFormat.string(text, directive) ?? text
                     }
@@ -2603,7 +2590,7 @@ public struct GoVirtualMachine: Sendable {
                             scope: exported ? scope : hidden, depth: depth + 1))
                 }
             case .map(let mapValue):
-                guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: vm.heap)
                 else { throw GoRuntimeError.typeMismatch }
                 var keyType: GoRuntimeType?
                 var valueType: GoRuntimeType?
@@ -2630,7 +2617,7 @@ public struct GoVirtualMachine: Sendable {
             case .pointer(let pointer):
                 // An operand that points to a struct, array, slice, or map
                 // prints as `&` and the value; a nested pointer as an address.
-                if depth == 0, let pointee = try? read(pointer: pointer, heap: heap) {
+                if depth == 0, let pointee = try? read(pointer: pointer, heap: vm.heap) {
                     var pointeeType: GoRuntimeType?
                     if case .pointer(let declaredPointee)? = kind { pointeeType = declaredPointee }
                     let expands: Bool
@@ -2657,7 +2644,7 @@ public struct GoVirtualMachine: Sendable {
                 // Library handles have one spelling.
                 guard directive.verb == "v", !directive.goSyntax else { return try bad() }
                 return GoFormat.pad(
-                    try describe(value, heap: heap, maximumBytes: scope.limit), directive)
+                    try describe(value, heap: vm.heap, maximumBytes: scope.limit), directive)
             }
         }
 
@@ -2733,11 +2720,11 @@ public struct GoVirtualMachine: Sendable {
         /// this before it reads its operands, because the result lies above
         /// them.
         func resumeGuestCalls() throws {
-            let frameIndex = frames.count - 1
-            guard frames[frameIndex].awaitsGuestCall else { return }
-            frames[frameIndex].awaitsGuestCall = false
-            frames[frameIndex].guestCallRecovery = .none
-            frames[frameIndex].guestCallResults.append(try pop(&stack))
+            let frameIndex = vm.frames.count - 1
+            guard vm.frames[frameIndex].awaitsGuestCall else { return }
+            vm.frames[frameIndex].awaitsGuestCall = false
+            vm.frames[frameIndex].guestCallRecovery = .none
+            vm.frames[frameIndex].guestCallResults.append(try pop(&vm.stack))
         }
 
         /// Run `body`, a native that may need guest functions run: a `String`
@@ -2752,29 +2739,29 @@ public struct GoVirtualMachine: Sendable {
             operands: [GoValue],
             _ body: () throws -> Result
         ) throws -> Result? {
-            let frameIndex = frames.count - 1
-            guestCallResults = frames[frameIndex].guestCallResults
+            let frameIndex = vm.frames.count - 1
+            guestCallResults = vm.frames[frameIndex].guestCallResults
             guestCallCursor = 0
             defer { guestCallResults = nil }
             do {
                 let result = try body()
-                frames[frameIndex].guestCallResults = []
+                vm.frames[frameIndex].guestCallResults = []
                 return result
             } catch let request as GoGuestCallRequest {
-                guard frames[frameIndex].guestCallResults.count
+                guard vm.frames[frameIndex].guestCallResults.count
                     < resourceLimits.maximumCollectionElements
                 else { throw GoRuntimeError.resourceLimitExceeded("guest calls of a native") }
-                guard frames.count < maximumCallDepth else {
+                guard vm.frames.count < maximumCallDepth else {
                     throw GoRuntimeError.callStackLimitExceeded
                 }
-                stack.append(contentsOf: operands)
-                frames[frameIndex].programCounter -= 1
-                frames[frameIndex].awaitsGuestCall = true
-                frames[frameIndex].guestCallRecovery = request.recovery
-                frames.append(
+                vm.stack.append(contentsOf: operands)
+                vm.frames[frameIndex].programCounter -= 1
+                vm.frames[frameIndex].awaitsGuestCall = true
+                vm.frames[frameIndex].guestCallRecovery = request.recovery
+                vm.frames.append(
                     try makeFrame(
-                        function: request.function, stackBase: stack.count,
-                        arguments: request.arguments, heap: &heap))
+                        function: request.function, stackBase: vm.stack.count,
+                        arguments: request.arguments, heap: &vm.heap))
                 return nil
             }
         }
@@ -2803,8 +2790,8 @@ public struct GoVirtualMachine: Sendable {
         /// Hand a panic of the guest function the frame on top was waiting
         /// for to the native that asked for it, as the function's result.
         func deliverGuestPanic(_ value: GoValue) {
-            frames[frames.count - 1].guestCallRecovery = .none
-            stack.append(
+            vm.frames[vm.frames.count - 1].guestCallRecovery = .none
+            vm.stack.append(
                 .interface(GoInterfaceValue(typeName: GoFormat.panicMarker, value: value)))
         }
 
@@ -2828,7 +2815,7 @@ public struct GoVirtualMachine: Sendable {
         /// receiver takes the value a pointer points to.
         func methodReceiver(_ value: GoValue, for function: GoBytecodeFunction) throws -> GoValue {
             if !function.name.hasPrefix("*"), case .pointer(let pointer) = value {
-                return try read(pointer: pointer, heap: heap)
+                return try read(pointer: pointer, heap: vm.heap)
             }
             return value
         }
@@ -2859,7 +2846,7 @@ public struct GoVirtualMachine: Sendable {
                 ]
             } else {
                 typeName = GoErrors.joiningType
-                let backing = try heap.allocate(.array(wrapped))
+                let backing = try vm.heap.allocate(.array(wrapped))
                 fields = [
                     GoStructFieldValue(name: "msg", value: .string(message)),
                     GoStructFieldValue(
@@ -2871,7 +2858,7 @@ public struct GoVirtualMachine: Sendable {
                                 zeroValue: .nilValue))),
                 ]
             }
-            let cell = try heap.allocate(
+            let cell = try vm.heap.allocate(
                 .structure(GoStructValue(typeName: String(typeName.dropFirst()), fields: fields)))
             return .interface(
                 GoInterfaceValue(typeName: typeName, value: .pointer(GoPointer(cell: cell))))
@@ -2880,8 +2867,8 @@ public struct GoVirtualMachine: Sendable {
         /// What `errors.Join` gives for `errors`, none of which is nil, and
         /// `message`, their texts on a line each.
         func makeJoinedError(_ message: String, of errors: [GoValue]) throws -> GoValue {
-            let backing = try heap.allocate(.array(errors))
-            let cell = try heap.allocate(
+            let backing = try vm.heap.allocate(.array(errors))
+            let cell = try vm.heap.allocate(
                 .structure(
                     GoStructValue(
                         typeName: String(GoErrors.joinedType.dropFirst()),
@@ -2910,14 +2897,14 @@ public struct GoVirtualMachine: Sendable {
             if boxed.typeName == GoErrors.joinedType {
                 // The errors, then their text.
                 guard case .pointer(let pointer) = boxed.value,
-                    case .structure(let structure) = try read(pointer: pointer, heap: heap),
+                    case .structure(let structure) = try read(pointer: pointer, heap: vm.heap),
                     structure.fields.count == 2,
                     case .string(let message) = structure.fields[1].value
                 else { return nil }
                 return (message, Array(try sliceElements(structure.fields[0].value)))
             }
             guard GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
-                case .structure(let structure) = try read(pointer: pointer, heap: heap),
+                case .structure(let structure) = try read(pointer: pointer, heap: vm.heap),
                 case .string(let message)? = structure.fields.first?.value
             else { return nil }
             guard structure.fields.count == 2 else { return (message, []) }
@@ -2995,7 +2982,7 @@ public struct GoVirtualMachine: Sendable {
         func libraryUnwrapResult(_ err: GoValue) throws -> GoValue? {
             guard case .interface(let boxed) = err, boxed.typeName != GoErrors.plainType,
                 GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
-                case .structure(let structure) = try read(pointer: pointer, heap: heap)
+                case .structure(let structure) = try read(pointer: pointer, heap: vm.heap)
             else { return nil }
             // The slice is the error's own, as in Go; it comes first in
             // what `errors.Join` made and second in the others.
@@ -3042,15 +3029,15 @@ public struct GoVirtualMachine: Sendable {
         /// given with `...`.
         func executeJoinNative(argumentCount: Int) throws {
             try resumeGuestCalls()
-            guard argumentCount >= 0, stack.count >= argumentCount else {
+            guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                 throw GoRuntimeError.stackUnderflow
             }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             let errors = try variadicOperands(operands).filter { $0 != .nilValue }
             guard !errors.isEmpty else {
-                stack.append(.nilValue)
+                vm.stack.append(.nilValue)
                 return
             }
             let text = try replayingGuestCalls(operands: operands) { () -> String in
@@ -3069,7 +3056,7 @@ public struct GoVirtualMachine: Sendable {
             }
             // An `Error` method is running first; this call executes again.
             guard let text else { return }
-            stack.append(try makeError(text, wrapping: errors, joined: true))
+            vm.stack.append(try makeError(text, wrapping: errors, joined: true))
         }
 
         /// Run `errors.Unwrap`, `errors.Is`, or `errors.As`. Returns `false`
@@ -3085,10 +3072,10 @@ public struct GoVirtualMachine: Sendable {
                     function: name, expected: expectedCount, actual: argumentCount)
             }
             try resumeGuestCalls()
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
 
             /// Go's `errors.Is`: the chain of `err`, depth first, holds an
             /// error equal to `target` or one whose `Is` method says so.
@@ -3169,12 +3156,12 @@ public struct GoVirtualMachine: Sendable {
                     guard err != .nilValue,
                         let found = try find(err, typed: specification, depth: 0)
                     else { return [.bool(false)] }
-                    try writePointer(found, through: target, heap: &heap)
+                    try writePointer(found, through: target, heap: &vm.heap)
                     return [.bool(true)]
                 }
             }
             // A method is running first; this call executes again after it.
-            if let outcome { stack.append(contentsOf: outcome) }
+            if let outcome { vm.stack.append(contentsOf: outcome) }
             return true
         }
 
@@ -3190,10 +3177,10 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: fixedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             let values = try variadicOperands(Array(operands[fixedCount...]))
 
             // A string result is bounded like any string, and printed text by
@@ -3256,7 +3243,7 @@ public struct GoVirtualMachine: Sendable {
                 ? { count, failure in [.int(Int64(count)), errorValue(failure)] } : nil
             switch native.destination {
             case .string:
-                stack.append(.string(text))
+                vm.stack.append(.string(text))
             case .error:
                 // One `%w` wraps its operand, several wrap them all, in the
                 // order of the operands. An operand that is no error wraps
@@ -3266,10 +3253,10 @@ public struct GoVirtualMachine: Sendable {
                     try isError(values[index]) ? values[index] : GoValue.nilValue
                 }
                 switch errors.count {
-                case 0: stack.append(try makeError(text))
-                case 1: stack.append(try makeError(text, wrapping: errors))
+                case 0: vm.stack.append(try makeError(text))
+                case 1: vm.stack.append(try makeError(text, wrapping: errors))
                 default:
-                    stack.append(
+                    vm.stack.append(
                         try makeError(
                             text, wrapping: errors.filter { $0 != .nilValue }, joins: true))
                 }
@@ -3281,7 +3268,7 @@ public struct GoVirtualMachine: Sendable {
                     // A closed file takes no output, and says so when asked.
                     guard openFiles[handle] != nil else {
                         if let results {
-                            stack.append(
+                            vm.stack.append(
                                 contentsOf: results(0, "write: \(GoFiles.closedFile)"))
                         }
                         break
@@ -3306,16 +3293,16 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             let integers = operands.compactMap { operand -> Int64? in
                 if case .int(let integer) = operand { return integer }
                 return nil
             }
             if integers.count == operands.count, let result = try GoNumeric.integer(name, integers) {
-                stack.append(result)
+                vm.stack.append(result)
                 return true
             }
             func text(_ index: Int) throws -> String {
@@ -3334,8 +3321,8 @@ public struct GoVirtualMachine: Sendable {
             case "$num.runes":
                 let elements = try text(0).unicodeScalars.map { GoValue.int(Int64($0.value)) }
                 try requireCollectionCount(elements.count, resource: "slice elements")
-                let cell = try heap.allocate(.array(elements))
-                stack.append(
+                let cell = try vm.heap.allocate(.array(elements))
+                vm.stack.append(
                     .slice(
                         GoSliceValue(
                             backing: GoPointer(cell: cell), start: 0, length: elements.count,
@@ -3350,20 +3337,20 @@ public struct GoVirtualMachine: Sendable {
                 guard result.utf8.count <= resourceLimits.maximumStringBytes else {
                     throw GoRuntimeError.resourceLimitExceeded("string bytes")
                 }
-                stack.append(.string(result))
+                vm.stack.append(.string(result))
             case "$strconv.ParseInt":
                 let parsed = GoNumeric.parseSigned(
                     try text(0), base: try integer(1), bitSize: try integer(2))
-                stack.append(.int(parsed.value))
-                stack.append(
+                vm.stack.append(.int(parsed.value))
+                vm.stack.append(
                     try parsed.failure.map {
                         try makeError($0.message(function: "ParseInt", text: try text(0)))
                     } ?? .nilValue)
             case "$strconv.ParseUint":
                 let parsed = GoNumeric.parseUnsigned(
                     try text(0), base: try integer(1), bitSize: try integer(2))
-                stack.append(.int(Int64(bitPattern: parsed.value)))
-                stack.append(
+                vm.stack.append(.int(Int64(bitPattern: parsed.value)))
+                vm.stack.append(
                     try parsed.failure.map {
                         try makeError($0.message(function: "ParseUint", text: try text(0)))
                     } ?? .nilValue)
@@ -3372,24 +3359,24 @@ public struct GoVirtualMachine: Sendable {
                 guard (2...36).contains(base) else {
                     throw GoRuntimePanic(text: "strconv: illegal AppendInt/FormatInt base")
                 }
-                stack.append(
+                vm.stack.append(
                     .string(
                         name == "$strconv.FormatInt"
                             ? String(try integer(0), radix: Int(base))
                             : String(UInt64(bitPattern: try integer(0)), radix: Int(base))))
             case "$utf8.RuneCountInString":
-                stack.append(.int(Int64(try text(0).unicodeScalars.count)))
+                vm.stack.append(.int(Int64(try text(0).unicodeScalars.count)))
             case "$utf8.ValidString":
                 // A string of the VM is valid UTF-8 by construction.
                 _ = try text(0)
-                stack.append(.bool(true))
+                vm.stack.append(.bool(true))
             case "$utf8.DecodeRuneInString":
                 if let first = try text(0).unicodeScalars.first {
-                    stack.append(.int(Int64(first.value)))
-                    stack.append(.int(Int64(UTF8.width(first))))
+                    vm.stack.append(.int(Int64(first.value)))
+                    vm.stack.append(.int(Int64(UTF8.width(first))))
                 } else {
-                    stack.append(.int(0xFFFD))
-                    stack.append(.int(0))
+                    vm.stack.append(.int(0xFFFD))
+                    vm.stack.append(.int(0))
                 }
             case "$utf8.EncodeRune":
                 guard case .slice(let destination) = operands[0] else {
@@ -3403,20 +3390,20 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimePanic.index(encoded.count - 1, length: destination.length)
                 }
                 try storeElements(encoded.map { GoValue.int(Int64($0)) }, into: destination)
-                stack.append(.int(Int64(encoded.count)))
+                vm.stack.append(.int(Int64(encoded.count)))
             case "$strings.ContainsRune":
-                stack.append(.bool(GoNumeric.index(of: try integer(1), in: try text(0)) >= 0))
+                vm.stack.append(.bool(GoNumeric.index(of: try integer(1), in: try text(0)) >= 0))
             case "$strings.IndexRune":
-                stack.append(.int(Int64(GoNumeric.index(of: try integer(1), in: try text(0)))))
+                vm.stack.append(.int(Int64(GoNumeric.index(of: try integer(1), in: try text(0)))))
             case "$strings.IndexByte":
                 let wanted = UInt8(truncatingIfNeeded: try integer(1))
                 let index = Array(try text(0).utf8).firstIndex(of: wanted)
-                stack.append(.int(Int64(index ?? -1)))
+                vm.stack.append(.int(Int64(index ?? -1)))
             case "$strconv.ParseFloat":
                 let size = try integer(1)
                 let parsed = GoFloat.parse(try text(0), bitSize: size == 32 ? 32 : 64)
-                stack.append(.int(Int64(bitPattern: parsed.value.bitPattern)))
-                stack.append(
+                vm.stack.append(.int(Int64(bitPattern: parsed.value.bitPattern)))
+                vm.stack.append(
                     try parsed.failure.map {
                         try makeError(
                             GoNumeric.ParseFailure($0).message(
@@ -3429,7 +3416,7 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimePanic(text: "strconv: illegal AppendFloat/FormatFloat bitSize")
                 }
                 let precision = try integer(2)
-                stack.append(
+                vm.stack.append(
                     .string(
                         GoFloat.format(
                             value, format: UInt8(truncatingIfNeeded: try integer(1)),
@@ -3460,12 +3447,12 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.argumentCountMismatch(
                         function: name, expected: 1, actual: argumentCount)
                 }
-                guard case .string(let text) = try pop(&stack) else {
+                guard case .string(let text) = try pop(&vm.stack) else {
                     throw GoRuntimeError.typeMismatch
                 }
                 let parsed = GoDuration.parse(text)
-                stack.append(.int(parsed.duration))
-                stack.append(errorValue(parsed.error))
+                vm.stack.append(.int(parsed.duration))
+                vm.stack.append(errorValue(parsed.error))
                 return true
             }
             guard let expectedCount = GoNative.timeArgumentCounts[name] else { return false }
@@ -3473,17 +3460,17 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = try stack[start...].map { value -> Int64 in
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = try vm.stack[start...].map { value -> Int64 in
                 guard case .int(let integer) = value else { throw GoRuntimeError.typeMismatch }
                 return integer
             }
-            stack.removeSubrange(start...)
+            vm.stack.removeSubrange(start...)
             guard let result = GoNative.time(name, operands, now: runtimeTimestamp()) else {
                 return false
             }
-            stack.append(result)
+            vm.stack.append(result)
             return true
         }
 
@@ -3495,17 +3482,17 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: counts.operands, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             for result in try GoCalendar.call(
                 name, operands, now: runtimeTimestamp(), bytes: { try sliceBytes($0) })
             {
                 switch result {
-                case .value(let value): stack.append(value)
-                case .bytes(let bytes): stack.append(try makeByteSlice(bytes))
-                case .error(let message): stack.append(errorValue(message))
+                case .value(let value): vm.stack.append(value)
+                case .bytes(let bytes): vm.stack.append(try makeByteSlice(bytes))
+                case .error(let message): vm.stack.append(errorValue(message))
                 }
             }
             return true
@@ -3520,7 +3507,7 @@ public struct GoVirtualMachine: Sendable {
                 if value == .nilValue { throw GoRuntimePanic.nilDereference }
                 throw GoRuntimeError.typeMismatch
             }
-            return (pointer, try read(pointer: pointer, heap: heap))
+            return (pointer, try read(pointer: pointer, heap: vm.heap))
         }
 
         /// Run a `sync` native: `TryLock` of a mutex, a method of a
@@ -3532,33 +3519,33 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             switch name {
             case "$sync.Mutex.TryLock":
                 guard case .mutex(let mutex) = operands[0],
                     case .mutexStorage(var storage) = try read(
-                        pointer: mutex.storage, heap: heap)
+                        pointer: mutex.storage, heap: vm.heap)
                 else { throw GoRuntimeError.typeMismatch }
-                stack.append(.bool(!storage.locked))
+                vm.stack.append(.bool(!storage.locked))
                 if !storage.locked {
                     storage.locked = true
                     try writePointer(
-                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                        .mutexStorage(storage), through: mutex.storage, heap: &vm.heap)
                 }
             case GoLockCopies.copyName:
-                stack.append(try copiedLocks(operands[0]))
+                vm.stack.append(try copiedLocks(operands[0]))
             case "$sync.RWMutex.RLocker":
                 // The same lock under the type whose `Lock` reads.
-                stack.append(
+                vm.stack.append(
                     .interface(
                         GoInterfaceValue(
                             typeName: GoSync.readLockerTypeName, value: operands[0])))
             case "$sync.NewCond":
-                let cell = try heap.allocate(GoSync.condition(locker: operands[0]))
-                stack.append(.pointer(GoPointer(cell: cell)))
+                let cell = try vm.heap.allocate(GoSync.condition(locker: operands[0]))
+                vm.stack.append(.pointer(GoPointer(cell: cell)))
             case GoSync.condAdd, GoSync.condWait, "$sync.Cond.Signal", "$sync.Cond.Broadcast":
                 try executeConditionNative(name, operands)
             default:
@@ -3602,11 +3589,11 @@ public struct GoVirtualMachine: Sendable {
                 state.readerCount += 1
                 if state.readerCount < 0 {
                     // A writer holds the lock or waits for it.
-                    try park { $0.readers.append(currentGoroutineID) }
-                    currentBlocked = true
+                    try park { $0.readers.append(vm.currentGoroutineID) }
+                    vm.currentBlocked = true
                 }
             case "$sync.RWMutex.TryRLock":
-                stack.append(.bool(state.readerCount >= 0))
+                vm.stack.append(.bool(state.readerCount >= 0))
                 if state.readerCount >= 0 { state.readerCount += 1 }
             case "$sync.RWMutex.RUnlock":
                 state.readerCount -= 1
@@ -3624,18 +3611,18 @@ public struct GoVirtualMachine: Sendable {
                 }
             case "$sync.RWMutex.Lock":
                 if state.isLocked {
-                    try park { $0.writers.append(currentGoroutineID) }
-                    currentBlocked = true
+                    try park { $0.writers.append(vm.currentGoroutineID) }
+                    vm.currentBlocked = true
                 } else {
                     state.isLocked = true
                     if announceWriter() {
-                        try park { $0.pendingWriter = currentGoroutineID }
-                        currentBlocked = true
+                        try park { $0.pendingWriter = vm.currentGoroutineID }
+                        vm.currentBlocked = true
                     }
                 }
             case "$sync.RWMutex.TryLock":
                 let free = !state.isLocked && state.readerCount == 0
-                stack.append(.bool(free))
+                vm.stack.append(.bool(free))
                 if free {
                     state.isLocked = true
                     state.readerCount = -GoSync.maxReaders
@@ -3664,7 +3651,7 @@ public struct GoVirtualMachine: Sendable {
             default:
                 throw GoRuntimeError.missingFunction(name)
             }
-            try writePointer(state.stored(in: lock.value), through: lock.pointer, heap: &heap)
+            try writePointer(state.stored(in: lock.value), through: lock.pointer, heap: &vm.heap)
             if let queues = waiters, queues.isEmpty {
                 runtimeHandleRoots.removeValue(forKey: queues.root)
                 lockWaiters[address] = nil
@@ -3686,7 +3673,7 @@ public struct GoVirtualMachine: Sendable {
             var parked = conditionWaiters[address]
             switch name {
             case GoSync.condAdd:
-                stack.append(.int(state.wait))
+                vm.stack.append(.int(state.wait))
                 state.wait = (state.wait + 1) & 0xFFFF_FFFF
             case GoSync.condWait:
                 guard case .int(let ticket) = operands[1] else { throw GoRuntimeError.typeMismatch }
@@ -3694,9 +3681,9 @@ public struct GoVirtualMachine: Sendable {
                 guard !GoSync.ConditionState.isBefore(ticket, state.notify) else { return }
                 var queue =
                     try parked ?? GoConditionWaiters(root: retainRuntimeHandle(operands[0]))
-                queue.waiters.append((ticket, currentGoroutineID))
+                queue.waiters.append((ticket, vm.currentGoroutineID))
                 conditionWaiters[address] = queue
-                currentBlocked = true
+                vm.currentBlocked = true
                 return
             case "$sync.Cond.Signal":
                 guard state.wait != state.notify else { return }
@@ -3714,7 +3701,7 @@ public struct GoVirtualMachine: Sendable {
                 parked?.waiters = []
             }
             try writePointer(
-                state.stored(in: condition.value), through: condition.pointer, heap: &heap)
+                state.stored(in: condition.value), through: condition.pointer, heap: &vm.heap)
             if let queue = parked, queue.waiters.isEmpty {
                 runtimeHandleRoots.removeValue(forKey: queue.root)
                 conditionWaiters[address] = nil
@@ -3742,52 +3729,52 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = try stack[start...].map { value -> String in
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = try vm.stack[start...].map { value -> String in
                 guard case .string(let text) = value else { throw GoRuntimeError.typeMismatch }
                 return text
             }
-            stack.removeSubrange(start...)
+            vm.stack.removeSubrange(start...)
             switch name {
             case "$os.Getenv":
-                stack.append(.string(withEnvironment { $0.value(of: operands[0]) } ?? ""))
+                vm.stack.append(.string(withEnvironment { $0.value(of: operands[0]) } ?? ""))
             case "$os.LookupEnv":
                 let value = withEnvironment { $0.value(of: operands[0]) }
-                stack.append(.string(value ?? ""))
-                stack.append(.bool(value != nil))
+                vm.stack.append(.string(value ?? ""))
+                vm.stack.append(.bool(value != nil))
             case "$os.Setenv":
                 guard GoProcess.isSettable(name: operands[0], value: operands[1]) else {
-                    stack.append(errorValue(GoProcess.invalidVariable))
+                    vm.stack.append(errorValue(GoProcess.invalidVariable))
                     break
                 }
                 withEnvironment { $0.set(operands[0], to: operands[1]) }
                 processContext?.setenv(operands[0], operands[1])
-                stack.append(.nilValue)
+                vm.stack.append(.nilValue)
             case "$os.Unsetenv":
                 if withEnvironment({ $0.unset(operands[0]) }) {
                     processContext?.unsetenv(operands[0])
                 }
-                stack.append(.nilValue)
+                vm.stack.append(.nilValue)
             case "$os.Environ":
                 let entries = withEnvironment { $0.entries }.map { GoValue.string($0) }
                 try requireCollectionCount(entries.count, resource: "slice elements")
-                let cell = try heap.allocate(.array(entries))
-                stack.append(
+                let cell = try vm.heap.allocate(.array(entries))
+                vm.stack.append(
                     .slice(
                         GoSliceValue(
                             backing: GoPointer(cell: cell), start: 0, length: entries.count,
                             capacity: entries.count, zeroValue: .string(""))))
             case "$os.Getpid":
-                stack.append(
+                vm.stack.append(
                     .int(processContext.map { Int64($0.getpid()) } ?? GoProcess.detachedProcessID))
             case "$os.Hostname":
-                stack.append(.string(processContext?.hostname ?? GoProcess.detachedHostname))
-                stack.append(.nilValue)
+                vm.stack.append(.string(processContext?.hostname ?? GoProcess.detachedHostname))
+                vm.stack.append(.nilValue)
             default:
-                stack.append(
+                vm.stack.append(
                     .string(processContext?.currentDirectory ?? GoProcess.detachedDirectory))
-                stack.append(.nilValue)
+                vm.stack.append(.nilValue)
             }
             return true
         }
@@ -3807,7 +3794,7 @@ public struct GoVirtualMachine: Sendable {
         func startGoroutine(calling value: GoValue) throws {
             let target = try functionValueTarget(value)
             guard resourceLimits.maximumGoroutines >= 2,
-                goroutines.count <= resourceLimits.maximumGoroutines - 2
+                vm.goroutines.count <= resourceLimits.maximumGoroutines - 2
             else {
                 throw GoRuntimeError.resourceLimitExceeded("goroutines")
             }
@@ -3816,14 +3803,14 @@ public struct GoVirtualMachine: Sendable {
             }
             let id = nextGoroutineID
             nextGoroutineID += 1
-            goroutines[id] = GoroutineContext(
+            vm.goroutines[id] = GoroutineContext(
                 frames: [
                     try makeFrame(
                         function: target.function, stackBase: 0,
-                        arguments: try target.arguments(with: [GoValue]()), heap: &heap)
+                        arguments: try target.arguments(with: [GoValue]()), heap: &vm.heap)
                 ],
                 stack: [])
-            runQueue.append(id)
+            vm.runQueue.append(id)
         }
 
         /// Stop the timer at `address` from firing. Whether it was running.
@@ -3868,7 +3855,7 @@ public struct GoVirtualMachine: Sendable {
                     var timer = runningTimers[address], timer.sequence == sequence
                 else { return }
                 do {
-                    let fields = GoTimers.fields(of: try read(pointer: pointer, heap: heap))
+                    let fields = GoTimers.fields(of: try read(pointer: pointer, heap: vm.heap))
                     if let function = fields?.function {
                         // What `time.AfterFunc` was given runs in a
                         // goroutine of its own.
@@ -3907,11 +3894,11 @@ public struct GoVirtualMachine: Sendable {
         /// there was one.
         func drainTimerChannel(_ channel: GoValue) throws -> Bool {
             guard case .channel(let value) = channel,
-                case .channelStorage(var storage) = try read(pointer: value.storage, heap: heap),
+                case .channelStorage(var storage) = try read(pointer: value.storage, heap: vm.heap),
                 !storage.buffer.isEmpty
             else { return false }
             storage.buffer.removeAll()
-            try writePointer(.channelStorage(storage), through: value.storage, heap: &heap)
+            try writePointer(.channelStorage(storage), through: value.storage, heap: &vm.heap)
             return true
         }
 
@@ -3924,10 +3911,10 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             func duration(_ index: Int) throws -> Int64 {
                 guard case .int(let nanoseconds) = operands[index] else {
                     throw GoRuntimeError.typeMismatch
@@ -3941,13 +3928,13 @@ public struct GoVirtualMachine: Sendable {
             ) throws {
                 var channel = GoValue.nilValue
                 if function == nil {
-                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let cell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     channel = .channel(GoChannelValue(storage: GoPointer(cell: cell)))
                 }
                 let pointer = GoPointer(
-                    cell: try heap.allocate(
+                    cell: try vm.heap.allocate(
                         GoTimers.value(typeName: typeName, channel: channel, function: function)))
-                stack.append(.pointer(pointer))
+                vm.stack.append(.pointer(pointer))
                 try armTimer(at: pointer, after: nanoseconds, period: period)
             }
 
@@ -3985,7 +3972,7 @@ public struct GoVirtualMachine: Sendable {
                 if name == "$time.Timer.Reset" {
                     try armTimer(at: timer.pointer, after: try duration(1))
                 }
-                stack.append(.bool(wasRunning || wasSent))
+                vm.stack.append(.bool(wasRunning || wasSent))
             case "$time.Ticker.Stop":
                 // Go lets a ticker nobody made be stopped.
                 guard fields.isInitialized else { break }
@@ -4014,10 +4001,10 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
             var held = operands[0]
             var dynamicType = GoTypeDescriptor.inferred(from: held)
             if case .interface(let boxed) = held {
@@ -4032,9 +4019,9 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 if case .slice(let slice) = held {
-                    stack.append(.int(Int64(try validatedSliceRange(slice).count)))
+                    vm.stack.append(.int(Int64(try validatedSliceRange(slice).count)))
                 } else if held == .nilValue, case .slice? = dynamicType {
-                    stack.append(.int(0))
+                    vm.stack.append(.int(0))
                 } else {
                     // What Go's `reflect` says of a value that is no slice.
                     throw GoRuntimePanic(
@@ -4054,9 +4041,9 @@ public struct GoVirtualMachine: Sendable {
                 // exchange costs the same whatever the length.
                 let left = appending(index: range.lowerBound + i, to: slice.backing)
                 let right = appending(index: range.lowerBound + j, to: slice.backing)
-                let moved = try read(pointer: left, heap: heap)
-                try writePointer(try read(pointer: right, heap: heap), through: left, heap: &heap)
-                try writePointer(moved, through: right, heap: &heap)
+                let moved = try read(pointer: left, heap: vm.heap)
+                try writePointer(try read(pointer: right, heap: vm.heap), through: left, heap: &vm.heap)
+                try writePointer(moved, through: right, heap: &vm.heap)
             }
             return true
         }
@@ -4070,15 +4057,15 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            let second = try pop(&stack)
-            let first = try sliceElements(try pop(&stack))
+            let second = try pop(&vm.stack)
+            let first = try sliceElements(try pop(&vm.stack))
             // The second operand is a slice, or the byte to find.
             var other: ArraySlice<GoValue> = []
             if case .int = second {} else { other = try sliceElements(second) }
             guard let result = GoBytes.result(name, first, other, byte: second) else {
                 throw GoRuntimeError.typeMismatch
             }
-            stack.append(result)
+            vm.stack.append(result)
             return true
         }
 
@@ -4092,38 +4079,38 @@ public struct GoVirtualMachine: Sendable {
             }
             var second: Int64 = 0
             if expectedCount == 2 {
-                guard case .int(let value) = try pop(&stack) else {
+                guard case .int(let value) = try pop(&vm.stack) else {
                     throw GoRuntimeError.typeMismatch
                 }
                 second = value
             }
-            let operand = try pop(&stack)
+            let operand = try pop(&vm.stack)
             func text() throws -> String {
                 guard case .string(let text) = operand else { throw GoRuntimeError.typeMismatch }
                 return text
             }
             switch name {
             case "$http.CanonicalHeaderKey":
-                stack.append(.string(GoHTTP.canonicalHeaderKey(try text())))
+                vm.stack.append(.string(GoHTTP.canonicalHeaderKey(try text())))
             case "$http.DetectContentType":
-                stack.append(.string(GoHTTP.detectContentType(try sliceBytes(operand))))
+                vm.stack.append(.string(GoHTTP.detectContentType(try sliceBytes(operand))))
             case "$http.lineEnd":
                 let start = Int(clamping: second)
-                stack.append(.int(Int64(GoHTTP.lineEnd(try sliceBytes(operand), from: start))))
+                vm.stack.append(.int(Int64(GoHTTP.lineEnd(try sliceBytes(operand), from: start))))
             case "$http.formatTime":
                 guard case .int(let seconds) = operand,
                     let layout = GoHTTP.TimeLayout(rawValue: second)
                 else { throw GoRuntimeError.typeMismatch }
-                stack.append(.string(GoHTTP.formatTime(unixSeconds: seconds, layout: layout)))
+                vm.stack.append(.string(GoHTTP.formatTime(unixSeconds: seconds, layout: layout)))
             case "$http.remoteAddr":
                 guard case .netConn(let connection) = operand else {
                     throw GoRuntimeError.typeMismatch
                 }
-                stack.append(.string(connection.remoteAddr))
+                vm.stack.append(.string(connection.remoteAddr))
             case "$http.validToken":
-                stack.append(.bool(GoHTTP.isToken(try text())))
+                vm.stack.append(.bool(GoHTTP.isToken(try text())))
             case "$http.validHeaderValue":
-                stack.append(.bool(GoHTTP.isHeaderValue(try text())))
+                vm.stack.append(.bool(GoHTTP.isHeaderValue(try text())))
             default:
                 return false
             }
@@ -4140,11 +4127,11 @@ public struct GoVirtualMachine: Sendable {
             }
             var mode = GoURL.Mode.path
             if expectedCount == 2 {
-                guard case .int(let raw) = try pop(&stack), let named = GoURL.Mode(rawValue: raw)
+                guard case .int(let raw) = try pop(&vm.stack), let named = GoURL.Mode(rawValue: raw)
                 else { throw GoRuntimeError.typeMismatch }
                 mode = named
             }
-            guard case .string(let text) = try pop(&stack) else {
+            guard case .string(let text) = try pop(&vm.stack) else {
                 throw GoRuntimeError.typeMismatch
             }
             switch name {
@@ -4153,24 +4140,24 @@ public struct GoVirtualMachine: Sendable {
                 // error that is: none, an escape, or a host.
                 switch GoURL.unescape(text, mode) {
                 case .success(let bytes):
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .string(GoNative.string(fromBytes: bytes)), .string(""), .int(0),
                     ])
                 case .failure(.escape(let bad)):
-                    stack.append(contentsOf: [.string(""), .string(bad), .int(1)])
+                    vm.stack.append(contentsOf: [.string(""), .string(bad), .int(1)])
                 case .failure(.host(let bad)):
-                    stack.append(contentsOf: [.string(""), .string(bad), .int(2)])
+                    vm.stack.append(contentsOf: [.string(""), .string(bad), .int(2)])
                 }
             case "$url.escape":
                 let escaped = GoURL.escape(text, mode)
                 guard escaped.utf8.count <= resourceLimits.maximumStringBytes else {
                     throw GoRuntimeError.resourceLimitExceeded("string bytes")
                 }
-                stack.append(.string(escaped))
+                vm.stack.append(.string(escaped))
             case "$url.validEncoded":
-                stack.append(.bool(GoURL.isValidEncoded(text, mode)))
+                vm.stack.append(.bool(GoURL.isValidEncoded(text, mode)))
             case "$url.hasControlByte":
-                stack.append(.bool(GoURL.hasControlByte(text)))
+                vm.stack.append(.bool(GoURL.hasControlByte(text)))
             default:
                 return false
             }
@@ -4188,10 +4175,10 @@ public struct GoVirtualMachine: Sendable {
                 throw GoRuntimeError.argumentCountMismatch(
                     function: name, expected: expectedCount, actual: argumentCount)
             }
-            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
-            let start = stack.count - argumentCount
-            let operands = Array(stack[start...])
-            stack.removeSubrange(start...)
+            guard vm.stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
 
             func text(_ value: GoValue) throws -> String {
                 guard case .string(let text) = value else { throw GoRuntimeError.typeMismatch }
@@ -4275,17 +4262,17 @@ public struct GoVirtualMachine: Sendable {
 
             switch name {
             case "$os.Open":
-                stack.append(
+                vm.stack.append(
                     contentsOf: open(
                         try text(operands[0]), flag: GoFiles.readOnly, permissions: 0))
             case "$os.Create":
-                stack.append(
+                vm.stack.append(
                     contentsOf: open(
                         try text(operands[0]),
                         flag: GoFiles.readWrite | GoFiles.create | GoFiles.truncate,
                         permissions: 0o666))
             case "$os.OpenFile":
-                stack.append(
+                vm.stack.append(
                     contentsOf: open(
                         try text(operands[0]),
                         flag: try integer(operands[1]),
@@ -4293,7 +4280,7 @@ public struct GoVirtualMachine: Sendable {
             case "$os.Remove":
                 let path = try text(operands[0])
                 guard let processContext else {
-                    stack.append(failure("remove", path, "no file system"))
+                    vm.stack.append(failure("remove", path, "no file system"))
                     break
                 }
                 do {
@@ -4307,16 +4294,16 @@ public struct GoVirtualMachine: Sendable {
                         throw SyscallError.directoryNotEmpty
                     }
                     try processContext.remove(entry, in: FileSystemScope(rootPath: parent))
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 } catch {
-                    stack.append(failure("remove", path, error))
+                    vm.stack.append(failure("remove", path, error))
                 }
             case "$os.Rename":
                 let source = try text(operands[0])
                 let destination = try text(operands[1])
                 let subject = "\(source) \(destination)"
                 guard let processContext else {
-                    stack.append(failure("rename", subject, "no file system"))
+                    vm.stack.append(failure("rename", subject, "no file system"))
                     break
                 }
                 do {
@@ -4334,15 +4321,15 @@ public struct GoVirtualMachine: Sendable {
                     try processContext.rename(
                         sourceEntry, in: FileSystemScope(rootPath: sourceParent),
                         to: destinationEntry, in: FileSystemScope(rootPath: destinationParent))
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 } catch {
-                    stack.append(failure("rename", subject, error))
+                    vm.stack.append(failure("rename", subject, error))
                 }
             case "$os.Mkdir":
                 let path = try text(operands[0])
                 let permissions = try integer(operands[1])
                 guard let processContext else {
-                    stack.append(failure("mkdir", path, "no file system"))
+                    vm.stack.append(failure("mkdir", path, "no file system"))
                     break
                 }
                 do {
@@ -4357,30 +4344,30 @@ public struct GoVirtualMachine: Sendable {
                     try processContext.mkdir(entry, in: FileSystemScope(rootPath: parent))
                     _ = processContext.chmod(
                         path, mode: creationMode(permissions, in: processContext))
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 } catch {
-                    stack.append(failure("mkdir", path, error))
+                    vm.stack.append(failure("mkdir", path, error))
                 }
             case "$os.File.Close":
                 guard let (file, processContext) = try receiver("close") else {
-                    stack.append(methodFailure)
+                    vm.stack.append(methodFailure)
                     break
                 }
                 if case .int(let handle) = operands[0] { openFiles[handle] = nil }
                 do {
                     try processContext.closeFile(file.descriptor)
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 } catch {
-                    stack.append(failure("close", file.name, error))
+                    vm.stack.append(failure("close", file.name, error))
                 }
             case "$os.File.Sync":
                 guard let (file, processContext) = try receiver("sync") else {
-                    stack.append(methodFailure)
+                    vm.stack.append(methodFailure)
                     break
                 }
                 // VFS writes are complete when they return; only the
                 // descriptor can be wrong.
-                stack.append(
+                vm.stack.append(
                     processContext.fileAccessMode(file.descriptor) == nil
                         ? failure("sync", file.name, SyscallError.badFileDescriptor)
                         : .nilValue)
@@ -4388,19 +4375,19 @@ public struct GoVirtualMachine: Sendable {
                 let offset = try integer(operands[1])
                 let whence = try integer(operands[2])
                 guard let (file, processContext) = try receiver("seek") else {
-                    stack.append(contentsOf: [.int(0), methodFailure])
+                    vm.stack.append(contentsOf: [.int(0), methodFailure])
                     break
                 }
                 guard (0...2).contains(whence), let target = Int(exactly: offset),
                     let position = processContext.seek(
                         file.descriptor, to: target, whence: Int(whence))
                 else {
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(0), failure("seek", file.name, SyscallError.invalidArgument),
                     ])
                     break
                 }
-                stack.append(contentsOf: [.int(Int64(position)), .nilValue])
+                vm.stack.append(contentsOf: [.int(Int64(position)), .nilValue])
             case "$os.File.ReadAt":
                 let offset = try integer(operands[2])
                 let destination: GoSliceValue?
@@ -4413,11 +4400,11 @@ public struct GoVirtualMachine: Sendable {
                     throw GoRuntimeError.typeMismatch
                 }
                 guard let (file, processContext) = try receiver("readat") else {
-                    stack.append(contentsOf: [.int(0), methodFailure])
+                    vm.stack.append(contentsOf: [.int(0), methodFailure])
                     break
                 }
                 guard offset >= 0, let position = Int(exactly: offset) else {
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(0), failure("readat", file.name, "negative offset"),
                     ])
                     break
@@ -4428,31 +4415,31 @@ public struct GoVirtualMachine: Sendable {
                         file.descriptor, max: wanted, offset: position)
                     guard bytes.count <= wanted else { throw GoRuntimeError.invalidSliceBounds }
                     if let destination { try storeBytes(bytes, into: destination) }
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(Int64(bytes.count)),
                         bytes.count < wanted ? errorValue(GoFiles.endOfFile) : .nilValue,
                     ])
                 } catch let error as GoRuntimeError {
                     throw error
                 } catch {
-                    stack.append(contentsOf: [.int(0), failure("read", file.name, error)])
+                    vm.stack.append(contentsOf: [.int(0), failure("read", file.name, error)])
                 }
             default:
                 let contents = try sliceBytes(operands[1])
                 let offset = try integer(operands[2])
                 guard let (file, processContext) = try receiver("writeat") else {
-                    stack.append(contentsOf: [.int(0), methodFailure])
+                    vm.stack.append(contentsOf: [.int(0), methodFailure])
                     break
                 }
                 guard !file.appends else {
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(0),
                         errorValue("os: invalid use of WriteAt on file opened with O_APPEND"),
                     ])
                     break
                 }
                 guard offset >= 0, let position = Int(exactly: offset) else {
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(0), failure("writeat", file.name, "negative offset"),
                     ])
                     break
@@ -4460,12 +4447,12 @@ public struct GoVirtualMachine: Sendable {
                 do {
                     let written = try processContext.pwrite(
                         file.descriptor, contents, offset: position)
-                    stack.append(contentsOf: [
+                    vm.stack.append(contentsOf: [
                         .int(Int64(written)),
                         written < contents.count ? errorValue("short write") : .nilValue,
                     ])
                 } catch {
-                    stack.append(contentsOf: [.int(0), failure("write", file.name, error)])
+                    vm.stack.append(contentsOf: [.int(0), failure("write", file.name, error)])
                 }
             }
             return true
@@ -4473,7 +4460,7 @@ public struct GoVirtualMachine: Sendable {
 
         func performGarbageCollection() {
             var rootCells = Array(0..<executable.globalCount)
-            var rootValues: [GoValue] = stack
+            var rootValues: [GoValue] = vm.stack
 
             func appendRoots(from frame: Frame) {
                 for localIndex in frame.function.rootLocalIndices
@@ -4494,8 +4481,8 @@ public struct GoVirtualMachine: Sendable {
                 }
             }
 
-            for frame in frames { appendRoots(from: frame) }
-            for context in goroutines.values {
+            for frame in vm.frames { appendRoots(from: frame) }
+            for context in vm.goroutines.values {
                 rootValues.append(contentsOf: context.stack)
                 for frame in context.frames { appendRoots(from: frame) }
             }
@@ -4512,7 +4499,7 @@ public struct GoVirtualMachine: Sendable {
                 }
             }
             rootValues.append(contentsOf: runtimeHandleRoots.values)
-            heap.collect(rootCells: rootCells, rootValues: rootValues)
+            vm.heap.collect(rootCells: rootCells, rootValues: rootValues)
         }
 
         /// Pop the operands of a Go `strings` function and return its result.
@@ -4541,7 +4528,7 @@ public struct GoVirtualMachine: Sendable {
                             slice.start, index, resource: "slice index")
                         guard case .string(let element) = try read(
                             pointer: appending(index: absoluteIndex, to: slice.backing),
-                            heap: heap)
+                            heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
                         elements.append(element)
                     }
@@ -4593,7 +4580,7 @@ public struct GoVirtualMachine: Sendable {
                     let parts = GoStrings.split(first, second)
                     try requireCollectionCount(parts.count, resource: "slice elements")
                     let elements = parts.map { GoValue.string($0) }
-                    let cell = try heap.allocate(.array(elements))
+                    let cell = try vm.heap.allocate(.array(elements))
                     return .slice(
                         GoSliceValue(
                             backing: GoPointer(cell: cell),
@@ -4614,22 +4601,22 @@ public struct GoVirtualMachine: Sendable {
             stack: inout [GoValue]
         ) throws -> Bool {
             if let local = GoNative.freshLocal(name) {
-                let frameIndex = frames.count - 1
-                guard argumentCount == 0, frames[frameIndex].locals.indices.contains(local) else {
+                let frameIndex = vm.frames.count - 1
+                guard argumentCount == 0, vm.frames[frameIndex].locals.indices.contains(local) else {
                     throw GoRuntimeError.invalidLocal(local)
                 }
-                frames[frameIndex].locals[local] = nil
+                vm.frames[frameIndex].locals[local] = nil
                 return true
             }
             if let locals = GoNative.resultLocals(name) {
-                let frameIndex = frames.count - 1
+                let frameIndex = vm.frames.count - 1
                 guard argumentCount == 0,
-                    locals.count == frames[frameIndex].function.returnCount,
-                    locals.allSatisfy(frames[frameIndex].locals.indices.contains)
+                    locals.count == vm.frames[frameIndex].function.returnCount,
+                    locals.allSatisfy(vm.frames[frameIndex].locals.indices.contains)
                 else {
                     throw GoRuntimeError.invalidExecutable("invalid function result locals")
                 }
-                frames[frameIndex].resultLocals = locals
+                vm.frames[frameIndex].resultLocals = locals
                 return true
             }
             if name == GoNative.requireValue {
@@ -4642,13 +4629,13 @@ public struct GoVirtualMachine: Sendable {
             if let local = GoNative.boundLocal(name) {
                 // The local becomes the variable the pointer points to: a
                 // function literal's name for a variable it captures.
-                let frameIndex = frames.count - 1
-                guard argumentCount == 1, frames[frameIndex].locals.indices.contains(local),
+                let frameIndex = vm.frames.count - 1
+                guard argumentCount == 1, vm.frames[frameIndex].locals.indices.contains(local),
                     case .pointer(let pointer)? = stack.popLast(), pointer.path.isEmpty
                 else {
                     throw GoRuntimeError.invalidLocal(local)
                 }
-                frames[frameIndex].locals[local] = pointer.cell
+                vm.frames[frameIndex].locals[local] = pointer.cell
                 return true
             }
             guard let expected = GoNative.argumentCounts[name] else { return false }
@@ -4665,7 +4652,7 @@ public struct GoVirtualMachine: Sendable {
                     return nil
                 case .slice(let slice):
                     let range = try validatedSliceRange(slice)
-                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     return (slice, backing, range)
                 default:
@@ -4683,7 +4670,7 @@ public struct GoVirtualMachine: Sendable {
                     return []
                 case .slice(let slice):
                     let range = try validatedSliceRange(slice)
-                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     return Array(backing[range])
                 default:
@@ -4718,7 +4705,7 @@ public struct GoVirtualMachine: Sendable {
                 }
                 try requireCollectionCount(text.utf8.count, resource: "slice elements")
                 let elements = text.utf8.map { GoValue.int(Int64($0)) }
-                let cell = try heap.allocate(.array(elements))
+                let cell = try vm.heap.allocate(.array(elements))
                 stack.append(
                     .slice(
                         GoSliceValue(
@@ -4745,7 +4732,7 @@ public struct GoVirtualMachine: Sendable {
             case "$new":
                 // The address of a composite literal: a variable of its own
                 // each time, which lives as long as a pointer reaches it.
-                let cell = try heap.allocate(try pop(&stack))
+                let cell = try vm.heap.allocate(try pop(&stack))
                 stack.append(.pointer(GoPointer(cell: cell)))
             case "$clear":
                 // `clear`: a map keeps its identity and loses its entries,
@@ -4756,10 +4743,10 @@ public struct GoVirtualMachine: Sendable {
                 case .nilValue:
                     break
                 case .map(let mapValue):
-                    guard mapValue.storage.path.isEmpty, heap.contains(mapValue.storage.cell),
-                        case .mapStorage = heap[mapValue.storage.cell]
+                    guard mapValue.storage.path.isEmpty, vm.heap.contains(mapValue.storage.cell),
+                        case .mapStorage = vm.heap[mapValue.storage.cell]
                     else { throw GoRuntimeError.typeMismatch }
-                    try heap.replace(mapValue.storage.cell, with: .mapStorage(GoMapStorage()))
+                    try vm.heap.replace(mapValue.storage.cell, with: .mapStorage(GoMapStorage()))
                 case .slice(let slice):
                     let range = try validatedSliceRange(slice)
                     try storeElements(
@@ -4783,7 +4770,7 @@ public struct GoVirtualMachine: Sendable {
                 }
                 let elements = GoStrings.fields(text).map { GoValue.string($0) }
                 try requireCollectionCount(elements.count, resource: "slice elements")
-                let cell = try heap.allocate(.array(elements))
+                let cell = try vm.heap.allocate(.array(elements))
                 stack.append(
                     .slice(
                         GoSliceValue(
@@ -4832,7 +4819,7 @@ public struct GoVirtualMachine: Sendable {
                                     zeroValue: slice.zeroValue)))
                         break
                     }
-                    guard case .array(let backing) = try read(pointer: slice.backing, heap: heap)
+                    guard case .array(let backing) = try read(pointer: slice.backing, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     elements = Array(backing[range])
                     capacity = slice.capacity
@@ -4853,7 +4840,7 @@ public struct GoVirtualMachine: Sendable {
                     newLength,
                     min(overflow ? Int.max : doubled, resourceLimits.maximumCollectionElements))
                 elements.append(contentsOf: repeatElement(zero, count: newCapacity - newLength))
-                let cell = try heap.allocate(.array(try copiedLocks(elements)))
+                let cell = try vm.heap.allocate(.array(try copiedLocks(elements)))
                 stack.append(
                     .slice(
                         GoSliceValue(
@@ -4896,7 +4883,7 @@ public struct GoVirtualMachine: Sendable {
                         elements.range,
                         with: integers.sorted().map { GoValue.int($0) })
                 }
-                try writePointer(.array(backing), through: elements.slice.backing, heap: &heap)
+                try writePointer(.array(backing), through: elements.slice.backing, heap: &vm.heap)
             default:
                 let (lhs, rhs) = try integerPair(&stack)
                 guard let result = try GoNative.integerBinary(name, lhs, rhs) else {
@@ -4918,16 +4905,16 @@ public struct GoVirtualMachine: Sendable {
                 do {
                     return try runInstructions()
                 } catch let panic as GoRuntimePanic {
-                    guard !frames.isEmpty else { throw GoRuntimeError.panicError(panic.message) }
-                    frames[frames.count - 1].pendingExit = .panicking(panic.value)
+                    guard !vm.frames.isEmpty else { throw GoRuntimeError.panicError(panic.message) }
+                    vm.frames[vm.frames.count - 1].pendingExit = .panicking(panic.value)
                 }
             }
         }
 
         func runInstructions() throws {
             executionLoop: while true {
-                if frames.isEmpty {
-                    if currentGoroutineID != 0 {
+                if vm.frames.isEmpty {
+                    if vm.currentGoroutineID != 0 {
                         guard resumeNextGoroutine() else {
                             throw GoRuntimeError.deadlock
                         }
@@ -4938,43 +4925,43 @@ public struct GoVirtualMachine: Sendable {
                     guard let function = functions[name] else {
                         throw GoRuntimeError.missingFunction(name)
                     }
-                    frames.append(
-                        try makeFrame(function: function, stackBase: 0, arguments: [], heap: &heap))
+                    vm.frames.append(
+                        try makeFrame(function: function, stackBase: 0, arguments: [], heap: &vm.heap))
                 }
-                if let pendingExit = frames[frames.count - 1].pendingExit {
-                    let exitingIndex = frames.count - 1
-                    if let deferred = frames[exitingIndex].deferredCalls.popLast() {
+                if let pendingExit = vm.frames[vm.frames.count - 1].pendingExit {
+                    let exitingIndex = vm.frames.count - 1
+                    if let deferred = vm.frames[exitingIndex].deferredCalls.popLast() {
                         activeDeferredCallCount -= 1
                         if deferred.function == GoNative.callFunctionValue,
                             let value = deferred.arguments.first
                         {
                             // The value was read when the call was deferred.
                             let target = try functionValueTarget(value)
-                            guard frames.count < maximumCallDepth else {
+                            guard vm.frames.count < maximumCallDepth else {
                                 throw GoRuntimeError.callStackLimitExceeded
                             }
-                            frames.append(
+                            vm.frames.append(
                                 try makeFrame(
                                     function: target.function,
-                                    stackBase: stack.count,
+                                    stackBase: vm.stack.count,
                                     arguments: try target.arguments(
                                         with: deferred.arguments.dropFirst()),
-                                    heap: &heap,
+                                    heap: &vm.heap,
                                     isDeferredCall: true))
                         } else if let function = functions[deferred.function]
                             ?? builtinGoroutineFunction(
                                 named: deferred.function,
                                 argumentCount: deferred.arguments.count)
                         {
-                            guard frames.count < maximumCallDepth else {
+                            guard vm.frames.count < maximumCallDepth else {
                                 throw GoRuntimeError.callStackLimitExceeded
                             }
-                            frames.append(
+                            vm.frames.append(
                                 try makeFrame(
                                     function: function,
-                                    stackBase: stack.count,
+                                    stackBase: vm.stack.count,
                                     arguments: deferred.arguments,
-                                    heap: &heap,
+                                    heap: &vm.heap,
                                     isDeferredCall: true))
                         } else if deferred.function == "fmt.Println"
                             || deferred.function == "fmt.Print"
@@ -4989,17 +4976,17 @@ public struct GoVirtualMachine: Sendable {
                         } else {
                             throw GoRuntimeError.missingFunction(deferred.function)
                         }
-                        try scheduleNext(requeueCurrent: !currentBlocked)
+                        try scheduleNext(requeueCurrent: !vm.currentBlocked)
                         continue
                     }
 
-                    let exiting = frames.removeLast()
+                    let exiting = vm.frames.removeLast()
                     releaseFrame(exiting)
-                    guard stack.count >= exiting.stackBase else {
+                    guard vm.stack.count >= exiting.stackBase else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    if stack.count > exiting.stackBase {
-                        stack.removeSubrange(exiting.stackBase...)
+                    if vm.stack.count > exiting.stackBase {
+                        vm.stack.removeSubrange(exiting.stackBase...)
                     }
                     switch pendingExit {
                     case .returning(var values):
@@ -5016,13 +5003,13 @@ public struct GoVirtualMachine: Sendable {
                             try reportPanics(report)
                             continue
                         }
-                        if exiting.isDeferredCall, !frames.isEmpty,
-                            frames[frames.count - 1].recoveredPanic != nil
+                        if exiting.isDeferredCall, !vm.frames.isEmpty,
+                            vm.frames[vm.frames.count - 1].recoveredPanic != nil
                         {
                             // The call that recovered has returned: that
                             // panic, and those it had cut short, are over.
-                            frames[frames.count - 1].recoveredPanic = nil
-                            frames[frames.count - 1].earlierPanics = []
+                            vm.frames[vm.frames.count - 1].recoveredPanic = nil
+                            vm.frames[vm.frames.count - 1].earlierPanics = []
                         }
                         if exiting.function.returnCount > 0,
                             values.count != exiting.function.returnCount
@@ -5035,10 +5022,10 @@ public struct GoVirtualMachine: Sendable {
                             throw GoRuntimeError.typeMismatch
                         }
                         if !exiting.isDeferredCall {
-                            stack.append(contentsOf: values)
+                            vm.stack.append(contentsOf: values)
                         }
                     case .panicking(let value):
-                        guard !frames.isEmpty else {
+                        guard !vm.frames.isEmpty else {
                             if var report = exiting.panicReport {
                                 // The method that was to describe a panic
                                 // panicked itself: its type and place do.
@@ -5052,38 +5039,38 @@ public struct GoVirtualMachine: Sendable {
                             }
                             continue
                         }
-                        if frames[frames.count - 1].awaitsGuestCall,
-                            frames[frames.count - 1].guestCallRecovery != .none
+                        if vm.frames[vm.frames.count - 1].awaitsGuestCall,
+                            vm.frames[vm.frames.count - 1].guestCallRecovery != .none
                         {
                             deliverGuestPanic(value)
                         } else {
-                            let parent = frames.count - 1
+                            let parent = vm.frames.count - 1
                             if exiting.isDeferredCall {
                                 // The function was panicking when the call
                                 // ran, or the call had recovered its panic:
                                 // either comes before this one.
-                                if case .panicking(let interrupted)? = frames[parent].pendingExit {
-                                    frames[parent].earlierPanics.append(
+                                if case .panicking(let interrupted)? = vm.frames[parent].pendingExit {
+                                    vm.frames[parent].earlierPanics.append(
                                         GoPanicRecord(value: interrupted, isRecovered: false))
-                                } else if let recovered = frames[parent].recoveredPanic {
-                                    frames[parent].earlierPanics.append(
+                                } else if let recovered = vm.frames[parent].recoveredPanic {
+                                    vm.frames[parent].earlierPanics.append(
                                         GoPanicRecord(value: recovered, isRecovered: true))
-                                    frames[parent].recoveredPanic = nil
+                                    vm.frames[parent].recoveredPanic = nil
                                 }
                             }
-                            frames[parent].earlierPanics += exiting.earlierPanics
-                            frames[parent].pendingExit = .panicking(value)
+                            vm.frames[parent].earlierPanics += exiting.earlierPanics
+                            vm.frames[parent].pendingExit = .panicking(value)
                         }
                     case .testFatal:
-                        if !frames.isEmpty {
-                            frames[frames.count - 1].pendingExit = .testFatal
+                        if !vm.frames.isEmpty {
+                            vm.frames[vm.frames.count - 1].pendingExit = .testFatal
                         }
                     }
-                    if frames.isEmpty {
-                        if currentGoroutineID == 0, startupFunctions.isEmpty {
+                    if vm.frames.isEmpty {
+                        if vm.currentGoroutineID == 0, startupFunctions.isEmpty {
                             break executionLoop
                         }
-                        if currentGoroutineID != 0 {
+                        if vm.currentGoroutineID != 0 {
                             try resumeAfterGoroutineCompletion()
                             continue
                         }
@@ -5091,105 +5078,112 @@ public struct GoVirtualMachine: Sendable {
                     try scheduleNext(requeueCurrent: true)
                     continue
                 }
-                let frameIndex = frames.count - 1
-                if frames[frameIndex].programCounter >= frames[frameIndex].function.instructions.count {
-                    frames[frameIndex].pendingExit = .returning([])
+                let frameIndex = vm.frames.count - 1
+                // The frame is a class: one read of `frames` serves the
+                // whole instruction.
+                let frame = vm.frames[frameIndex]
+                let programCounter = frame.programCounter
+                if programCounter >= frame.function.instructions.count {
+                    frame.pendingExit = .returning([])
                     try scheduleNext(requeueCurrent: true)
                     continue
                 }
-                let instruction =
-                    frames[frameIndex].function.instructions[frames[frameIndex].programCounter]
-                frames[frameIndex].programCounter += 1
-                currentBlocked = false
-                executed += 1
-                guard executed - sliceStartInstruction <= instructionLimit else {
+                let instruction = frame.function.instructions[programCounter]
+                frame.programCounter = programCounter + 1
+                vm.currentBlocked = false
+                vm.executed += 1
+                guard vm.executed - vm.sliceStartInstruction <= instructionLimit else {
                     throw GoRuntimeError.instructionLimitExceeded
                 }
+                #if SWIFTIX_GO_PROFILE
+                GoExecutionProfile.current?.record(
+                    vm.frames[frameIndex].function,
+                    programCounter: vm.frames[frameIndex].programCounter - 1)
+                #endif
                 switch instruction {
                 case .push(let value):
-                    stack.append(value)
+                    vm.stack.append(value)
                 case .load(let index):
-                    guard frames[frameIndex].locals.indices.contains(index),
-                        let cell = frames[frameIndex].locals[index],
-                        heap.contains(cell)
+                    guard frame.locals.indices.contains(index),
+                        let cell = frame.locals[index],
+                        let value = vm.heap.valueIfPresent(cell)
                     else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
-                    stack.append(heap[cell])
+                    vm.stack.append(value)
                 case .store(let index):
-                    guard frames[frameIndex].locals.indices.contains(index) else {
+                    guard frame.locals.indices.contains(index) else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
-                    let value = try pop(&stack)
-                    if let cell = frames[frameIndex].locals[index] {
-                        guard heap.contains(cell) else { throw GoRuntimeError.invalidPointer }
-                        try heap.replace(cell, with: value)
+                    let value = try pop(&vm.stack)
+                    if let cell = frame.locals[index] {
+                        try vm.heap.replace(cell, with: value)
                     } else {
-                        frames[frameIndex].locals[index] = try heap.allocate(value)
+                        frame.locals[index] = try vm.heap.allocate(value)
                     }
                 case .negate:
-                    guard case .int(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.int(0 &- value))
+                    guard case .int(let value) = try pop(&vm.stack) else { throw GoRuntimeError.typeMismatch }
+                    vm.stack.append(.int(0 &- value))
                 case .not:
-                    guard case .bool(let value) = try pop(&stack) else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.bool(!value))
+                    guard case .bool(let value) = try pop(&vm.stack) else { throw GoRuntimeError.typeMismatch }
+                    vm.stack.append(.bool(!value))
                 case .add:
-                    let (left, right) = try popPair(&stack)
+                    let (left, right) = try popPair(&vm.stack)
                     switch (left, right) {
-                    case (.int(let lhs), .int(let rhs)): stack.append(.int(lhs &+ rhs))
+                    case (.int(let lhs), .int(let rhs)): vm.stack.append(.int(lhs &+ rhs))
                     case (.string(let lhs), .string(let rhs)):
                         let byteCount = try checkedAdd(
                             lhs.utf8.count, rhs.utf8.count, resource: "string bytes")
                         guard byteCount <= resourceLimits.maximumStringBytes else {
                             throw GoRuntimeError.resourceLimitExceeded("string bytes")
                         }
-                        stack.append(.string(lhs + rhs))
+                        vm.stack.append(.string(lhs + rhs))
                     default: throw GoRuntimeError.typeMismatch
                     }
                 case .subtract:
-                    try integerBinary(&stack) { $0 &- $1 }
+                    try integerBinary(&vm.stack) { $0 &- $1 }
                 case .multiply:
-                    try integerBinary(&stack) { $0 &* $1 }
+                    try integerBinary(&vm.stack) { $0 &* $1 }
                 case .divide:
-                    let (lhs, rhs) = try integerPair(&stack)
+                    let (lhs, rhs) = try integerPair(&vm.stack)
                     guard rhs != 0 else { throw GoRuntimePanic.divideByZero }
                     if lhs == Int64.min, rhs == -1 {
                         // Go defines signed integer division using two's-complement
                         // arithmetic; this quotient wraps to the minimum value.
-                        stack.append(.int(Int64.min))
+                        vm.stack.append(.int(Int64.min))
                     } else {
-                        stack.append(.int(lhs / rhs))
+                        vm.stack.append(.int(lhs / rhs))
                     }
                 case .remainder:
-                    let (lhs, rhs) = try integerPair(&stack)
+                    let (lhs, rhs) = try integerPair(&vm.stack)
                     guard rhs != 0 else { throw GoRuntimePanic.divideByZero }
-                    stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
+                    vm.stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
                 case .equal:
-                    let (left, right) = try popPair(&stack)
-                    stack.append(.bool(left == right))
+                    let (left, right) = try popPair(&vm.stack)
+                    vm.stack.append(.bool(left == right))
                 case .notEqual:
-                    let (left, right) = try popPair(&stack)
-                    stack.append(.bool(left != right))
+                    let (left, right) = try popPair(&vm.stack)
+                    vm.stack.append(.bool(left != right))
                 case .less:
-                    try orderedComparison(&stack, integer: <, string: <)
+                    try orderedComparison(&vm.stack, integer: <, string: <)
                 case .lessEqual:
-                    try orderedComparison(&stack, integer: <=, string: <=)
+                    try orderedComparison(&vm.stack, integer: <=, string: <=)
                 case .greater:
-                    try orderedComparison(&stack, integer: >, string: >)
+                    try orderedComparison(&vm.stack, integer: >, string: >)
                 case .greaterEqual:
-                    try orderedComparison(&stack, integer: >=, string: >=)
+                    try orderedComparison(&vm.stack, integer: >=, string: >=)
                 case .logicalAnd:
-                    try booleanBinary(&stack) { $0 && $1 }
+                    try booleanBinary(&vm.stack) { $0 && $1 }
                 case .logicalOr:
-                    try booleanBinary(&stack) { $0 || $1 }
+                    try booleanBinary(&vm.stack) { $0 || $1 }
                 case .print(let argumentCount, let newline):
                     try resumeGuestCalls()
-                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                    guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - argumentCount
-                    let operands = Array(stack[start...])
-                    stack.removeSubrange(start...)
+                    let start = vm.stack.count - argumentCount
+                    let operands = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
                     let values = try variadicOperands(operands)
                     let separator = newline ? " " : ""
                     guard
@@ -5202,42 +5196,42 @@ public struct GoVirtualMachine: Sendable {
                     else { break }
                     try emit(text)
                 case .jump(let target):
-                    try jump(to: target, frame: &frames[frameIndex])
+                    try jump(to: target, in: frame)
                 case .jumpIfFalse(let target):
-                    guard case .bool(let condition) = try pop(&stack) else {
+                    guard case .bool(let condition) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    if !condition { try jump(to: target, frame: &frames[frameIndex]) }
+                    if !condition { try jump(to: target, in: frame) }
                 case .jumpIfTrue(let target):
-                    guard case .bool(let condition) = try pop(&stack) else {
+                    guard case .bool(let condition) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    if condition { try jump(to: target, frame: &frames[frameIndex]) }
+                    if condition { try jump(to: target, in: frame) }
                 case .call(let name, let argumentCount):
                     if name == GoNative.callFunctionValue {
                         // The function value lies under the arguments.
-                        guard argumentCount >= 1, stack.count >= argumentCount else {
+                        guard argumentCount >= 1, vm.stack.count >= argumentCount else {
                             throw GoRuntimeError.stackUnderflow
                         }
-                        let start = stack.count - argumentCount
-                        let operands = Array(stack[start...])
-                        stack.removeSubrange(start...)
+                        let start = vm.stack.count - argumentCount
+                        let operands = Array(vm.stack[start...])
+                        vm.stack.removeSubrange(start...)
                         let target = try functionValueTarget(operands[0])
-                        guard frames.count < maximumCallDepth else {
+                        guard vm.frames.count < maximumCallDepth else {
                             throw GoRuntimeError.callStackLimitExceeded
                         }
-                        frames.append(
+                        vm.frames.append(
                             try makeFrame(
                                 function: target.function,
-                                stackBase: stack.count,
+                                stackBase: vm.stack.count,
                                 arguments: try target.arguments(with: operands.dropFirst()),
-                                heap: &heap))
+                                heap: &vm.heap))
                         break
                     }
                     guard let function = functions[name] else {
                         guard
                             try executePureNative(
-                                name, argumentCount: argumentCount, stack: &stack)
+                                name, argumentCount: argumentCount, stack: &vm.stack)
                                 || executeHostNative(name, argumentCount: argumentCount)
                                 || executeFileNative(name, argumentCount: argumentCount)
                                 || executeCalendarNative(name, argumentCount: argumentCount)
@@ -5257,10 +5251,10 @@ public struct GoVirtualMachine: Sendable {
                         }
                         break
                     }
-                    guard frames.count < maximumCallDepth else {
+                    guard vm.frames.count < maximumCallDepth else {
                         throw GoRuntimeError.callStackLimitExceeded
                     }
-                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                    guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
                     guard argumentCount == function.parameterCount else {
@@ -5269,21 +5263,21 @@ public struct GoVirtualMachine: Sendable {
                             expected: function.parameterCount,
                             actual: argumentCount)
                     }
-                    let argumentStart = stack.count - argumentCount
-                    let arguments = Array(stack[argumentStart...])
-                    stack.removeSubrange(argumentStart...)
-                    frames.append(
+                    let argumentStart = vm.stack.count - argumentCount
+                    let arguments = Array(vm.stack[argumentStart...])
+                    vm.stack.removeSubrange(argumentStart...)
+                    vm.frames.append(
                         try makeFrame(
                             function: function,
-                            stackBase: stack.count,
+                            stackBase: vm.stack.count,
                             arguments: arguments,
-                            heap: &heap))
+                            heap: &vm.heap))
                 case .spawn(let name, let argumentCount):
-                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                    guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let argumentStart = stack.count - argumentCount
-                    var arguments = Array(stack[argumentStart...])
+                    let argumentStart = vm.stack.count - argumentCount
+                    var arguments = Array(vm.stack[argumentStart...])
                     let function: GoBytecodeFunction
                     if name == GoNative.callFunctionValue {
                         guard let value = arguments.first else {
@@ -5306,9 +5300,9 @@ public struct GoVirtualMachine: Sendable {
                         }
                         function = named
                     }
-                    stack.removeSubrange(argumentStart...)
+                    vm.stack.removeSubrange(argumentStart...)
                     guard resourceLimits.maximumGoroutines >= 2,
-                        goroutines.count <= resourceLimits.maximumGoroutines - 2
+                        vm.goroutines.count <= resourceLimits.maximumGoroutines - 2
                     else {
                         throw GoRuntimeError.resourceLimitExceeded("goroutines")
                     }
@@ -5317,22 +5311,22 @@ public struct GoVirtualMachine: Sendable {
                     }
                     let id = nextGoroutineID
                     nextGoroutineID += 1
-                    goroutines[id] = GoroutineContext(
+                    vm.goroutines[id] = GoroutineContext(
                         frames: [try makeFrame(
                             function: function,
                             stackBase: 0,
                             arguments: arguments,
-                            heap: &heap)],
+                            heap: &vm.heap)],
                         stack: [])
-                    runQueue.append(id)
+                    vm.runQueue.append(id)
                 case .makeStruct(let typeName, let fieldNames):
-                    guard stack.count >= fieldNames.count else {
+                    guard vm.stack.count >= fieldNames.count else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - fieldNames.count
-                    let values = Array(stack[start...])
-                    stack.removeSubrange(start...)
-                    stack.append(
+                    let start = vm.stack.count - fieldNames.count
+                    let values = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
+                    vm.stack.append(
                         .structure(
                             GoStructValue(
                                 typeName: typeName,
@@ -5340,39 +5334,39 @@ public struct GoVirtualMachine: Sendable {
                                     GoStructFieldValue(name: $0.0, value: $0.1)
                                 })))
                 case .getField(let name):
-                    guard case .structure(let structure) = try pop(&stack) else {
+                    guard case .structure(let structure) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let field = structure.fields.first(where: { $0.name == name }) else {
                         throw GoRuntimeError.unknownField(name)
                     }
-                    stack.append(field.value)
+                    vm.stack.append(field.value)
                 case .setField(let name):
-                    let value = try pop(&stack)
-                    guard case .structure(var structure) = try pop(&stack) else {
+                    let value = try pop(&vm.stack)
+                    guard case .structure(var structure) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let index = structure.fields.firstIndex(where: { $0.name == name }) else {
                         throw GoRuntimeError.unknownField(name)
                     }
                     structure.fields[index].value = value
-                    stack.append(.structure(structure))
+                    vm.stack.append(.structure(structure))
                 case .addressLocal(let index, let fieldPath):
-                    guard frames[frameIndex].locals.indices.contains(index),
-                        let cell = frames[frameIndex].locals[index]
+                    guard vm.frames[frameIndex].locals.indices.contains(index),
+                        let cell = vm.frames[frameIndex].locals[index]
                     else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
                     guard fieldPath.count <= resourceLimits.maximumPointerDepth else {
                         throw GoRuntimeError.resourceLimitExceeded("pointer depth")
                     }
-                    stack.append(
+                    vm.stack.append(
                         .pointer(
                             GoPointer(
                                 cell: cell,
                                 path: fieldPath.map(GoPointerComponent.field))))
                 case .fieldAddress(let name):
-                    let pointerValue = try pop(&stack)
+                    let pointerValue = try pop(&vm.stack)
                     if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
@@ -5380,49 +5374,49 @@ public struct GoVirtualMachine: Sendable {
                     guard pointer.path.count < resourceLimits.maximumPointerDepth else {
                         throw GoRuntimeError.resourceLimitExceeded("pointer depth")
                     }
-                    stack.append(
+                    vm.stack.append(
                         .pointer(
                             GoPointer(
                                 cell: pointer.cell,
                                 path: pointer.path + [.field(name)])))
                 case .dereference:
-                    let pointerValue = try pop(&stack)
+                    let pointerValue = try pop(&vm.stack)
                     if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    stack.append(try read(pointer: pointer, heap: heap))
+                    vm.stack.append(try read(pointer: pointer, heap: vm.heap))
                 case .setPointer:
-                    let value = try pop(&stack)
-                    let pointerValue = try pop(&stack)
+                    let value = try pop(&vm.stack)
+                    let pointerValue = try pop(&vm.stack)
                     if pointerValue == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = pointerValue else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    try writePointer(value, through: pointer, heap: &heap)
+                    try writePointer(value, through: pointer, heap: &vm.heap)
                 case .makeArray(let elementCount):
-                    guard elementCount >= 0, stack.count >= elementCount else {
+                    guard elementCount >= 0, vm.stack.count >= elementCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - elementCount
-                    let values = Array(stack[start...])
-                    stack.removeSubrange(start...)
-                    stack.append(.array(values))
+                    let start = vm.stack.count - elementCount
+                    let values = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
+                    vm.stack.append(.array(values))
                 case .makeSlice(let elementCount):
                     guard elementCount >= 0 else {
                         throw GoRuntimeError.invalidExecutable("negative slice element count")
                     }
                     let requiredCount = try checkedAdd(
                         elementCount, 1, resource: "operand stack")
-                    guard stack.count >= requiredCount else {
+                    guard vm.stack.count >= requiredCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - elementCount
-                    let values = Array(stack[start...])
-                    stack.removeSubrange(start...)
-                    let zero = try pop(&stack)
-                    let cell = try heap.allocate(.array(values))
-                    stack.append(
+                    let start = vm.stack.count - elementCount
+                    let values = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
+                    let zero = try pop(&vm.stack)
+                    let cell = try vm.heap.allocate(.array(values))
+                    vm.stack.append(
                         .slice(
                             GoSliceValue(
                                 backing: GoPointer(cell: cell),
@@ -5431,10 +5425,10 @@ public struct GoVirtualMachine: Sendable {
                                 capacity: values.count,
                                 zeroValue: zero)))
                 case .allocateSlice:
-                    guard case .int(let capacity) = try pop(&stack),
-                        case .int(let length) = try pop(&stack)
+                    guard case .int(let capacity) = try pop(&vm.stack),
+                        case .int(let length) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
-                    let zero = try pop(&stack)
+                    let zero = try pop(&vm.stack)
                     guard length >= 0, let exactLength = Int(exactly: length) else {
                         throw GoRuntimePanic.makeSliceLength
                     }
@@ -5442,9 +5436,9 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimePanic.makeSliceCapacity
                     }
                     try requireCollectionCount(exactCapacity, resource: "slice elements")
-                    let cell = try heap.allocate(
+                    let cell = try vm.heap.allocate(
                         .array(try copiedLocks(Array(repeating: zero, count: exactCapacity))))
-                    stack.append(
+                    vm.stack.append(
                         .slice(
                             GoSliceValue(
                                 backing: GoPointer(cell: cell),
@@ -5453,16 +5447,16 @@ public struct GoVirtualMachine: Sendable {
                                 capacity: exactCapacity,
                                 zeroValue: zero)))
                 case .getIndex:
-                    guard case .int(let rawIndex) = try pop(&stack),
+                    guard case .int(let rawIndex) = try pop(&vm.stack),
                         let index = Int(exactly: rawIndex)
                     else { throw GoRuntimeError.typeMismatch }
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
                     case .array(let values):
                         guard values.indices.contains(index) else {
                             throw GoRuntimePanic.index(index, length: values.count)
                         }
-                        stack.append(values[index])
+                        vm.stack.append(values[index])
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
@@ -5470,10 +5464,10 @@ public struct GoVirtualMachine: Sendable {
                         }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
-                        stack.append(
+                        vm.stack.append(
                             try read(
                                 pointer: appending(index: absoluteIndex, to: slice.backing),
-                                heap: heap))
+                                heap: vm.heap))
                     case .string(let string):
                         // Offsetting a native string's UTF-8 view is O(1); copying
                         // it into an array made byte loops quadratic.
@@ -5481,7 +5475,7 @@ public struct GoVirtualMachine: Sendable {
                         guard index >= 0, index < utf8.count else {
                             throw GoRuntimePanic.index(index, length: utf8.count)
                         }
-                        stack.append(.int(Int64(utf8[utf8.index(utf8.startIndex, offsetBy: index)])))
+                        vm.stack.append(.int(Int64(utf8[utf8.index(utf8.startIndex, offsetBy: index)])))
                     case .nilValue:
                         // A nil slice has no elements.
                         throw GoRuntimePanic.index(index, length: 0)
@@ -5489,18 +5483,18 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimeError.typeMismatch
                     }
                 case .setIndex:
-                    let value = try pop(&stack)
-                    guard case .int(let rawIndex) = try pop(&stack),
+                    let value = try pop(&vm.stack)
+                    guard case .int(let rawIndex) = try pop(&vm.stack),
                         let index = Int(exactly: rawIndex)
                     else { throw GoRuntimeError.typeMismatch }
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
                     case .array(var values):
                         guard values.indices.contains(index) else {
                             throw GoRuntimePanic.index(index, length: values.count)
                         }
                         values[index] = value
-                        stack.append(.array(values))
+                        vm.stack.append(.array(values))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
@@ -5511,20 +5505,20 @@ public struct GoVirtualMachine: Sendable {
                         try writePointer(
                             value,
                             through: appending(index: absoluteIndex, to: slice.backing),
-                            heap: &heap)
-                        stack.append(.slice(slice))
+                            heap: &vm.heap)
+                        vm.stack.append(.slice(slice))
                     case .nilValue:
                         throw GoRuntimePanic.index(index, length: 0)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
                 case .slice:
-                    guard case .int(let rawHigh) = try pop(&stack),
-                        case .int(let rawLow) = try pop(&stack),
+                    guard case .int(let rawHigh) = try pop(&vm.stack),
+                        case .int(let rawLow) = try pop(&vm.stack),
                         let low = Int(exactly: rawLow),
                         let high = Int(exactly: rawHigh)
                     else { throw GoRuntimeError.typeMismatch }
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
@@ -5535,7 +5529,7 @@ public struct GoVirtualMachine: Sendable {
                         }
                         let newStart = try checkedAdd(
                             slice.start, low, resource: "slice bounds")
-                        stack.append(
+                        vm.stack.append(
                             .slice(
                                 GoSliceValue(
                                     backing: slice.backing,
@@ -5552,7 +5546,7 @@ public struct GoVirtualMachine: Sendable {
                         }
                         let lower = utf8.index(utf8.startIndex, offsetBy: low)
                         let upper = utf8.index(lower, offsetBy: high - low)
-                        stack.append(.string(String(decoding: utf8[lower..<upper], as: UTF8.self)))
+                        vm.stack.append(.string(String(decoding: utf8[lower..<upper], as: UTF8.self)))
                     case .nilValue:
                         // A nil slice can be sliced from 0 to 0, and stays nil.
                         if let panic = GoRuntimePanic.slice(
@@ -5560,28 +5554,28 @@ public struct GoVirtualMachine: Sendable {
                         {
                             throw panic
                         }
-                        stack.append(.nilValue)
+                        vm.stack.append(.nilValue)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
                 case .sliceArray:
-                    let zero = try pop(&stack)
-                    guard case .int(let rawHigh) = try pop(&stack),
-                        case .int(let rawLow) = try pop(&stack),
+                    let zero = try pop(&vm.stack)
+                    guard case .int(let rawHigh) = try pop(&vm.stack),
+                        case .int(let rawLow) = try pop(&vm.stack),
                         let low = Int(exactly: rawLow),
                         let high = Int(exactly: rawHigh)
                     else { throw GoRuntimeError.typeMismatch }
-                    let arrayPointer = try pop(&stack)
+                    let arrayPointer = try pop(&vm.stack)
                     if arrayPointer == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .pointer(let pointer) = arrayPointer,
-                        case .array(let values) = try read(pointer: pointer, heap: heap)
+                        case .array(let values) = try read(pointer: pointer, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     if let panic = GoRuntimePanic.slice(
                         low: low, high: high, limit: values.count, limitIsCapacity: false)
                     {
                         throw panic
                     }
-                    stack.append(
+                    vm.stack.append(
                         .slice(
                             GoSliceValue(
                                 backing: pointer,
@@ -5590,49 +5584,49 @@ public struct GoVirtualMachine: Sendable {
                                 capacity: values.count - low,
                                 zeroValue: zero)))
                 case .length:
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
-                    case .array(let values): stack.append(.int(Int64(values.count)))
+                    case .array(let values): vm.stack.append(.int(Int64(values.count)))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
-                        stack.append(.int(Int64(slice.length)))
-                    case .string(let string): stack.append(.int(Int64(string.utf8.count)))
+                        vm.stack.append(.int(Int64(slice.length)))
+                    case .string(let string): vm.stack.append(.int(Int64(string.utf8.count)))
                     case .map(let mapValue):
-                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        stack.append(.int(Int64(storage.count)))
+                        vm.stack.append(.int(Int64(storage.count)))
                     case .channel(let channel):
                         guard case .channelStorage(let storage) = try read(
-                            pointer: channel.storage, heap: heap)
+                            pointer: channel.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        stack.append(.int(Int64(storage.buffer.count)))
-                    case .nilValue: stack.append(.int(0))
+                        vm.stack.append(.int(Int64(storage.buffer.count)))
+                    case .nilValue: vm.stack.append(.int(0))
                     default: throw GoRuntimeError.typeMismatch
                     }
                 case .capacity:
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
-                    case .array(let values): stack.append(.int(Int64(values.count)))
+                    case .array(let values): vm.stack.append(.int(Int64(values.count)))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
-                        stack.append(.int(Int64(slice.capacity)))
+                        vm.stack.append(.int(Int64(slice.capacity)))
                     case .channel(let channel):
                         guard case .channelStorage(let storage) = try read(
-                            pointer: channel.storage, heap: heap)
+                            pointer: channel.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        stack.append(.int(Int64(storage.capacity)))
-                    case .nilValue: stack.append(.int(0))
+                        vm.stack.append(.int(Int64(storage.capacity)))
+                    case .nilValue: vm.stack.append(.int(0))
                     default: throw GoRuntimeError.typeMismatch
                     }
                 case .append:
-                    let suppliedZero = try pop(&stack)
-                    let value = try pop(&stack)
-                    let base = try pop(&stack)
+                    let suppliedZero = try pop(&vm.stack)
+                    let value = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     var slice: GoSliceValue
                     if case .slice(let existing) = base {
                         slice = existing
                     } else if base == .nilValue {
-                        let cell = try heap.allocate(.array([]))
+                        let cell = try vm.heap.allocate(.array([]))
                         slice = GoSliceValue(
                             backing: GoPointer(cell: cell),
                             start: 0,
@@ -5652,7 +5646,7 @@ public struct GoVirtualMachine: Sendable {
                         try writePointer(
                             value,
                             through: appending(index: absoluteIndex, to: slice.backing),
-                            heap: &heap)
+                            heap: &vm.heap)
                         slice = GoSliceValue(
                             backing: slice.backing,
                             start: slice.start,
@@ -5668,7 +5662,7 @@ public struct GoVirtualMachine: Sendable {
                             values.append(
                                 try read(
                                     pointer: appending(index: absoluteIndex, to: slice.backing),
-                                    heap: heap))
+                                    heap: vm.heap))
                         }
                         values.append(value)
                         let (doubledCapacity, overflow) = slice.capacity.multipliedReportingOverflow(by: 2)
@@ -5681,7 +5675,7 @@ public struct GoVirtualMachine: Sendable {
                             contentsOf: repeatElement(
                                 slice.zeroValue,
                                 count: newCapacity - values.count))
-                        let cell = try heap.allocate(.array(try copiedLocks(values)))
+                        let cell = try vm.heap.allocate(.array(try copiedLocks(values)))
                         slice = GoSliceValue(
                             backing: GoPointer(cell: cell),
                             start: 0,
@@ -5689,23 +5683,23 @@ public struct GoVirtualMachine: Sendable {
                             capacity: newCapacity,
                             zeroValue: slice.zeroValue)
                     }
-                    stack.append(.slice(slice))
+                    vm.stack.append(.slice(slice))
                 case .indexAddress:
-                    guard case .int(let rawIndex) = try pop(&stack),
+                    guard case .int(let rawIndex) = try pop(&vm.stack),
                         let index = Int(exactly: rawIndex)
                     else { throw GoRuntimeError.typeMismatch }
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     switch base {
                     case .pointer(let pointer):
                         guard pointer.path.count < resourceLimits.maximumPointerDepth else {
                             throw GoRuntimeError.resourceLimitExceeded("pointer depth")
                         }
-                        guard case .array(let values) = try read(pointer: pointer, heap: heap)
+                        guard case .array(let values) = try read(pointer: pointer, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
                         guard values.indices.contains(index) else {
                             throw GoRuntimePanic.index(index, length: values.count)
                         }
-                        stack.append(.pointer(appending(index: index, to: pointer)))
+                        vm.stack.append(.pointer(appending(index: index, to: pointer)))
                     case .slice(let slice):
                         _ = try validatedSliceRange(slice)
                         guard index >= 0, index < slice.length else {
@@ -5713,7 +5707,7 @@ public struct GoVirtualMachine: Sendable {
                         }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
-                        stack.append(
+                        vm.stack.append(
                             .pointer(appending(index: absoluteIndex, to: slice.backing)))
                     case .nilValue:
                         throw GoRuntimePanic.index(index, length: 0)
@@ -5724,44 +5718,44 @@ public struct GoVirtualMachine: Sendable {
                     guard index >= 0, index < executable.globalCount else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
-                    stack.append(heap[index])
+                    vm.stack.append(vm.heap[index])
                 case .storeGlobal(let index):
                     guard index >= 0, index < executable.globalCount else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
-                    try heap.replace(index, with: pop(&stack))
+                    try vm.heap.replace(index, with: pop(&vm.stack))
                 case .addressGlobal(let index):
                     guard index >= 0, index < executable.globalCount else {
                         throw GoRuntimeError.invalidLocal(index)
                     }
-                    stack.append(.pointer(GoPointer(cell: index)))
+                    vm.stack.append(.pointer(GoPointer(cell: index)))
                 case .deferCall(let name, let argumentCount):
-                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                    guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - argumentCount
-                    let arguments = Array(stack[start...])
-                    stack.removeSubrange(start...)
+                    let start = vm.stack.count - argumentCount
+                    let arguments = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
                     guard activeDeferredCallCount < resourceLimits.maximumRuntimeHandles else {
                         throw GoRuntimeError.resourceLimitExceeded("deferred calls")
                     }
-                    frames[frameIndex].deferredCalls.append(
+                    vm.frames[frameIndex].deferredCalls.append(
                         DeferredCall(function: name, arguments: arguments))
                     activeDeferredCallCount += 1
                 case .panic:
-                    let value = stack.popLast() ?? .string("nil")
-                    frames[frameIndex].pendingExit = .panicking(value)
+                    let value = vm.stack.popLast() ?? .string("nil")
+                    vm.frames[frameIndex].pendingExit = .panicking(value)
                 case .recover:
-                    guard frames[frameIndex].isDeferredCall, frameIndex > 0,
-                        case .panicking(let value) = frames[frameIndex - 1].pendingExit
+                    guard vm.frames[frameIndex].isDeferredCall, frameIndex > 0,
+                        case .panicking(let value) = vm.frames[frameIndex - 1].pendingExit
                     else {
-                        stack.append(.nilValue)
+                        vm.stack.append(.nilValue)
                         break
                     }
-                    frames[frameIndex - 1].pendingExit = .returning(
-                        try resultValues(of: frames[frameIndex - 1]))
-                    frames[frameIndex - 1].recoveredPanic = value
-                    stack.append(value)
+                    vm.frames[frameIndex - 1].pendingExit = .returning(
+                        try resultValues(of: vm.frames[frameIndex - 1]))
+                    vm.frames[frameIndex - 1].recoveredPanic = value
+                    vm.stack.append(value)
                 case .makeMap(let entryCount):
                     guard entryCount >= 0 else {
                         throw GoRuntimeError.invalidExecutable("negative map entry count")
@@ -5771,25 +5765,25 @@ public struct GoVirtualMachine: Sendable {
                     }
                     let stackEntryCount = try checkedMultiply(
                         entryCount, 2, resource: "map entries")
-                    guard stack.count >= stackEntryCount else {
+                    guard vm.stack.count >= stackEntryCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
                     var storage = GoMapStorage()
                     storage.reserveCapacity(entryCount)
-                    let start = stack.count - stackEntryCount
-                    for i in stride(from: start, to: stack.count, by: 2) {
-                        storage.set(stack[i], stack[i + 1])
+                    let start = vm.stack.count - stackEntryCount
+                    for i in stride(from: start, to: vm.stack.count, by: 2) {
+                        storage.set(vm.stack[i], vm.stack[i + 1])
                     }
-                    stack.removeSubrange(start...)
-                    let cell = try heap.allocate(.mapStorage(storage))
-                    stack.append(.map(GoMapValue(storage: GoPointer(cell: cell))))
+                    vm.stack.removeSubrange(start...)
+                    let cell = try vm.heap.allocate(.mapStorage(storage))
+                    vm.stack.append(.map(GoMapValue(storage: GoPointer(cell: cell))))
                 case .makeChannel:
-                    guard case .int(let rawCapacity) = try pop(&stack),
+                    guard case .int(let rawCapacity) = try pop(&vm.stack),
                         let capacity = Int(exactly: rawCapacity)
                     else { throw GoRuntimeError.typeMismatch }
-                    let zero = try pop(&stack)
+                    let zero = try pop(&vm.stack)
                     guard capacity >= 0 else {
-                        frames[frameIndex].pendingExit = .panicking(
+                        vm.frames[frameIndex].pendingExit = .panicking(
                             GoRuntimePanic(
                                 GoErrors.plainRuntimeErrorType, "makechan: size out of range"
                             ).value)
@@ -5798,70 +5792,70 @@ public struct GoVirtualMachine: Sendable {
                     guard capacity <= resourceLimits.maximumCollectionElements else {
                         throw GoRuntimeError.resourceLimitExceeded("channel capacity")
                     }
-                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: capacity)))
+                    let cell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: capacity)))
                     _ = zero
-                    stack.append(.channel(GoChannelValue(storage: GoPointer(cell: cell))))
+                    vm.stack.append(.channel(GoChannelValue(storage: GoPointer(cell: cell))))
                 case .sendChannel:
-                    let value = try pop(&stack)
-                    let base = try pop(&stack)
+                    let value = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     switch try trySelectSend(value, to: base) {
                     case .sent:
                         try wakeReadyBlockedSelects()
                     case .closed:
-                        frames[frameIndex].pendingExit = .panicking(
+                        vm.frames[frameIndex].pendingExit = .panicking(
                             GoRuntimePanic.closedChannelSend.value)
                     case .blocked:
                         if base == .nilValue {
-                            currentBlocked = true
+                            vm.currentBlocked = true
                             break
                         }
                         guard case .channel(let channel) = base,
                             case .channelStorage(var storage) = try read(
-                                pointer: channel.storage, heap: heap)
+                                pointer: channel.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
                         storage.sendWaiters.append(GoChannelSendWaiter(
-                            goroutineID: currentGoroutineID,
+                            goroutineID: vm.currentGoroutineID,
                             value: value,
                             waitSequence: allocateWaitSequence()))
                         try writePointer(
                             .channelStorage(storage),
                             through: channel.storage,
-                            heap: &heap)
-                        currentBlocked = true
+                            heap: &vm.heap)
+                        vm.currentBlocked = true
                     }
                 case .receiveChannel(let commaOK):
-                    let zero = try pop(&stack)
-                    let base = try pop(&stack)
+                    let zero = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     switch try trySelectReceive(from: base, zero: zero) {
                     case .received(let value, let ok):
-                        stack.append(value)
-                        if commaOK { stack.append(.bool(ok)) }
+                        vm.stack.append(value)
+                        if commaOK { vm.stack.append(.bool(ok)) }
                         try wakeReadyBlockedSelects()
                     case .blocked:
                         if base == .nilValue {
-                            currentBlocked = true
+                            vm.currentBlocked = true
                             break
                         }
                         guard case .channel(let channel) = base,
                             case .channelStorage(var storage) = try read(
-                                pointer: channel.storage, heap: heap)
+                                pointer: channel.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
                         storage.receiveWaiters.append(GoChannelReceiveWaiter(
-                            goroutineID: currentGoroutineID,
+                            goroutineID: vm.currentGoroutineID,
                             commaOK: commaOK,
                             zeroValue: zero,
                             waitSequence: allocateWaitSequence()))
                         try writePointer(
                             .channelStorage(storage),
                             through: channel.storage,
-                            heap: &heap)
-                        currentBlocked = true
+                            heap: &vm.heap)
+                        vm.currentBlocked = true
                     }
                 case .closeChannel:
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     guard case .channel(let channel) = base else {
                         if base == .nilValue {
-                            frames[frameIndex].pendingExit = .panicking(
+                            vm.frames[frameIndex].pendingExit = .panicking(
                                 GoRuntimePanic(
                                     GoErrors.plainRuntimeErrorType, "close of nil channel"
                                 ).value)
@@ -5870,10 +5864,10 @@ public struct GoVirtualMachine: Sendable {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard case .channelStorage(var storage) = try read(
-                        pointer: channel.storage, heap: heap)
+                        pointer: channel.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     guard !storage.closed else {
-                        frames[frameIndex].pendingExit = .panicking(
+                        vm.frames[frameIndex].pendingExit = .panicking(
                             GoRuntimePanic(
                                 GoErrors.plainRuntimeErrorType, "close of closed channel"
                             ).value)
@@ -5887,7 +5881,7 @@ public struct GoVirtualMachine: Sendable {
                     try writePointer(
                         .channelStorage(storage),
                         through: channel.storage,
-                        heap: &heap)
+                        heap: &vm.heap)
                     for receiver in receivers {
                         var values = [receiver.zeroValue]
                         if receiver.commaOK { values.append(.bool(false)) }
@@ -5906,17 +5900,17 @@ public struct GoVirtualMachine: Sendable {
                         switch selectCase {
                         case .send(let channelLocal, let valueLocal, let target):
                             evaluated.append(.send(
-                                channel: try localValue(channelLocal, in: frames[frameIndex]),
-                                value: try localValue(valueLocal, in: frames[frameIndex]),
+                                channel: try localValue(channelLocal, in: vm.frames[frameIndex]),
+                                value: try localValue(valueLocal, in: vm.frames[frameIndex]),
                                 target: target))
                         case .receive(
                             let channelLocal, let destinationLocal, let okLocal,
                             let zeroLocal, let target):
                             evaluated.append(.receive(
-                                channel: try localValue(channelLocal, in: frames[frameIndex]),
+                                channel: try localValue(channelLocal, in: vm.frames[frameIndex]),
                                 destination: destinationLocal,
                                 okDestination: okLocal,
-                                zero: try localValue(zeroLocal, in: frames[frameIndex]),
+                                zero: try localValue(zeroLocal, in: vm.frames[frameIndex]),
                                 target: target))
                         }
                     }
@@ -5926,14 +5920,14 @@ public struct GoVirtualMachine: Sendable {
                         readyIndices.append(index)
                     }
                     if readyIndices.isEmpty, let defaultTarget {
-                        try jump(to: defaultTarget, frame: &frames[frameIndex])
+                        try jump(to: defaultTarget, frame: &vm.frames[frameIndex])
                         break
                     }
                     guard !readyIndices.isEmpty else {
-                        blockedSelects[currentGoroutineID] = BlockedSelect(
+                        blockedSelects[vm.currentGoroutineID] = BlockedSelect(
                             cases: evaluated,
                             waitSequence: allocateWaitSequence())
-                        currentBlocked = true
+                        vm.currentBlocked = true
                         break
                     }
                     let selected = evaluated[
@@ -5942,9 +5936,9 @@ public struct GoVirtualMachine: Sendable {
                     case .send(let channel, let value, let target):
                         switch try trySelectSend(value, to: channel) {
                         case .sent:
-                            try jump(to: target, frame: &frames[frameIndex])
+                            try jump(to: target, frame: &vm.frames[frameIndex])
                         case .closed:
-                            frames[frameIndex].pendingExit = .panicking(
+                            vm.frames[frameIndex].pendingExit = .panicking(
                                 GoRuntimePanic.closedChannelSend.value)
                         case .blocked:
                             throw GoRuntimeError.typeMismatch
@@ -5954,25 +5948,25 @@ public struct GoVirtualMachine: Sendable {
                         switch try trySelectReceive(from: channel, zero: zero) {
                         case .received(let value, let ok):
                             if let destination {
-                                try storeLocal(value, at: destination, in: &frames[frameIndex])
+                                try storeLocal(value, at: destination, in: &vm.frames[frameIndex])
                             }
                             if let okDestination {
-                                try storeLocal(.bool(ok), at: okDestination, in: &frames[frameIndex])
+                                try storeLocal(.bool(ok), at: okDestination, in: &vm.frames[frameIndex])
                             }
-                            try jump(to: target, frame: &frames[frameIndex])
+                            try jump(to: target, frame: &vm.frames[frameIndex])
                         case .blocked:
                             throw GoRuntimeError.typeMismatch
                         }
                     }
                     try wakeReadyBlockedSelects()
                 case .timeAfter:
-                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                    guard case .int(let nanoseconds) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let cell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     let timerChannel = GoValue.channel(
                         GoChannelValue(storage: GoPointer(cell: cell)))
-                    stack.append(timerChannel)
+                    vm.stack.append(timerChannel)
                     try reserveTimer()
                     let runtimeHandleID: Int
                     do {
@@ -6003,14 +5997,14 @@ public struct GoVirtualMachine: Sendable {
                         }
                     }
                 case .makeMutex:
-                    let cell = try heap.allocate(.mutexStorage(GoMutexStorage()))
-                    stack.append(.mutex(GoMutexValue(storage: GoPointer(cell: cell))))
+                    let cell = try vm.heap.allocate(.mutexStorage(GoMutexStorage()))
+                    vm.stack.append(.mutex(GoMutexValue(storage: GoPointer(cell: cell))))
                 case .timeSleep:
-                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                    guard case .int(let nanoseconds) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     let delay = max(0, Double(nanoseconds) / 1_000_000_000)
-                    let sleepingID = currentGoroutineID
+                    let sleepingID = vm.currentGoroutineID
                     try reserveTimer()
                     scheduleRuntimeWork(after: delay) {
                         defer { finishTimer() }
@@ -6023,20 +6017,20 @@ public struct GoVirtualMachine: Sendable {
                             asynchronousError = .typeMismatch
                         }
                     }
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .timeTick:
-                    guard case .int(let nanoseconds) = try pop(&stack) else {
+                    guard case .int(let nanoseconds) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard nanoseconds > 0 else {
                         // time.Tick returns a nil channel for a non-positive duration.
-                        stack.append(.nilValue)
+                        vm.stack.append(.nilValue)
                         break
                     }
-                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let cell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     let tickChannel = GoValue.channel(
                         GoChannelValue(storage: GoPointer(cell: cell)))
-                    stack.append(tickChannel)
+                    vm.stack.append(tickChannel)
                     try reserveTimer()
                     let runtimeHandleID: Int
                     do {
@@ -6081,43 +6075,43 @@ public struct GoVirtualMachine: Sendable {
                     }
                     scheduleTick()
                 case .contextBackground:
-                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let doneCell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
-                    stack.append(.context(GoContextValue(storage: GoPointer(cell: ctxCell))))
+                    let ctxCell = try vm.heap.allocate(.contextStorage(ctxStorage))
+                    vm.stack.append(.context(GoContextValue(storage: GoPointer(cell: ctxCell))))
                 case .contextWithCancel:
-                    guard case .context(let parent) = try pop(&stack) else {
+                    guard case .context(let parent) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let doneCell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
+                    let ctxCell = try vm.heap.allocate(.contextStorage(ctxStorage))
                     let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
                     // Register child in parent for propagation
                     guard case .contextStorage(var parentStorage) = try read(
-                        pointer: parent.storage, heap: heap)
+                        pointer: parent.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     parentStorage.children.append(GoPointer(cell: ctxCell))
                     try writePointer(
-                        .contextStorage(parentStorage), through: parent.storage, heap: &heap)
+                        .contextStorage(parentStorage), through: parent.storage, heap: &vm.heap)
                     // Push ctx then cancel (cancel is same context reference used to cancel)
-                    stack.append(.context(childCtx))
-                    stack.append(.context(childCtx))
+                    vm.stack.append(.context(childCtx))
+                    vm.stack.append(.context(childCtx))
                 case .contextWithTimeout:
-                    guard case .int(let nanoseconds) = try pop(&stack),
-                        case .context(let parent) = try pop(&stack)
+                    guard case .int(let nanoseconds) = try pop(&vm.stack),
+                        case .context(let parent) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
-                    let doneCell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    let doneCell = try vm.heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
                     let ctxStorage = GoContextStorage(doneChannel: GoPointer(cell: doneCell))
-                    let ctxCell = try heap.allocate(.contextStorage(ctxStorage))
+                    let ctxCell = try vm.heap.allocate(.contextStorage(ctxStorage))
                     let childCtx = GoContextValue(storage: GoPointer(cell: ctxCell))
                     // Register child in parent
                     guard case .contextStorage(var parentStorage) = try read(
-                        pointer: parent.storage, heap: heap)
+                        pointer: parent.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     parentStorage.children.append(GoPointer(cell: ctxCell))
                     try writePointer(
-                        .contextStorage(parentStorage), through: parent.storage, heap: &heap)
+                        .contextStorage(parentStorage), through: parent.storage, heap: &vm.heap)
                     // Schedule auto-cancel after timeout
                     try reserveTimer()
                     let runtimeHandleID: Int
@@ -6144,50 +6138,50 @@ public struct GoVirtualMachine: Sendable {
                             asynchronousError = .typeMismatch
                         }
                     }
-                    stack.append(.context(childCtx))
-                    stack.append(.context(childCtx))
+                    vm.stack.append(.context(childCtx))
+                    vm.stack.append(.context(childCtx))
                 case .contextDone:
-                    guard case .context(let ctx) = try pop(&stack) else {
+                    guard case .context(let ctx) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard case .contextStorage(let ctxStorage) = try read(
-                        pointer: ctx.storage, heap: heap)
+                        pointer: ctx.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     let doneChannel = GoValue.channel(
                         GoChannelValue(storage: ctxStorage.doneChannel))
-                    stack.append(doneChannel)
+                    vm.stack.append(doneChannel)
                 case .contextErr:
-                    guard case .context(let ctx) = try pop(&stack) else {
+                    guard case .context(let ctx) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard case .contextStorage(let ctxStorage) = try read(
-                        pointer: ctx.storage, heap: heap)
+                        pointer: ctx.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     if let message = ctxStorage.errorMessage {
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error", value: .string(message))))
                     } else {
-                        stack.append(.nilValue)
+                        vm.stack.append(.nilValue)
                     }
                 case .cancelContext:
-                    guard case .context(let ctx) = try pop(&stack) else {
+                    guard case .context(let ctx) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     try cancelContextTree(ctx.storage, message: "context canceled")
                 case .netDial:
-                    guard case .string(let address) = try pop(&stack),
-                        case .string(let network) = try pop(&stack)
+                    guard case .string(let address) = try pop(&vm.stack),
+                        case .string(let network) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
                     guard let processContext else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
                     }
                     guard network == "tcp" else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: unsupported network \(network)"))))
                         break
@@ -6198,21 +6192,21 @@ public struct GoVirtualMachine: Sendable {
                         let port = UInt16(parts[1]),
                         let ip = IPv4Address(String(parts[0]))
                     else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: invalid address \(address)"))))
                         break
                     }
                     guard let fd = processContext.tcpSocket() else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: socket creation failed"))))
                         break
                     }
                     closedNetDescriptors.remove(fd)
-                    let dialingID = currentGoroutineID
+                    let dialingID = vm.currentGoroutineID
                     beginHostWait()
                     processContext.tcpConnect(fd, to: ip, port: port) {
                         defer { endHostWait() }
@@ -6251,21 +6245,21 @@ public struct GoVirtualMachine: Sendable {
                             asynchronousError = .typeMismatch
                         }
                     }
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .netListen:
-                    guard case .string(let address) = try pop(&stack),
-                        case .string(let network) = try pop(&stack)
+                    guard case .string(let address) = try pop(&vm.stack),
+                        case .string(let network) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
                     guard let processContext else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
                     }
                     guard network == "tcp" else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: unsupported network \(network)"))))
                         break
@@ -6275,8 +6269,8 @@ public struct GoVirtualMachine: Sendable {
                     let port: UInt16
                     if parts.count == 2 {
                         guard let p = UInt16(parts[1]) else {
-                            stack.append(.nilValue)
-                            stack.append(.interface(GoInterfaceValue(
+                            vm.stack.append(.nilValue)
+                            vm.stack.append(.interface(GoInterfaceValue(
                                 typeName: "error",
                                 value: .string("net: invalid port in address \(address)"))))
                             break
@@ -6285,15 +6279,15 @@ public struct GoVirtualMachine: Sendable {
                     } else if parts.count == 1, let p = UInt16(parts[0]) {
                         port = p
                     } else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: invalid address \(address)"))))
                         break
                     }
                     guard let fd = processContext.tcpSocket() else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: socket creation failed"))))
                         break
@@ -6301,35 +6295,35 @@ public struct GoVirtualMachine: Sendable {
                     processContext.bind(fd, address: nil, port: port)
                     guard processContext.tcpListen(fd, port: port) else {
                         processContext.close(fd)
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: listen on \(address) failed"))))
                         break
                     }
                     closedNetDescriptors.remove(fd)
-                    stack.append(.netListener(GoNetListenerValue(
+                    vm.stack.append(.netListener(GoNetListenerValue(
                         fd: fd, network: "tcp", localAddr: address)))
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 case .netAccept:
-                    if stack.last == .nilValue { throw GoRuntimePanic.nilDereference }
-                    guard case .netListener(let listener) = try pop(&stack) else {
+                    if vm.stack.last == .nilValue { throw GoRuntimePanic.nilDereference }
+                    guard case .netListener(let listener) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let processContext else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
                     }
                     if closedNetDescriptors.contains(listener.fd) {
-                        stack.append(.nilValue)
-                        stack.append(errorValue(GoParkedNetWait.closedMessage(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(errorValue(GoParkedNetWait.closedMessage(
                             "accept", GoParkedNetWait.listenerAddress(listener.localAddr))))
                         break
                     }
-                    let acceptingID = currentGoroutineID
+                    let acceptingID = vm.currentGoroutineID
                     let parked = GoParkedNetWait(
                         goroutine: acceptingID,
                         resultsOnClose: [
@@ -6367,19 +6361,19 @@ public struct GoVirtualMachine: Sendable {
                             asynchronousError = .typeMismatch
                         }
                     }
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .netRead:
-                    if stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
-                    guard case .slice(let buf) = try pop(&stack),
-                        case .netConn(let conn) = try pop(&stack)
+                    if vm.stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
+                    guard case .slice(let buf) = try pop(&vm.stack),
+                        case .netConn(let conn) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
                     _ = try validatedSliceRange(buf)
                     guard buf.length <= resourceLimits.maximumNetworkTransferBytes else {
                         throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
                     }
                     guard let processContext else {
-                        stack.append(.int(0))
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.int(0))
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
@@ -6387,11 +6381,11 @@ public struct GoVirtualMachine: Sendable {
                     let closedMessage = GoParkedNetWait.closedMessage(
                         "read", conn.remoteAddr)
                     if closedNetDescriptors.contains(conn.fd) {
-                        stack.append(.int(0))
-                        stack.append(errorValue(closedMessage))
+                        vm.stack.append(.int(0))
+                        vm.stack.append(errorValue(closedMessage))
                         break
                     }
-                    let readingID = currentGoroutineID
+                    let readingID = vm.currentGoroutineID
                     let maxBytes = buf.length
                     let parked = GoParkedNetWait(
                         goroutine: readingID,
@@ -6424,7 +6418,7 @@ public struct GoVirtualMachine: Sendable {
                                 let range = try validatedSliceRange(buf)
                                 guard bytes.count <= range.count,
                                     case .array(var backing) = try read(
-                                        pointer: buf.backing, heap: heap)
+                                        pointer: buf.backing, heap: vm.heap)
                                 else {
                                     throw GoRuntimeError.invalidSliceBounds
                                 }
@@ -6432,7 +6426,7 @@ public struct GoVirtualMachine: Sendable {
                                     backing[range.lowerBound + offset] = .int(Int64(byte))
                                 }
                                 try writePointer(
-                                    .array(backing), through: buf.backing, heap: &heap)
+                                    .array(backing), through: buf.backing, heap: &vm.heap)
                                 try wakeGoroutine(
                                     readingID,
                                     values: [
@@ -6446,24 +6440,24 @@ public struct GoVirtualMachine: Sendable {
                             asynchronousError = .typeMismatch
                         }
                     }
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .netWrite:
-                    if stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
-                    guard case .slice(let buf) = try pop(&stack),
-                        case .netConn(let conn) = try pop(&stack)
+                    if vm.stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
+                    guard case .slice(let buf) = try pop(&vm.stack),
+                        case .netConn(let conn) = try pop(&vm.stack)
                     else { throw GoRuntimeError.typeMismatch }
                     let range = try validatedSliceRange(buf)
                     guard range.count <= resourceLimits.maximumNetworkTransferBytes else {
                         throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
                     }
                     guard let processContext else {
-                        stack.append(.int(0))
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.int(0))
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
                     }
-                    guard case .array(let backing) = try read(pointer: buf.backing, heap: heap)
+                    guard case .array(let backing) = try read(pointer: buf.backing, heap: vm.heap)
                     else { throw GoRuntimeError.invalidSliceBounds }
                     var bytes: [UInt8] = []
                     bytes.reserveCapacity(range.count)
@@ -6474,11 +6468,11 @@ public struct GoVirtualMachine: Sendable {
                         bytes.append(UInt8(truncatingIfNeeded: byte))
                     }
                     let sent = processContext.tcpSend(conn.fd, bytes)
-                    stack.append(.int(sent ? Int64(bytes.count) : 0))
-                    stack.append(sent ? .nilValue : .interface(GoInterfaceValue(
+                    vm.stack.append(.int(sent ? Int64(bytes.count) : 0))
+                    vm.stack.append(sent ? .nilValue : .interface(GoInterfaceValue(
                         typeName: "error", value: .string("net: write failed"))))
                 case .netClose:
-                    let value = try pop(&stack)
+                    let value = try pop(&vm.stack)
                     let fd: Int
                     switch value {
                     case .netConn(let conn): fd = conn.fd
@@ -6496,14 +6490,14 @@ public struct GoVirtualMachine: Sendable {
                         endHostWait()
                         try wakeGoroutine(parked.goroutine, values: parked.resultsOnClose)
                     }
-                    stack.append(.nilValue)
+                    vm.stack.append(.nilValue)
                 case .netLookupHost:
-                    guard case .string(let host) = try pop(&stack) else {
+                    guard case .string(let host) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard processContext != nil else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: network not available"))))
                         break
@@ -6515,25 +6509,25 @@ public struct GoVirtualMachine: Sendable {
                     // For M5, resolve synchronously using the event loop.
                     if let ip = IPv4Address(host) {
                         let addrStr = ip.description
-                        let backingCell = try heap.allocate(.array([.string(addrStr)]))
+                        let backingCell = try vm.heap.allocate(.array([.string(addrStr)]))
                         let slice = GoSliceValue(
                             backing: GoPointer(cell: backingCell),
                             start: 0, length: 1, capacity: 1,
                             zeroValue: .string(""))
-                        stack.append(.slice(slice))
-                        stack.append(.nilValue)
+                        vm.stack.append(.slice(slice))
+                        vm.stack.append(.nilValue)
                         runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
                     } else {
                         // For non-literal hosts, return the host itself as an address
                         // (full DNS requires async resolve which is beyond M5 minimal)
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net: lookup \(host): no such host"))))
                         runtimeHandleRoots.removeValue(forKey: runtimeHandleID)
                     }
                 case .httpHandleFunc(let handler):
-                    guard case .string(let pattern) = try pop(&stack) else {
+                    guard case .string(let pattern) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     if httpHandlers[pattern] == nil,
@@ -6543,11 +6537,11 @@ public struct GoVirtualMachine: Sendable {
                     }
                     httpHandlers[pattern] = handler
                 case .httpListenAndServe:
-                    guard case .string(let addr) = try pop(&stack) else {
+                    guard case .string(let addr) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let processContext else {
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: network not available"))))
                         break
@@ -6560,13 +6554,13 @@ public struct GoVirtualMachine: Sendable {
                     } else if parts.count == 1, let p = UInt16(parts[0]) {
                         port = p
                     } else {
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: invalid address \(addr)"))))
                         break
                     }
                     guard let fd = processContext.tcpSocket() else {
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: socket creation failed"))))
                         break
@@ -6574,7 +6568,7 @@ public struct GoVirtualMachine: Sendable {
                     processContext.bind(fd, address: nil, port: port)
                     guard processContext.tcpListen(fd, port: port) else {
                         processContext.close(fd)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: listen failed"))))
                         break
@@ -6631,9 +6625,9 @@ public struct GoVirtualMachine: Sendable {
                                                 // Create a mini execution context for the handler
                                                 // For M5 minimal we just set statusCode=200
                                                 // and the response body is produced by the handler
-                                                let writerCell = try heap.allocate(.structure(GoStructValue(
+                                                let writerCell = try vm.heap.allocate(.structure(GoStructValue(
                                                     typeName: "http.ResponseWriter", fields: [])))
-                                                let reqCell = try heap.allocate(.structure(GoStructValue(
+                                                let reqCell = try vm.heap.allocate(.structure(GoStructValue(
                                                     typeName: "http.Request", fields: [
                                                         GoStructFieldValue(name: "Path", value: .string(path)),
                                                     ])))
@@ -6672,14 +6666,14 @@ public struct GoVirtualMachine: Sendable {
                     }
                     acceptLoop()
                     // ListenAndServe blocks forever (parks the calling goroutine)
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .httpGet:
-                    guard case .string(let url) = try pop(&stack) else {
+                    guard case .string(let url) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let processContext else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: network not available"))))
                         break
@@ -6698,20 +6692,20 @@ public struct GoVirtualMachine: Sendable {
                         hostParts.count == 2,
                         let port = UInt16(hostParts[1])
                     else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: invalid URL \(url)"))))
                         break
                     }
                     guard let fd = processContext.tcpSocket() else {
-                        stack.append(.nilValue)
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.nilValue)
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string("net/http: socket creation failed"))))
                         break
                     }
-                    let gettingID = currentGoroutineID
+                    let gettingID = vm.currentGoroutineID
                     beginHostWait()
                     processContext.tcpConnect(fd, to: ip, port: port) {
                         defer { endHostWait() }
@@ -6792,26 +6786,26 @@ public struct GoVirtualMachine: Sendable {
                             }
                         }
                     }
-                    currentBlocked = true
+                    vm.currentBlocked = true
                 case .mutexLock:
-                    guard case .mutex(let mutex) = try pop(&stack),
+                    guard case .mutex(let mutex) = try pop(&vm.stack),
                         case .mutexStorage(var storage) = try read(
-                            pointer: mutex.storage, heap: heap)
+                            pointer: mutex.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     if storage.locked {
                         storage.waiters.append(GoRuntimeWaiter(
-                            goroutineID: currentGoroutineID,
+                            goroutineID: vm.currentGoroutineID,
                             waitSequence: allocateWaitSequence()))
-                        currentBlocked = true
+                        vm.currentBlocked = true
                     } else {
                         storage.locked = true
                     }
                     try writePointer(
-                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                        .mutexStorage(storage), through: mutex.storage, heap: &vm.heap)
                 case .mutexUnlock:
-                    guard case .mutex(let mutex) = try pop(&stack),
+                    guard case .mutex(let mutex) = try pop(&vm.stack),
                         case .mutexStorage(var storage) = try read(
-                            pointer: mutex.storage, heap: heap)
+                            pointer: mutex.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     guard storage.locked else { throw GoFatalError.mutexUnlockOfUnlocked }
                     if storage.waiters.isEmpty {
@@ -6821,19 +6815,19 @@ public struct GoVirtualMachine: Sendable {
                         try wakeGoroutine(waiter.goroutineID)
                     }
                     try writePointer(
-                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                        .mutexStorage(storage), through: mutex.storage, heap: &vm.heap)
                 case .makeWaitGroup:
-                    let cell = try heap.allocate(.waitGroupStorage(GoWaitGroupStorage()))
-                    stack.append(.waitGroup(GoWaitGroupValue(storage: GoPointer(cell: cell))))
+                    let cell = try vm.heap.allocate(.waitGroupStorage(GoWaitGroupStorage()))
+                    vm.stack.append(.waitGroup(GoWaitGroupValue(storage: GoPointer(cell: cell))))
                 case .waitGroupAdd:
-                    guard case .int(let delta) = try pop(&stack),
-                        case .waitGroup(let waitGroup) = try pop(&stack),
+                    guard case .int(let delta) = try pop(&vm.stack),
+                        case .waitGroup(let waitGroup) = try pop(&vm.stack),
                         case .waitGroupStorage(var storage) = try read(
-                            pointer: waitGroup.storage, heap: heap)
+                            pointer: waitGroup.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     let (next, overflow) = storage.count.addingReportingOverflow(delta)
                     guard !overflow, next >= 0 else {
-                        frames[frameIndex].pendingExit = .panicking(
+                        vm.frames[frameIndex].pendingExit = .panicking(
                             .string("sync: negative WaitGroup counter"))
                         break
                     }
@@ -6841,82 +6835,82 @@ public struct GoVirtualMachine: Sendable {
                     let waiters = next == 0 ? storage.waiters : []
                     if next == 0 { storage.waiters.removeAll() }
                     try writePointer(
-                        .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
+                        .waitGroupStorage(storage), through: waitGroup.storage, heap: &vm.heap)
                     for waiter in waiters {
                         try wakeGoroutine(waiter.goroutineID)
                     }
                 case .waitGroupWait:
-                    guard case .waitGroup(let waitGroup) = try pop(&stack),
+                    guard case .waitGroup(let waitGroup) = try pop(&vm.stack),
                         case .waitGroupStorage(var storage) = try read(
-                            pointer: waitGroup.storage, heap: heap)
+                            pointer: waitGroup.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     if storage.count > 0 {
                         storage.waiters.append(GoRuntimeWaiter(
-                            goroutineID: currentGoroutineID,
+                            goroutineID: vm.currentGoroutineID,
                             waitSequence: allocateWaitSequence()))
                         try writePointer(
-                            .waitGroupStorage(storage), through: waitGroup.storage, heap: &heap)
-                        currentBlocked = true
+                            .waitGroupStorage(storage), through: waitGroup.storage, heap: &vm.heap)
+                        vm.currentBlocked = true
                     }
                 case .garbageCollect:
                     performGarbageCollection()
                 case .getMapIndex(let commaOK):
-                    let zero = try pop(&stack)
-                    let key = try pop(&stack)
-                    let base = try pop(&stack)
+                    let zero = try pop(&vm.stack)
+                    let key = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     guard case .map(let mapValue) = base else {
                         if base == .nilValue {
-                            stack.append(zero)
-                            if commaOK { stack.append(.bool(false)) }
+                            vm.stack.append(zero)
+                            if commaOK { vm.stack.append(.bool(false)) }
                             break
                         }
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                    guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: vm.heap)
                     else { throw GoRuntimeError.typeMismatch }
                     if let value = storage.get(key) {
-                        stack.append(value)
-                        if commaOK { stack.append(.bool(true)) }
+                        vm.stack.append(value)
+                        if commaOK { vm.stack.append(.bool(true)) }
                     } else {
-                        stack.append(zero)
-                        if commaOK { stack.append(.bool(false)) }
+                        vm.stack.append(zero)
+                        if commaOK { vm.stack.append(.bool(false)) }
                     }
                 case .setMapIndex:
-                    let value = try pop(&stack)
-                    let key = try pop(&stack)
-                    let base = try pop(&stack)
+                    let value = try pop(&vm.stack)
+                    let key = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     guard case .map(let mapValue) = base else {
                         if base == .nilValue { throw GoRuntimePanic.nilMapAssignment }
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard heap.contains(mapValue.storage.cell) else {
+                    guard vm.heap.contains(mapValue.storage.cell) else {
                         throw GoRuntimeError.invalidPointer
                     }
                     guard mapValue.storage.path.isEmpty,
-                        try heap.setMapEntry(
+                        try vm.heap.setMapEntry(
                             mapValue.storage.cell,
                             key: key,
                             value: value,
                             maximumEntries: resourceLimits.maximumMapEntries)
                     else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.map(mapValue))
+                    vm.stack.append(.map(mapValue))
                 case .deleteMap:
-                    let key = try pop(&stack)
-                    let base = try pop(&stack)
+                    let key = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     if base == .nilValue {
-                        stack.append(.nilValue)
+                        vm.stack.append(.nilValue)
                         break
                     }
                     guard case .map(let mapValue) = base else {
                         throw GoRuntimeError.typeMismatch
                     }
-                    guard heap.contains(mapValue.storage.cell) else {
+                    guard vm.heap.contains(mapValue.storage.cell) else {
                         throw GoRuntimeError.invalidPointer
                     }
                     guard mapValue.storage.path.isEmpty,
-                        try heap.removeMapEntry(mapValue.storage.cell, key: key)
+                        try vm.heap.removeMapEntry(mapValue.storage.cell, key: key)
                     else { throw GoRuntimeError.typeMismatch }
-                    stack.append(.map(mapValue))
+                    vm.stack.append(.map(mapValue))
                 case .callInterface(let methodName, let argumentCount):
                     // Stack: [receiver, arg0, arg1, ..., argN-1] (receiver pushed first)
                     guard argumentCount >= 0 else {
@@ -6924,25 +6918,25 @@ public struct GoVirtualMachine: Sendable {
                     }
                     let requiredCount = try checkedAdd(
                         argumentCount, 1, resource: "interface arguments")
-                    guard stack.count >= requiredCount else {
+                    guard vm.stack.count >= requiredCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let argStart = stack.count - argumentCount
-                    let arguments = Array(stack[argStart...])
-                    stack.removeSubrange(argStart...)
-                    let receiver = try pop(&stack)
+                    let argStart = vm.stack.count - argumentCount
+                    let arguments = Array(vm.stack[argStart...])
+                    vm.stack.removeSubrange(argStart...)
+                    let receiver = try pop(&vm.stack)
                     // An error the library made has no function behind its
                     // `Error` method.
                     if methodName == "Error", arguments.isEmpty,
                         let library = try libraryError(receiver)
                     {
-                        stack.append(.string(library.message))
+                        vm.stack.append(.string(library.message))
                         break
                     }
                     if methodName == "Unwrap", arguments.isEmpty,
                         let wrapped = try libraryUnwrapResult(receiver)
                     {
-                        stack.append(wrapped)
+                        vm.stack.append(wrapped)
                         break
                     }
                     // Unwrap interface to get concrete type and value
@@ -6981,7 +6975,7 @@ public struct GoVirtualMachine: Sendable {
                     else {
                         throw GoRuntimeError.missingFunction(concreteTypeName + "." + methodName)
                     }
-                    guard frames.count < maximumCallDepth else {
+                    guard vm.frames.count < maximumCallDepth else {
                         throw GoRuntimeError.callStackLimitExceeded
                     }
                     // A method with a value receiver takes the value a
@@ -6992,7 +6986,7 @@ public struct GoVirtualMachine: Sendable {
                         guard case .pointer(let pointer) = receiverValue else {
                             throw GoRuntimePanic.nilDereference
                         }
-                        receiverValue = try read(pointer: pointer, heap: heap)
+                        receiverValue = try read(pointer: pointer, heap: vm.heap)
                     }
                     let allArgs = [receiverValue] + arguments
                     guard allArgs.count == function.parameterCount else {
@@ -7001,18 +6995,18 @@ public struct GoVirtualMachine: Sendable {
                             expected: function.parameterCount,
                             actual: allArgs.count)
                     }
-                    frames.append(
+                    vm.frames.append(
                         try makeFrame(
                             function: function,
-                            stackBase: stack.count,
+                            stackBase: vm.stack.count,
                             arguments: allArgs,
-                            heap: &heap))
+                            heap: &vm.heap))
                 case .makeInterface(let typeName):
-                    let value = try pop(&stack)
-                    stack.append(.interface(GoInterfaceValue(typeName: typeName, value: value)))
+                    let value = try pop(&vm.stack)
+                    vm.stack.append(.interface(GoInterfaceValue(typeName: typeName, value: value)))
                 case .typeAssert(let targetName, let commaOK):
-                    let zero = try pop(&stack)
-                    let source = try pop(&stack)
+                    let zero = try pop(&vm.stack)
+                    let source = try pop(&vm.stack)
                     // Types are compared by identity: a boxed value's, or the
                     // one a bare `int`, `string`, `bool`, or struct shows.
                     let dynamicType: String?
@@ -7034,17 +7028,17 @@ public struct GoVirtualMachine: Sendable {
                             source == .nilValue
                             ? "" : try missingMethod(of: source, for: wanted)
                         if missing == nil {
-                            stack.append(source)
-                            if commaOK { stack.append(.bool(true)) }
+                            vm.stack.append(source)
+                            if commaOK { vm.stack.append(.bool(true)) }
                         } else if commaOK {
-                            stack.append(zero)
-                            stack.append(.bool(false))
+                            vm.stack.append(zero)
+                            vm.stack.append(.bool(false))
                         } else {
                             let name =
                                 wanted.typeName.isEmpty
                                 ? (wanted.methods.map(\.name) == ["Error"] ? "error" : "interface")
                                 : GoTypeDescriptor.goName(wanted.typeName)
-                            frames[frameIndex].pendingExit = .panicking(
+                            vm.frames[frameIndex].pendingExit = .panicking(
                                 GoRuntimePanic(
                                     GoErrors.assertionErrorType,
                                     source == .nilValue
@@ -7053,11 +7047,11 @@ public struct GoVirtualMachine: Sendable {
                                 ).value)
                         }
                     } else if dynamicType == GoTypeDescriptor.identity(ofTypeName: targetName) {
-                        stack.append(dynamicValue)
-                        if commaOK { stack.append(.bool(true)) }
+                        vm.stack.append(dynamicValue)
+                        if commaOK { vm.stack.append(.bool(true)) }
                     } else if commaOK {
-                        stack.append(zero)
-                        stack.append(.bool(false))
+                        vm.stack.append(zero)
+                        vm.stack.append(.bool(false))
                     } else {
                         let held = source == .nilValue ? "nil" : inferredTypeName(of: source)
                         let wanted =
@@ -7082,14 +7076,14 @@ public struct GoVirtualMachine: Sendable {
                                 apart = " (types from different scopes)"
                             }
                         }
-                        frames[frameIndex].pendingExit = .panicking(
+                        vm.frames[frameIndex].pendingExit = .panicking(
                             GoRuntimePanic(
                                 GoErrors.assertionErrorType,
                                 "interface conversion: interface {} is \(held), not \(wanted)\(apart)"
                             ).value)
                     }
                 case .rangeKeys:
-                    let base = try pop(&stack)
+                    let base = try pop(&vm.stack)
                     let keys: [GoValue]
                     switch base {
                     case .array(let values):
@@ -7106,7 +7100,7 @@ public struct GoVirtualMachine: Sendable {
                         }
                         keys = offsets
                     case .map(let mapValue):
-                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
                         keys = storage.keys
                     case .nilValue:
@@ -7114,25 +7108,25 @@ public struct GoVirtualMachine: Sendable {
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
-                    stack.append(.array(keys))
+                    vm.stack.append(.array(keys))
                 case .rangeValue:
-                    let zero = try pop(&stack)
-                    let key = try pop(&stack)
-                    let base = try pop(&stack)
+                    let zero = try pop(&vm.stack)
+                    let key = try pop(&vm.stack)
+                    let base = try pop(&vm.stack)
                     switch (base, key) {
                     case (.array(let values), .int(let rawIndex)):
                         guard let index = Int(exactly: rawIndex), values.indices.contains(index)
                         else { throw GoRuntimeError.indexOutOfRange }
-                        stack.append(values[index])
+                        vm.stack.append(values[index])
                     case (.slice(let slice), .int(let rawIndex)):
                         _ = try validatedSliceRange(slice)
                         guard let index = Int(exactly: rawIndex), index >= 0, index < slice.length
                         else { throw GoRuntimeError.indexOutOfRange }
                         let absoluteIndex = try checkedAdd(
                             slice.start, index, resource: "slice index")
-                        stack.append(try read(
+                        vm.stack.append(try read(
                             pointer: appending(index: absoluteIndex, to: slice.backing),
-                            heap: heap))
+                            heap: vm.heap))
                     case (.string(let string), .int(let rawOffset)):
                         guard let offset = Int(exactly: rawOffset) else {
                             throw GoRuntimeError.indexOutOfRange
@@ -7142,25 +7136,25 @@ public struct GoVirtualMachine: Sendable {
                             let scalarIndex = utf8.index(utf8.startIndex, offsetBy: offset)
                                 .samePosition(in: string.unicodeScalars)
                         else { throw GoRuntimeError.indexOutOfRange }
-                        stack.append(.int(Int64(string.unicodeScalars[scalarIndex].value)))
+                        vm.stack.append(.int(Int64(string.unicodeScalars[scalarIndex].value)))
                     case (.map(let mapValue), _):
-                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: heap)
+                        guard case .mapStorage(let storage) = try read(pointer: mapValue.storage, heap: vm.heap)
                         else { throw GoRuntimeError.typeMismatch }
-                        stack.append(storage.get(key) ?? zero)
+                        vm.stack.append(storage.get(key) ?? zero)
                     default:
                         throw GoRuntimeError.typeMismatch
                     }
                 case .testFail(let argumentCount, let fatal):
-                    guard argumentCount >= 0, stack.count >= argumentCount else {
+                    guard argumentCount >= 0, vm.stack.count >= argumentCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - argumentCount
-                    let values = Array(stack[start...])
-                    stack.removeSubrange(start...)
+                    let start = vm.stack.count - argumentCount
+                    let values = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
                     testFailureCount += 1
                     // The frame state is final before a write that can park.
                     if fatal {
-                        frames[frameIndex].pendingExit = .testFatal
+                        vm.frames[frameIndex].pendingExit = .testFatal
                     }
                     if !values.isEmpty {
                         try emit(
@@ -7177,12 +7171,12 @@ public struct GoVirtualMachine: Sendable {
                     let passed = testFailureCount == started
                     let status = passed ? "PASS" : "FAIL"
                     // The result is in place before a write that can park.
-                    stack.append(.bool(passed))
+                    vm.stack.append(.bool(passed))
                     try emit("--- \(status): \(name)\n")
                 case .osArgs:
                     let elements = arguments.map { GoValue.string($0) }
-                    let cell = try heap.allocate(.array(elements))
-                    stack.append(
+                    let cell = try vm.heap.allocate(.array(elements))
+                    vm.stack.append(
                         .slice(
                             GoSliceValue(
                                 backing: GoPointer(cell: cell),
@@ -7191,28 +7185,28 @@ public struct GoVirtualMachine: Sendable {
                                 capacity: elements.count,
                                 zeroValue: .string(""))))
                 case .exit:
-                    guard case .int(let code) = try pop(&stack) else {
+                    guard case .int(let code) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     programExitCode = Int32(truncatingIfNeeded: code)
                     break executionLoop
                 case .parseInt:
-                    guard case .string(let text) = try pop(&stack) else {
+                    guard case .string(let text) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     if let value = Int64(text) {
-                        stack.append(.int(value))
-                        stack.append(.nilValue)
+                        vm.stack.append(.int(value))
+                        vm.stack.append(.nilValue)
                     } else {
-                        stack.append(.int(0))
-                        stack.append(.interface(GoInterfaceValue(
+                        vm.stack.append(.int(0))
+                        vm.stack.append(.interface(GoInterfaceValue(
                             typeName: "error",
                             value: .string(
                                 "strconv.Atoi: parsing \"\(text)\": invalid syntax"))))
                     }
                 case .readInput:
-                    guard case .slice(let pathSlice) = try pop(&stack),
-                        case .string(let command) = try pop(&stack)
+                    guard case .slice(let pathSlice) = try pop(&vm.stack),
+                        case .string(let command) = try pop(&vm.stack)
                     else {
                         throw GoRuntimeError.typeMismatch
                     }
@@ -7227,7 +7221,7 @@ public struct GoVirtualMachine: Sendable {
                             pointer: appending(
                                 index: absoluteIndex,
                                 to: pathSlice.backing),
-                            heap: heap)
+                            heap: vm.heap)
                         else {
                             throw GoRuntimeError.typeMismatch
                         }
@@ -7237,19 +7231,19 @@ public struct GoVirtualMachine: Sendable {
                         paths.append(path)
                     }
                     guard let processContext else {
-                        stack.append(.string(""))
-                        stack.append(.int(1))
+                        vm.stack.append(.string(""))
+                        vm.stack.append(.int(1))
                         break
                     }
                     if paths.isEmpty, cooperative {
                         guard processContext.readiness(0) != nil else {
-                            stack.append(.string(""))
-                            stack.append(.int(0))
+                            vm.stack.append(.string(""))
+                            vm.stack.append(.int(0))
                             break
                         }
                         // Park this goroutine and gather fd 0 to end of input
                         // across process steps.
-                        let readerID = currentGoroutineID
+                        let readerID = vm.currentGoroutineID
                         var gathered: [UInt8] = []
                         func gatherStandardInput() {
                             beginHostWait()
@@ -7281,7 +7275,7 @@ public struct GoVirtualMachine: Sendable {
                             }
                         }
                         gatherStandardInput()
-                        currentBlocked = true
+                        vm.currentBlocked = true
                         break
                     }
                     if paths.isEmpty {
@@ -7302,8 +7296,8 @@ public struct GoVirtualMachine: Sendable {
                             }
                             bytes.append(contentsOf: chunk)
                         }
-                        stack.append(.string(String(decoding: bytes, as: UTF8.self)))
-                        stack.append(.int(0))
+                        vm.stack.append(.string(String(decoding: bytes, as: UTF8.self)))
+                        vm.stack.append(.int(0))
                         break
                     }
                     var bytes: [UInt8] = []
@@ -7335,25 +7329,25 @@ public struct GoVirtualMachine: Sendable {
                             status = 1
                         }
                     }
-                    stack.append(.string(String(decoding: bytes, as: UTF8.self)))
-                    stack.append(.int(status))
+                    vm.stack.append(.string(String(decoding: bytes, as: UTF8.self)))
+                    vm.stack.append(.int(status))
                 case .readStdin:
                     guard let processContext, processContext.readiness(0) != nil else {
-                        stack.append(.string(""))
-                        stack.append(.int(1))
+                        vm.stack.append(.string(""))
+                        vm.stack.append(.int(1))
                         break
                     }
                     pendingHostInputWaits += 1
-                    readStandardInputChunk(for: currentGoroutineID)
-                    currentBlocked = true
+                    readStandardInputChunk(for: vm.currentGoroutineID)
+                    vm.currentBlocked = true
                 case .writeFile:
-                    guard case .string(let contents) = try pop(&stack),
-                        case .string(let path) = try pop(&stack)
+                    guard case .string(let contents) = try pop(&vm.stack),
+                        case .string(let path) = try pop(&vm.stack)
                     else {
                         throw GoRuntimeError.typeMismatch
                     }
                     guard let processContext else {
-                        stack.append(.int(1))
+                        vm.stack.append(.int(1))
                         break
                     }
                     var status: Int64 = 0
@@ -7378,51 +7372,50 @@ public struct GoVirtualMachine: Sendable {
                     } catch {
                         status = 1
                     }
-                    stack.append(.int(status))
+                    vm.stack.append(.int(status))
                 case .setTerminalRawMode:
-                    guard case .bool(let enabled) = try pop(&stack) else {
+                    guard case .bool(let enabled) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
                     let applied = processContext?.setTerminalRawMode(0, enabled) ?? false
                     if applied { programEnabledRawMode = enabled }
-                    stack.append(.bool(applied))
+                    vm.stack.append(.bool(applied))
                 case .terminalWindowSize:
                     let size = processContext?.terminalWindowSize(1)
                         ?? processContext?.terminalWindowSize(0)
-                    stack.append(.int(Int64(size?.rows ?? 0)))
-                    stack.append(.int(Int64(size?.columns ?? 0)))
+                    vm.stack.append(.int(Int64(size?.rows ?? 0)))
+                    vm.stack.append(.int(Int64(size?.columns ?? 0)))
                 case .strings(let function):
-                    stack.append(try executeStrings(function, stack: &stack))
+                    vm.stack.append(try executeStrings(function, stack: &vm.stack))
                 case .return:
-                    frames[frameIndex].pendingExit = .returning([])
+                    vm.frames[frameIndex].pendingExit = .returning([])
                 case .returnValues(let count):
                     guard count >= 0 else {
                         throw GoRuntimeError.invalidExecutable("negative return count")
                     }
                     let requiredStackCount = try checkedAdd(
-                        frames[frameIndex].stackBase,
+                        vm.frames[frameIndex].stackBase,
                         count,
                         resource: "operand stack")
-                    guard stack.count >= requiredStackCount else {
+                    guard vm.stack.count >= requiredStackCount else {
                         throw GoRuntimeError.stackUnderflow
                     }
-                    let start = stack.count - count
-                    let values = Array(stack[start...])
-                    stack.removeSubrange(start...)
-                    frames[frameIndex].pendingExit = .returning(values)
+                    let start = vm.stack.count - count
+                    let values = Array(vm.stack[start...])
+                    vm.stack.removeSubrange(start...)
+                    vm.frames[frameIndex].pendingExit = .returning(values)
                 }
-                guard stack.count <= resourceLimits.maximumValueStackEntries else {
+                guard vm.stack.count <= resourceLimits.maximumValueStackEntries else {
                     throw GoRuntimeError.resourceLimitExceeded("operand stack")
                 }
-                if heap.shouldCollect(threshold: garbageCollectionThreshold),
-                    frames.indices.contains(frameIndex),
-                    frames[frameIndex].function.safepointProgramCounters.contains(
-                        frames[frameIndex].programCounter)
+                if vm.heap.shouldCollect(threshold: garbageCollectionThreshold),
+                    vm.frames.indices.contains(frameIndex),
+                    vm.frames[frameIndex].isSafepoint(vm.frames[frameIndex].programCounter)
                 {
                     performGarbageCollection()
                 }
                 try reportRuntimeMemoryIfChanged()
-                try scheduleNext(requeueCurrent: !currentBlocked)
+                try scheduleNext(requeueCurrent: !vm.currentBlocked)
             }
             if testFailureCount > 0 { throw GoRuntimeError.testFailure }
         }
@@ -7432,7 +7425,7 @@ public struct GoVirtualMachine: Sendable {
         func resumeSuspendedExecution() {
             isSuspended = false
             if !cooperative {
-                sliceStartInstruction = executed
+                vm.sliceStartInstruction = vm.executed
                 outputBytesWritten = 0
             }
             do {
@@ -7451,7 +7444,7 @@ public struct GoVirtualMachine: Sendable {
             completedNormally = true
             releaseExecution()
             resumedCompletion?(.success(
-                GoProcessResult(exitCode: programExitCode, statistics: heap.statistics)))
+                GoProcessResult(exitCode: programExitCode, statistics: vm.heap.statistics)))
         }
 
         do {
@@ -7462,7 +7455,7 @@ public struct GoVirtualMachine: Sendable {
             return nil
         }
         completedNormally = true
-        return GoProcessResult(exitCode: programExitCode, statistics: heap.statistics)
+        return GoProcessResult(exitCode: programExitCode, statistics: vm.heap.statistics)
     }
 
     private func builtinGoroutineFunction(
@@ -7495,6 +7488,10 @@ public struct GoVirtualMachine: Sendable {
     }
 
     private func jump(to target: Int, frame: inout Frame) throws {
+        try jump(to: target, in: frame)
+    }
+
+    private func jump(to target: Int, in frame: Frame) throws {
         guard target >= 0, target <= frame.function.instructions.count else {
             throw GoRuntimeError.invalidJumpTarget(target)
         }
@@ -7822,6 +7819,13 @@ private struct ManagedHeap {
     subscript(index: Int) -> GoValue {
         precondition(contains(index), "invalid managed heap cell")
         return cells[index]!.value
+    }
+
+    /// The value in cell `index`, or nil when there is no such cell: one
+    /// lookup where `contains` and the subscript make three.
+    func valueIfPresent(_ index: Int) -> GoValue? {
+        guard index >= 0, index < cells.count else { return nil }
+        return cells[index]?.value
     }
 
     mutating func replace(_ index: Int, with value: GoValue) throws {
@@ -8318,6 +8322,40 @@ private struct DeferredCall {
     let arguments: [GoValue]
 }
 
+/// The state of a run that its instructions read and write all the time:
+/// the running goroutine's frames and operand stack, the heap, and the
+/// scheduler's counters and flags.
+///
+/// It is an object rather than local variables of `execute` because the
+/// nested functions there escape (into host continuations), and every
+/// access to a local variable captured by an escaping closure is checked for
+/// exclusivity at run time, which cost more than the instructions did. The
+/// VM is single-threaded and never holds two accesses to one of these at
+/// once, so the checks are off.
+private final class GoExecutionState {
+    @exclusivity(unchecked) var heap: ManagedHeap
+    @exclusivity(unchecked) var frames: [Frame] = []
+    @exclusivity(unchecked) var stack: [GoValue] = []
+    @exclusivity(unchecked) var executed = 0
+    @exclusivity(unchecked) var lastEventLoopYieldInstruction = 0
+    @exclusivity(unchecked) var currentGoroutineID = 0
+    @exclusivity(unchecked) var goroutines: [Int: GoroutineContext] = [:]
+    @exclusivity(unchecked) var runQueue: [Int] = []
+    @exclusivity(unchecked) var currentBlocked = false
+    /// True once the current goroutine's context is already stored in
+    /// `goroutines` (parked, and possibly woken again) within this
+    /// instruction, so the scheduler must not store it a second time.
+    @exclusivity(unchecked) var currentParked = false
+    @exclusivity(unchecked) var yieldRequested = false
+    @exclusivity(unchecked) var sliceStartInstruction = 0
+    @exclusivity(unchecked) var liveFrameLocalCount = 0
+    @exclusivity(unchecked) var lastRuntimeMemoryReport: (bytes: Int, cells: Int, collections: Int)?
+
+    init(heap: ManagedHeap) {
+        self.heap = heap
+    }
+}
+
 private struct GoroutineContext {
     var frames: [Frame]
     var stack: [GoValue]
@@ -8361,13 +8399,25 @@ private enum FrameExit {
     case testFatal
 }
 
-private struct Frame {
+/// A call in progress.
+///
+/// A class, not a struct: the execution loop reads `frames[i].field` several
+/// times per instruction, and reading a field of a struct element of an array
+/// copies the whole element, retaining every array and string it holds. A
+/// frame belongs to one goroutine's call stack at a time, and a parked
+/// goroutine's frames are only touched through its saved context, so sharing
+/// the object where the struct was copied changes nothing.
+///
+/// The fields the loop touches on every instruction skip the run-time
+/// exclusivity check: the VM is single-threaded and never holds two accesses
+/// to one of them at once.
+private final class Frame {
     let function: GoBytecodeFunction
     let stackBase: Int
-    var locals: [Int?]
-    var programCounter = 0
+    @exclusivity(unchecked) var locals: [Int?]
+    @exclusivity(unchecked) var programCounter = 0
     var deferredCalls: [DeferredCall] = []
-    var pendingExit: FrameExit?
+    @exclusivity(unchecked) var pendingExit: FrameExit?
     let isDeferredCall: Bool
     /// Results of the guest functions that the native call this frame is
     /// executing has had run, in the order it asked for them: the `Error` and
@@ -8426,5 +8476,19 @@ private struct Frame {
         for (index, argument) in arguments.enumerated() {
             self.locals[index] = try heap.allocate(argument)
         }
+    }
+
+    /// The function's safepoints as a set, made the first time a collection
+    /// is due while this frame runs.
+    private var safepoints: Set<Int>?
+
+    /// Whether a collection may run with this frame stopped at
+    /// `programCounter`: `safepointProgramCounters.contains`, without a
+    /// scan of the list on every instruction while a collection is due.
+    func isSafepoint(_ programCounter: Int) -> Bool {
+        if let safepoints { return safepoints.contains(programCounter) }
+        let made = Set(function.safepointProgramCounters)
+        safepoints = made
+        return made.contains(programCounter)
     }
 }
