@@ -649,6 +649,8 @@ private struct FormatPrinter {
     var braceDepth = 0
     var parenthesisDepth = 0
     var forHeader = false
+    /// Whether the semicolons of this `for` clause are left out.
+    var headerSemicolonsDropped = false
     var pendingIf = false
     var pendingFunction = false
     /// Whether the `func` being printed is a function type, `func(int) int`,
@@ -1584,6 +1586,7 @@ private struct FormatPrinter {
                 pendingFunction = false
                 pendingTypeDeclaration = false
                 forHeader = false
+                headerSemicolonsDropped = false
             }
         case "}":
             if let body = oneLineBodies.removeValue(forKey: braceDepth) {
@@ -1700,7 +1703,22 @@ private struct FormatPrinter {
             // Inside a `for` clause, and after the initializer of an `if` or
             // a `switch`, the header goes on.
             if forHeader || pendingIf || pendingSwitch {
-                trimTrailingWhitespace()
+                // Go's printer writes no semicolon where there is no
+                // initializer of an `if` or a `switch`, and none in a `for`
+                // clause without an initializer and a post statement.
+                if !forHeader, previous?.text == "if" || previous?.text == "switch" { return }
+                if forHeader, headerSemicolonsDropped { return }
+                if forHeader, previous?.text == "for", forClauseHasNoPostStatement(after: position) {
+                    headerSemicolonsDropped = true
+                    return
+                }
+                // `for ; cond; post` and `init; ; post` keep a blank before
+                // the semicolon.
+                if previous?.text == "for" || previous?.text == ";" {
+                    ensureSpace()
+                } else {
+                    trimTrailingWhitespace()
+                }
                 append("; ")
             } else if let body = oneLineBodies[braceDepth] {
                 // The statements of a body that stays on its line.
@@ -2234,6 +2252,29 @@ private struct FormatPrinter {
     mutating func finishLine(unlessCommentFollows next: FormatToken?) {
         if let next, next.kind == .lineComment, next.leadingNewlines == 0 { return }
         finishLine()
+    }
+
+    /// Whether the `for` clause whose first semicolon is the token at
+    /// `index` has nothing between its second semicolon and its body.
+    func forClauseHasNoPostStatement(after index: Int) -> Bool {
+        var depth = 0
+        var semicolons = 0
+        var next = index + 1
+        while next < tokens.count {
+            let text = tokens[next].text
+            switch text {
+            case "(", "[": depth += 1
+            case ")", "]": depth -= 1
+            case ";" where depth == 0:
+                semicolons += 1
+                return next + 1 < tokens.count && tokens[next + 1].text == "{"
+            case "{" where depth == 0:
+                return semicolons == 0
+            default: break
+            }
+            next += 1
+        }
+        return false
     }
 
     mutating func appendBlankLine() {

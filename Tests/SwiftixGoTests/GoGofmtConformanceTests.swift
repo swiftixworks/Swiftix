@@ -31,6 +31,13 @@ struct GoGofmtConformanceTests {
         #expect(try GoFormatter.format(GoSourceFile(path: "main.go", text: expected)) == expected)
     }
 
+    /// Go writes no semicolon where an `if` or a `switch` has no
+    /// initializer, and none in a `for` clause without an initializer and a
+    /// post statement; otherwise an empty part keeps its blank.
+    @Test func semicolonsOfHeaders() throws {
+        try expectGofmt(semicolonsOfHeadersSource, semicolonsOfHeadersExpected)
+    }
+
     /// The lines of a `/* */` comment after its first lose the white space
     /// they share and take the comment's indentation; an empty line in one
     /// is kept.
@@ -2452,6 +2459,60 @@ func main() {
 		x++
 	}
 	_ = x
+}
+
+"""#
+
+private let semicolonsOfHeadersSource = #"""
+package main
+
+func main() {
+	i := 0
+	for ; i < 3; i++ {
+	}
+	for ;; {
+		break
+	}
+	for ; i < 5; {
+		i++
+	}
+	for i := 0; ; i++ {
+		break
+	}
+	for i := 0; i < 2; {
+		i++
+	}
+	switch ; i {
+	}
+	if ; i > 0 {
+	}
+}
+
+"""#
+
+private let semicolonsOfHeadersExpected = #"""
+package main
+
+func main() {
+	i := 0
+	for ; i < 3; i++ {
+	}
+	for {
+		break
+	}
+	for i < 5 {
+		i++
+	}
+	for i := 0; ; i++ {
+		break
+	}
+	for i := 0; i < 2; {
+		i++
+	}
+	switch i {
+	}
+	if i > 0 {
+	}
 }
 
 """#
