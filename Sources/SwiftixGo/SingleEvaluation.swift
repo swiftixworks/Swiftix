@@ -93,3 +93,51 @@ extension FunctionChecker {
         return baseType.pointee(in: typeDefinitions) == nil ? nil : baseType
     }
 }
+
+extension IRLowerer {
+    /// `base[low:]` with a call or a receive in `base`, with that part read
+    /// once and named: the slice expression reads `base` for its length
+    /// and again to slice it. Nil for every other slice expression, which is
+    /// lowered as it always was.
+    mutating func onceEvaluatedSliceBase(_ expression: GoExpression) throws -> GoExpression? {
+        guard case .slicing(let base, let low, nil, let position) = expression,
+            !base.isRepeatable
+        else { return nil }
+        let named: GoExpression
+        if case .unary(.dereference, let pointer, let at) = base {
+            // `p()[1:]` of a pointer to an array, which is `(*p())[1:]`.
+            named = .unary(operator: .dereference, operand: try pin(pointer), position: at)
+        } else if case .array = underlying(try type(of: base)) {
+            return nil
+        } else {
+            named = try pin(base)
+        }
+        return .slicing(base: named, low: low, high: nil, position: position)
+    }
+}
+
+extension FunctionChecker {
+    /// Refuses a store in a field of a struct that is an element of a map,
+    /// `m[k].f = v`, as Go does: the element is a copy, no variable, and
+    /// neither is a field deeper in it, `m[k].a.b`. A field reached through
+    /// a pointer on the way is a variable.
+    mutating func refuseFieldOfMapElement(_ target: GoExpression) throws {
+        var current = target
+        var depth = 0
+        while case .selector(let base, _, _) = current {
+            // What has no type here is for the rule for any target to report.
+            guard let baseType = try? type(of: base),
+                baseType.pointee(in: typeDefinitions) == nil
+            else { return }
+            current = base
+            depth += 1
+        }
+        guard depth > 0, case .index(let collection, _, _) = current,
+            let collectionType = try? type(of: collection), case .map = underlying(collectionType)
+        else { return }
+        guard depth == 1 else { throw unassignable(target) }
+        throw GoDiagnostic(
+            position: Self.start(of: target, in: namePositions),
+            message: "cannot assign to struct field \(spelling(of: target)) in map")
+    }
+}

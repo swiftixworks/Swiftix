@@ -4325,6 +4325,9 @@ struct IRLowerer {
             return try lowerFullSlice(
                 base: base, low: low, high: bounds.high, max: bounds.max, position: position)
         }
+        if let once = try onceEvaluatedSliceBase(expression) {
+            return try lowerSlicingExpression(once)
+        }
         let baseType = try type(of: base)
         let lowRegister = try low.map { try lower($0) } ?? constant(.int(0))
         let highRegister: Int

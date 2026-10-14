@@ -207,6 +207,105 @@ struct GoSingleEvaluationTests: GoTestHarness {
                 == "8:1: invalid operation: x += value() (mismatched types int and point)")
     }
 
+    /// `f()[1:]` slices what one call returns: the length that the missing
+    /// upper bound stands for is that of the same value.
+    @Test func aSliceExpressionReadsItsBaseOnce() throws {
+        #expect(
+            try runGoMain(
+                """
+                a := many()[1:]
+                b := many()[:2]
+                c := many()[1:2]
+                d := array()[1:]
+                e := text()[2:]
+                ch := make(chan []int, 1)
+                ch <- []int{7, 8}
+                g := (<-ch)[1:]
+                fmt.Println(a, b, c, d, e, g, calls)
+                """,
+                declarations: """
+                    var calls int
+
+                    func many() []int { calls++; return []int{1, 2, 3} }
+
+                    var arr = [3]int{4, 5, 6}
+
+                    func array() *[3]int { calls++; return &arr }
+                    func text() string   { calls++; return "hello" }
+                    """)
+                == "[2 3] [1 2] [2] [5 6] llo [8] 5\n")
+    }
+
+    /// A struct in a map is a copy: its fields are not assigned, nor the fields
+    /// of a struct in it; through a pointer element or field they are.
+    @Test func aFieldOfAMapElementIsNoVariable() throws {
+        #expect(
+            firstError(
+                """
+                m := map[int]point{}
+                m[1].y = 1
+                fmt.Println(m)
+                """,
+                declarations: "type point struct{ x, y int }")
+                == "6:1: cannot assign to struct field m[1].y in map")
+        #expect(
+            firstError(
+                """
+                m := map[int]point{}
+                m[1].y += 1
+                fmt.Println(m)
+                """,
+                declarations: "type point struct{ x, y int }")
+                == "6:1: cannot assign to struct field m[1].y in map")
+        #expect(
+            firstError(
+                """
+                m := map[int]point{}
+                m[1].y++
+                fmt.Println(m)
+                """,
+                declarations: "type point struct{ x, y int }")
+                == "6:1: cannot assign to struct field m[1].y in map")
+        #expect(
+            firstError(
+                """
+                m := map[int]outer{}
+                m[1].x = 1
+                fmt.Println(m)
+                """,
+                declarations: """
+                    type point struct{ x, y int }
+                    type outer struct{ point }
+                    """)
+                == "7:1: cannot assign to struct field m[1].x in map")
+        #expect(
+            firstError(
+                """
+                m := map[int]nest{}
+                m[1].p.x = 1
+                fmt.Println(m)
+                """,
+                declarations: """
+                    type point struct{ x, y int }
+                    type nest struct{ p point }
+                    """)
+                == "7:1: cannot assign to m[1].p.x (neither addressable nor a map index expression)")
+        #expect(
+            try runGoMain(
+                """
+                m := map[int]*point{1: {}}
+                m[1].x = 4
+                n := map[int]link{1: {&point{}}}
+                n[1].p.y = 3
+                fmt.Println(*m[1], *n[1].p)
+                """,
+                declarations: """
+                    type point struct{ x, y int }
+                    type link struct{ p *point }
+                    """)
+                == "{4 0} {0 3}\n")
+    }
+
     /// With a type declared in the function and an alias, and inside a literal
     /// whose variables live in the function around it. An aliased import and a
     /// second package are in `GoExpressionPassTests`.

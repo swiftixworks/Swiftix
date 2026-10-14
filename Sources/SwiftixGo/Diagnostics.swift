@@ -1894,6 +1894,7 @@ extension FunctionChecker {
     /// the whole target: `cannot assign to f().a`, though it is `f()` that
     /// has no address. `isRead` is for `x++`, which reads its target too.
     mutating func targetType(of target: GoExpression, isRead: Bool = false) throws -> GoType {
+        try refuseFieldOfMapElement(target)
         do {
             return try assignableType(of: target, asTarget: !isRead)
         } catch let diagnostic as GoDiagnostic {
