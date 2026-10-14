@@ -39,6 +39,7 @@ enum GoStandardLibrary {
         "flag", "os/signal", "path", "path/filepath", "math/rand",
         "container/list", "container/heap", "container/ring",
         "math/bits", "hash", "hash/crc32", "hash/fnv", "encoding/binary",
+        "mime",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {

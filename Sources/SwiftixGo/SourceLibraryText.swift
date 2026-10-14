@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "encoding", "encoding/base64", "encoding/binary", "encoding/json", "flag", "fmt", "hash", "hash/crc32", "hash/fnv", "io", "io/fs", "log", "math/bits", "math/rand", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "encoding", "encoding/base64", "encoding/binary", "encoding/json", "flag", "fmt", "hash", "hash/crc32", "hash/fnv", "io", "io/fs", "log", "math/bits", "math/rand", "mime", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -54,9 +54,9 @@ enum GoSourceLibraryText {
             "BinaryMarshaler", "BinaryUnmarshaler", "TextMarshaler", "TextUnmarshaler",
         ],
         "encoding/base64": [
-            "CorruptInputError", "Encoding", "NewEncoding", "NoPadding", "RawStdEncoding",
-            "RawURLEncoding", "StdEncoding", "StdPadding", "URLEncoding", "decodedLen",
-            "invalidIndex",
+            "CorruptInputError", "Encoding", "NewDecoder", "NewEncoder", "NewEncoding", "NoPadding",
+            "RawStdEncoding", "RawURLEncoding", "StdEncoding", "StdPadding", "URLEncoding",
+            "decodedLen", "decoder", "encoder", "invalidIndex", "newlineFilteringReader",
         ],
         "encoding/binary": [
             "Append", "AppendByteOrder", "AppendUvarint", "AppendVarint", "BigEndian", "ByteOrder",
@@ -171,6 +171,19 @@ enum GoSourceLibraryText {
             "globalRandGenerator", "int32max", "ke", "kn", "lockedSource", "newSource", "re",
             "read", "rn", "rngCooked", "rngLen", "rngMask", "rngMax", "rngSource", "rngTap",
             "runtimeSource", "runtime_rand", "seedrand", "we", "wn",
+        ],
+        "mime": [
+            "AddExtensionType", "BEncoding", "ErrInvalidMediaParameter", "ExtensionsByType",
+            "FormatMediaType", "ParseMediaType", "QEncoding", "TypeByExtension", "WordDecoder",
+            "WordEncoder", "builtinTypesLower", "checkMediaTypeDisposition", "closeWord",
+            "consumeMediaParam", "consumeToken", "consumeValue", "decode", "decode2231Enc",
+            "errInvalidWord", "extensions", "extensionsMu", "fromHex", "hasNonWhitespace",
+            "initMime", "initMimeForTests", "initMimeUnix", "isNotTokenChar", "isTSpecial",
+            "isToken", "isTokenChar", "isUTF8", "ishex", "loadMimeFile", "loadMimeGlobsFile",
+            "maxBase64Len", "maxContentLen", "maxEncodedWordLen", "mimeGlobs", "mimeTypes",
+            "mimeTypesLower", "needsEncoding", "once", "osInitMime", "percentHexUnescape",
+            "qDecode", "readHexByte", "setExtensionType", "setMimeTypes", "testInitMime",
+            "typeFiles", "unhex", "upperhex", "writeQString",
         ],
         "net": [
             "Addr", "AddrError", "Conn", "DNSError", "Dial", "DialTimeout", "ErrClosed", "Error",
@@ -368,6 +381,7 @@ enum GoSourceLibraryText {
         case "log": return Self.log
         case "math/bits": return Self.mathBits
         case "math/rand": return Self.mathRand
+        case "mime": return Self.mime
         case "net": return Self.net
         case "net/http": return Self.netHttp
         case "net/url": return Self.netUrl
@@ -3972,6 +3986,201 @@ func decodedLen(n int, padChar rune) int {
 	}
 	// Padded base64 should always be a multiple of 4 characters in length.
 	return n / 4 * 3
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/base64/stream.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package base64
+
+import "io"
+
+type encoder struct {
+	err  error
+	enc  *Encoding
+	w    io.Writer
+	buf  [3]byte    // buffered data waiting to be encoded
+	nbuf int        // number of bytes in buf
+	out  [1024]byte // output buffer
+}
+
+func (e *encoder) Write(p []byte) (n int, err error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+
+	// Leading fringe.
+	if e.nbuf > 0 {
+		var i int
+		for i = 0; i < len(p) && e.nbuf < 3; i++ {
+			e.buf[e.nbuf] = p[i]
+			e.nbuf++
+		}
+		n += i
+		p = p[i:]
+		if e.nbuf < 3 {
+			return
+		}
+		e.enc.Encode(e.out[:], e.buf[:])
+		if _, e.err = e.w.Write(e.out[:4]); e.err != nil {
+			return n, e.err
+		}
+		e.nbuf = 0
+	}
+
+	// Large interior chunks.
+	for len(p) >= 3 {
+		nn := len(e.out) / 4 * 3
+		if nn > len(p) {
+			nn = len(p)
+			nn -= nn % 3
+		}
+		e.enc.Encode(e.out[:], p[:nn])
+		if _, e.err = e.w.Write(e.out[0 : nn/3*4]); e.err != nil {
+			return n, e.err
+		}
+		n += nn
+		p = p[nn:]
+	}
+
+	// Trailing fringe.
+	copy(e.buf[:], p)
+	e.nbuf = len(p)
+	n += len(p)
+	return
+}
+
+// Close flushes any pending output from the encoder.
+// It is an error to call Write after calling Close.
+func (e *encoder) Close() error {
+	// If there's anything left in the buffer, flush it out
+	if e.err == nil && e.nbuf > 0 {
+		e.enc.Encode(e.out[:], e.buf[:e.nbuf])
+		_, e.err = e.w.Write(e.out[:e.enc.EncodedLen(e.nbuf)])
+		e.nbuf = 0
+	}
+	return e.err
+}
+
+// NewEncoder returns a new base64 stream encoder. Data written to
+// the returned writer will be encoded using enc and then written to w.
+// Base64 encodings operate in 4-byte blocks; when finished
+// writing, the caller must Close the returned encoder to flush any
+// partially written blocks.
+func NewEncoder(enc *Encoding, w io.Writer) io.WriteCloser {
+	return &encoder{enc: enc, w: w}
+}
+
+type decoder struct {
+	err     error
+	readErr error // error from r.Read
+	enc     *Encoding
+	r       io.Reader
+	buf     [1024]byte // leftover input
+	nbuf    int
+	out     []byte // leftover decoded output
+	outbuf  [1024 / 4 * 3]byte
+}
+
+func (d *decoder) Read(p []byte) (n int, err error) {
+	// Use leftover decoded output from last read.
+	if len(d.out) > 0 {
+		n = copy(p, d.out)
+		d.out = d.out[n:]
+		return n, nil
+	}
+
+	if d.err != nil {
+		return 0, d.err
+	}
+
+	// This code assumes that d.r strips supported whitespace ('\r' and '\n').
+
+	// Refill buffer.
+	for d.nbuf < 4 && d.readErr == nil {
+		nn := len(p) / 3 * 4
+		if nn < 4 {
+			nn = 4
+		}
+		if nn > len(d.buf) {
+			nn = len(d.buf)
+		}
+		nn, d.readErr = d.r.Read(d.buf[d.nbuf:nn])
+		d.nbuf += nn
+	}
+
+	if d.nbuf < 4 {
+		if d.enc.padChar == NoPadding && d.nbuf > 0 {
+			// Decode final fragment, without padding.
+			var nw int
+			nw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:d.nbuf])
+			d.nbuf = 0
+			d.out = d.outbuf[:nw]
+			n = copy(p, d.out)
+			d.out = d.out[n:]
+			if n > 0 || len(p) == 0 && len(d.out) > 0 {
+				return n, nil
+			}
+			if d.err != nil {
+				return 0, d.err
+			}
+		}
+		d.err = d.readErr
+		if d.err == io.EOF && d.nbuf > 0 {
+			d.err = io.ErrUnexpectedEOF
+		}
+		return 0, d.err
+	}
+
+	// Decode chunk into p, or d.out and then p if p is too small.
+	nr := d.nbuf / 4 * 4
+	nw := d.nbuf / 4 * 3
+	if nw > len(p) {
+		nw, d.err = d.enc.Decode(d.outbuf[:], d.buf[:nr])
+		d.out = d.outbuf[:nw]
+		n = copy(p, d.out)
+		d.out = d.out[n:]
+	} else {
+		n, d.err = d.enc.Decode(p, d.buf[:nr])
+	}
+	d.nbuf -= nr
+	copy(d.buf[:d.nbuf], d.buf[nr:])
+	return n, d.err
+}
+
+type newlineFilteringReader struct {
+	wrapped io.Reader
+}
+
+func (r *newlineFilteringReader) Read(p []byte) (int, error) {
+	n, err := r.wrapped.Read(p)
+	for n > 0 {
+		offset := 0
+		for i, b := range p[:n] {
+			if b != '\r' && b != '\n' {
+				if i != offset {
+					p[offset] = b
+				}
+				offset++
+			}
+		}
+		if offset > 0 {
+			return offset, err
+		}
+		// Previous buffer entirely whitespace, read again
+		n, err = r.wrapped.Read(p)
+	}
+	return n, err
+}
+
+// NewDecoder constructs a new base64 stream decoder.
+func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
+	return &decoder{enc: enc, r: &newlineFilteringReader{r}}
 }
 
 """#),
@@ -12179,6 +12388,1209 @@ func (z *Zipf) Uint64() uint64 {
 		}
 	}
 	return uint64(k)
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let mime: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/mime/encodedword.go",
+            text: #"""
+// Copyright 2015 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package mime
+
+import (
+	"bytes"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
+// A WordEncoder is an RFC 2047 encoded-word encoder.
+type WordEncoder byte
+
+const (
+	// BEncoding represents Base64 encoding scheme as defined by RFC 2045.
+	BEncoding = WordEncoder('b')
+	// QEncoding represents the Q-encoding scheme as defined by RFC 2047.
+	QEncoding = WordEncoder('q')
+)
+
+var (
+	errInvalidWord = errors.New("mime: invalid RFC 2047 encoded-word")
+)
+
+// Encode returns the encoded-word form of s. If s is ASCII without special
+// characters, it is returned unchanged. The provided charset is the IANA
+// charset name of s. It is case insensitive.
+func (e WordEncoder) Encode(charset, s string) string {
+	if !needsEncoding(s) {
+		return s
+	}
+	return e.encodeWord(charset, s)
+}
+
+func needsEncoding(s string) bool {
+	for _, b := range s {
+		if (b < ' ' || b > '~') && b != '\t' {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeWord encodes a string into an encoded-word.
+func (e WordEncoder) encodeWord(charset, s string) string {
+	var buf strings.Builder
+	// Could use a hint like len(s)*3, but that's not enough for cases
+	// with word splits and too much for simpler inputs.
+	// 48 is close to maxEncodedWordLen/2, but adjusted to allocator size class.
+	buf.Grow(48)
+
+	e.openWord(&buf, charset)
+	if e == BEncoding {
+		e.bEncode(&buf, charset, s)
+	} else {
+		e.qEncode(&buf, charset, s)
+	}
+	closeWord(&buf)
+
+	return buf.String()
+}
+
+const (
+	// The maximum length of an encoded-word is 75 characters.
+	// See RFC 2047, section 2.
+	maxEncodedWordLen = 75
+	// maxContentLen is how much content can be encoded, ignoring the header and
+	// 2-byte footer.
+	maxContentLen = maxEncodedWordLen - len("=?UTF-8?q?") - len("?=")
+)
+
+var maxBase64Len = base64.StdEncoding.DecodedLen(maxContentLen)
+
+// bEncode encodes s using base64 encoding and writes it to buf.
+func (e WordEncoder) bEncode(buf *strings.Builder, charset, s string) {
+	w := base64.NewEncoder(base64.StdEncoding, buf)
+	// If the charset is not UTF-8 or if the content is short, do not bother
+	// splitting the encoded-word.
+	if !isUTF8(charset) || base64.StdEncoding.EncodedLen(len(s)) <= maxContentLen {
+		io.WriteString(w, s)
+		w.Close()
+		return
+	}
+
+	var currentLen, last, runeLen int
+	for i := 0; i < len(s); i += runeLen {
+		// Multi-byte characters must not be split across encoded-words.
+		// See RFC 2047, section 5.3.
+		_, runeLen = utf8.DecodeRuneInString(s[i:])
+
+		if currentLen+runeLen <= maxBase64Len {
+			currentLen += runeLen
+		} else {
+			io.WriteString(w, s[last:i])
+			w.Close()
+			e.splitWord(buf, charset)
+			last = i
+			currentLen = runeLen
+		}
+	}
+	io.WriteString(w, s[last:])
+	w.Close()
+}
+
+// qEncode encodes s using Q encoding and writes it to buf. It splits the
+// encoded-words when necessary.
+func (e WordEncoder) qEncode(buf *strings.Builder, charset, s string) {
+	// We only split encoded-words when the charset is UTF-8.
+	if !isUTF8(charset) {
+		writeQString(buf, s)
+		return
+	}
+
+	var currentLen, runeLen int
+	for i := 0; i < len(s); i += runeLen {
+		b := s[i]
+		// Multi-byte characters must not be split across encoded-words.
+		// See RFC 2047, section 5.3.
+		var encLen int
+		if b >= ' ' && b <= '~' && b != '=' && b != '?' && b != '_' {
+			runeLen, encLen = 1, 1
+		} else {
+			_, runeLen = utf8.DecodeRuneInString(s[i:])
+			encLen = 3 * runeLen
+		}
+
+		if currentLen+encLen > maxContentLen {
+			e.splitWord(buf, charset)
+			currentLen = 0
+		}
+		writeQString(buf, s[i:i+runeLen])
+		currentLen += encLen
+	}
+}
+
+// writeQString encodes s using Q encoding and writes it to buf.
+func writeQString(buf *strings.Builder, s string) {
+	for i := 0; i < len(s); i++ {
+		switch b := s[i]; {
+		case b == ' ':
+			buf.WriteByte('_')
+		case b >= '!' && b <= '~' && b != '=' && b != '?' && b != '_':
+			buf.WriteByte(b)
+		default:
+			buf.WriteByte('=')
+			buf.WriteByte(upperhex[b>>4])
+			buf.WriteByte(upperhex[b&0x0f])
+		}
+	}
+}
+
+// openWord writes the beginning of an encoded-word into buf.
+func (e WordEncoder) openWord(buf *strings.Builder, charset string) {
+	buf.WriteString("=?")
+	buf.WriteString(charset)
+	buf.WriteByte('?')
+	buf.WriteByte(byte(e))
+	buf.WriteByte('?')
+}
+
+// closeWord writes the end of an encoded-word into buf.
+func closeWord(buf *strings.Builder) {
+	buf.WriteString("?=")
+}
+
+// splitWord closes the current encoded-word and opens a new one.
+func (e WordEncoder) splitWord(buf *strings.Builder, charset string) {
+	closeWord(buf)
+	buf.WriteByte(' ')
+	e.openWord(buf, charset)
+}
+
+func isUTF8(charset string) bool {
+	return strings.EqualFold(charset, "UTF-8")
+}
+
+const upperhex = "0123456789ABCDEF"
+
+// A WordDecoder decodes MIME headers containing RFC 2047 encoded-words.
+type WordDecoder struct {
+	// CharsetReader, if non-nil, defines a function to generate
+	// charset-conversion readers, converting from the provided
+	// charset into UTF-8.
+	// Charsets are always lower-case. utf-8, iso-8859-1 and us-ascii charsets
+	// are handled by default.
+	// One of the CharsetReader's result values must be non-nil.
+	CharsetReader func(charset string, input io.Reader) (io.Reader, error)
+}
+
+// Decode decodes an RFC 2047 encoded-word.
+func (d *WordDecoder) Decode(word string) (string, error) {
+	// See https://tools.ietf.org/html/rfc2047#section-2 for details.
+	// Our decoder is permissive, we accept empty encoded-text.
+	if len(word) < 8 || !strings.HasPrefix(word, "=?") || !strings.HasSuffix(word, "?=") || strings.Count(word, "?") != 4 {
+		return "", errInvalidWord
+	}
+	word = word[2 : len(word)-2]
+
+	// split word "UTF-8?q?text" into "UTF-8", 'q', and "text"
+	charset, text, _ := strings.Cut(word, "?")
+	if charset == "" {
+		return "", errInvalidWord
+	}
+	encoding, text, _ := strings.Cut(text, "?")
+	if len(encoding) != 1 {
+		return "", errInvalidWord
+	}
+
+	content, err := decode(encoding[0], text)
+	if err != nil {
+		return "", err
+	}
+
+	var buf strings.Builder
+	if err := d.convert(&buf, charset, content); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// DecodeHeader decodes all encoded-words of the given string. It returns an
+// error if and only if [WordDecoder.CharsetReader] of d returns an error.
+func (d *WordDecoder) DecodeHeader(header string) (string, error) {
+	// If there is no encoded-word, returns before creating a buffer.
+	i := strings.Index(header, "=?")
+	if i == -1 {
+		return header, nil
+	}
+
+	var buf strings.Builder
+
+	buf.WriteString(header[:i])
+	header = header[i:]
+
+	betweenWords := false
+	for {
+		start := strings.Index(header, "=?")
+		if start == -1 {
+			break
+		}
+		cur := start + len("=?")
+
+		i := strings.Index(header[cur:], "?")
+		if i == -1 {
+			break
+		}
+		charset := header[cur : cur+i]
+		cur += i + len("?")
+
+		if len(header) < cur+len("Q??=") {
+			break
+		}
+		encoding := header[cur]
+		cur++
+
+		if header[cur] != '?' {
+			break
+		}
+		cur++
+
+		j := strings.Index(header[cur:], "?=")
+		if j == -1 {
+			break
+		}
+		text := header[cur : cur+j]
+		end := cur + j + len("?=")
+
+		content, err := decode(encoding, text)
+		if err != nil {
+			betweenWords = false
+			buf.WriteString(header[:start+2])
+			header = header[start+2:]
+			continue
+		}
+
+		// Write characters before the encoded-word. White-space and newline
+		// characters separating two encoded-words must be deleted.
+		if start > 0 && (!betweenWords || hasNonWhitespace(header[:start])) {
+			buf.WriteString(header[:start])
+		}
+
+		if err := d.convert(&buf, charset, content); err != nil {
+			return "", err
+		}
+
+		header = header[end:]
+		betweenWords = true
+	}
+
+	if len(header) > 0 {
+		buf.WriteString(header)
+	}
+
+	return buf.String(), nil
+}
+
+func decode(encoding byte, text string) ([]byte, error) {
+	switch encoding {
+	case 'B', 'b':
+		return base64.StdEncoding.DecodeString(text)
+	case 'Q', 'q':
+		return qDecode(text)
+	default:
+		return nil, errInvalidWord
+	}
+}
+
+func (d *WordDecoder) convert(buf *strings.Builder, charset string, content []byte) error {
+	switch {
+	case strings.EqualFold("utf-8", charset):
+		buf.Write(content)
+	case strings.EqualFold("iso-8859-1", charset):
+		for _, c := range content {
+			buf.WriteRune(rune(c))
+		}
+	case strings.EqualFold("us-ascii", charset):
+		for _, c := range content {
+			if c >= utf8.RuneSelf {
+				buf.WriteRune(unicode.ReplacementChar)
+			} else {
+				buf.WriteByte(c)
+			}
+		}
+	default:
+		if d.CharsetReader == nil {
+			return fmt.Errorf("mime: unhandled charset %q", charset)
+		}
+		r, err := d.CharsetReader(strings.ToLower(charset), bytes.NewReader(content))
+		if err != nil {
+			return err
+		}
+		if _, err = io.Copy(buf, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hasNonWhitespace reports whether s (assumed to be ASCII) contains at least
+// one byte of non-whitespace.
+func hasNonWhitespace(s string) bool {
+	for _, b := range s {
+		switch b {
+		// Encoded-words can only be separated by linear white spaces which does
+		// not include vertical tabs (\v).
+		case ' ', '\t', '\n', '\r':
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// qDecode decodes a Q encoded string.
+func qDecode(s string) ([]byte, error) {
+	dec := make([]byte, len(s))
+	n := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '_':
+			dec[n] = ' '
+		case c == '=':
+			if i+2 >= len(s) {
+				return nil, errInvalidWord
+			}
+			b, err := readHexByte(s[i+1], s[i+2])
+			if err != nil {
+				return nil, err
+			}
+			dec[n] = b
+			i += 2
+		case (c <= '~' && c >= ' ') || c == '\n' || c == '\r' || c == '\t':
+			dec[n] = c
+		default:
+			return nil, errInvalidWord
+		}
+		n++
+	}
+
+	return dec[:n], nil
+}
+
+// readHexByte returns the byte from its quoted-printable representation.
+func readHexByte(a, b byte) (byte, error) {
+	var hb, lb byte
+	var err error
+	if hb, err = fromHex(a); err != nil {
+		return 0, err
+	}
+	if lb, err = fromHex(b); err != nil {
+		return 0, err
+	}
+	return hb<<4 | lb, nil
+}
+
+func fromHex(b byte) (byte, error) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', nil
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, nil
+	// Accept badly encoded bytes.
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, nil
+	}
+	return 0, fmt.Errorf("mime: invalid hex byte %#02x", b)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/mime/grammar.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package mime
+
+import (
+	"strings"
+)
+
+// isTSpecial reports whether rune is in 'tspecials' as defined by RFC
+// 1521 and RFC 2045.
+func isTSpecial(r rune) bool {
+	return strings.ContainsRune(`()<>@,;:\"/[]?=`, r)
+}
+
+// isTokenChar reports whether rune is in 'token' as defined by RFC
+// 1521 and RFC 2045.
+func isTokenChar(r rune) bool {
+	// token := 1*<any (US-ASCII) CHAR except SPACE, CTLs,
+	//             or tspecials>
+	return r > 0x20 && r < 0x7f && !isTSpecial(r)
+}
+
+// isToken reports whether s is a 'token' as defined by RFC 1521
+// and RFC 2045.
+func isToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.IndexFunc(s, isNotTokenChar) < 0
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/mime/mediatype.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package mime
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"unicode"
+)
+
+// FormatMediaType serializes mediatype t and the parameters
+// param as a media type conforming to RFC 2045 and RFC 2616.
+// The type and parameter names are written in lower-case.
+// When any of the arguments result in a standard violation then
+// FormatMediaType returns the empty string.
+func FormatMediaType(t string, param map[string]string) string {
+	var b strings.Builder
+	if major, sub, ok := strings.Cut(t, "/"); !ok {
+		if !isToken(t) {
+			return ""
+		}
+		b.WriteString(strings.ToLower(t))
+	} else {
+		if !isToken(major) || !isToken(sub) {
+			return ""
+		}
+		b.WriteString(strings.ToLower(major))
+		b.WriteByte('/')
+		b.WriteString(strings.ToLower(sub))
+	}
+
+	attributes := make([]string, 0, len(param))
+	for attribute := range param {
+		attributes = append(attributes, attribute)
+	}
+	sort.Strings(attributes)
+	for _, attribute := range attributes {
+		value := param[attribute]
+		b.WriteByte(';')
+		b.WriteByte(' ')
+		if !isToken(attribute) {
+			return ""
+		}
+		b.WriteString(strings.ToLower(attribute))
+
+		needEnc := needsEncoding(value)
+		if needEnc {
+			// RFC 2231 section 4
+			b.WriteByte('*')
+		}
+		b.WriteByte('=')
+
+		if needEnc {
+			b.WriteString("utf-8''")
+
+			offset := 0
+			for index := 0; index < len(value); index++ {
+				ch := value[index]
+				// {RFC 2231 section 7}
+				// attribute-char := <any (US-ASCII) CHAR except SPACE, CTLs, "*", "'", "%", or tspecials>
+				if ch <= ' ' || ch >= 0x7F ||
+					ch == '*' || ch == '\'' || ch == '%' ||
+					isTSpecial(rune(ch)) {
+
+					b.WriteString(value[offset:index])
+					offset = index + 1
+
+					b.WriteByte('%')
+					b.WriteByte(upperhex[ch>>4])
+					b.WriteByte(upperhex[ch&0x0F])
+				}
+			}
+			b.WriteString(value[offset:])
+			continue
+		}
+
+		if isToken(value) {
+			b.WriteString(value)
+			continue
+		}
+
+		b.WriteByte('"')
+		offset := 0
+		for index := 0; index < len(value); index++ {
+			character := value[index]
+			if character == '"' || character == '\\' {
+				b.WriteString(value[offset:index])
+				offset = index
+				b.WriteByte('\\')
+			}
+		}
+		b.WriteString(value[offset:])
+		b.WriteByte('"')
+	}
+	return b.String()
+}
+
+func checkMediaTypeDisposition(s string) error {
+	typ, rest := consumeToken(s)
+	if typ == "" {
+		return errors.New("mime: no media type")
+	}
+	if rest == "" {
+		return nil
+	}
+	if !strings.HasPrefix(rest, "/") {
+		return errors.New("mime: expected slash after first token")
+	}
+	subtype, rest := consumeToken(rest[1:])
+	if subtype == "" {
+		return errors.New("mime: expected token after slash")
+	}
+	if rest != "" {
+		return errors.New("mime: unexpected content after media subtype")
+	}
+	return nil
+}
+
+// ErrInvalidMediaParameter is returned by [ParseMediaType] if
+// the media type value was found but there was an error parsing
+// the optional parameters
+var ErrInvalidMediaParameter = errors.New("mime: invalid media parameter")
+
+// ParseMediaType parses a media type value and any optional
+// parameters, per RFC 1521.  Media types are the values in
+// Content-Type and Content-Disposition headers (RFC 2183).
+// On success, ParseMediaType returns the media type converted
+// to lowercase and trimmed of white space and a non-nil map.
+// If there is an error parsing the optional parameter,
+// the media type will be returned along with the error
+// [ErrInvalidMediaParameter].
+// The returned map, params, maps from the lowercase
+// attribute to the attribute value with its case preserved.
+func ParseMediaType(v string) (mediatype string, params map[string]string, err error) {
+	base, _, _ := strings.Cut(v, ";")
+	mediatype = strings.TrimSpace(strings.ToLower(base))
+
+	err = checkMediaTypeDisposition(mediatype)
+	if err != nil {
+		return "", nil, err
+	}
+
+	params = make(map[string]string)
+
+	// Map of base parameter name -> parameter name -> value
+	// for parameters containing a '*' character.
+	// Lazily initialized.
+	var continuation map[string]map[string]string
+
+	v = v[len(base):]
+	for len(v) > 0 {
+		v = strings.TrimLeftFunc(v, unicode.IsSpace)
+		if len(v) == 0 {
+			break
+		}
+		key, value, rest := consumeMediaParam(v)
+		if key == "" {
+			if strings.TrimSpace(rest) == ";" {
+				// Ignore trailing semicolons.
+				// Not an error.
+				break
+			}
+			// Parse error.
+			return mediatype, nil, ErrInvalidMediaParameter
+		}
+
+		pmap := params
+		if baseName, _, ok := strings.Cut(key, "*"); ok {
+			if continuation == nil {
+				continuation = make(map[string]map[string]string)
+			}
+			var ok bool
+			if pmap, ok = continuation[baseName]; !ok {
+				continuation[baseName] = make(map[string]string)
+				pmap = continuation[baseName]
+			}
+		}
+		if v, exists := pmap[key]; exists && v != value {
+			// Duplicate parameter names are incorrect, but we allow them if they are equal.
+			return "", nil, errors.New("mime: duplicate parameter name")
+		}
+		pmap[key] = value
+		v = rest
+	}
+
+	// Stitch together any continuations or things with stars
+	// (i.e. RFC 2231 things with stars: "foo*0" or "foo*")
+	var buf strings.Builder
+	for key, pieceMap := range continuation {
+		singlePartKey := key + "*"
+		if v, ok := pieceMap[singlePartKey]; ok {
+			if decv, ok := decode2231Enc(v); ok {
+				params[key] = decv
+			}
+			continue
+		}
+
+		buf.Reset()
+		valid := false
+		for n := 0; ; n++ {
+			simplePart := fmt.Sprintf("%s*%d", key, n)
+			if v, ok := pieceMap[simplePart]; ok {
+				valid = true
+				buf.WriteString(v)
+				continue
+			}
+			encodedPart := simplePart + "*"
+			v, ok := pieceMap[encodedPart]
+			if !ok {
+				break
+			}
+			valid = true
+			if n == 0 {
+				if decv, ok := decode2231Enc(v); ok {
+					buf.WriteString(decv)
+				}
+			} else {
+				decv, _ := percentHexUnescape(v)
+				buf.WriteString(decv)
+			}
+		}
+		if valid {
+			params[key] = buf.String()
+		}
+	}
+
+	return
+}
+
+func decode2231Enc(v string) (string, bool) {
+	sv := strings.SplitN(v, "'", 3)
+	if len(sv) != 3 {
+		return "", false
+	}
+	// TODO: ignoring lang in sv[1] for now. If anybody needs it we'll
+	// need to decide how to expose it in the API. But I'm not sure
+	// anybody uses it in practice.
+	charset := strings.ToLower(sv[0])
+	if len(charset) == 0 {
+		return "", false
+	}
+	if charset != "us-ascii" && charset != "utf-8" {
+		// TODO: unsupported encoding
+		return "", false
+	}
+	encv, err := percentHexUnescape(sv[2])
+	if err != nil {
+		return "", false
+	}
+	return encv, true
+}
+
+func isNotTokenChar(r rune) bool {
+	return !isTokenChar(r)
+}
+
+// consumeToken consumes a token from the beginning of provided
+// string, per RFC 2045 section 5.1 (referenced from 2183), and return
+// the token consumed and the rest of the string. Returns ("", v) on
+// failure to consume at least one character.
+func consumeToken(v string) (token, rest string) {
+	notPos := strings.IndexFunc(v, isNotTokenChar)
+	if notPos == -1 {
+		return v, ""
+	}
+	if notPos == 0 {
+		return "", v
+	}
+	return v[0:notPos], v[notPos:]
+}
+
+// consumeValue consumes a "value" per RFC 2045, where a value is
+// either a 'token' or a 'quoted-string'.  On success, consumeValue
+// returns the value consumed (and de-quoted/escaped, if a
+// quoted-string) and the rest of the string. On failure, returns
+// ("", v).
+func consumeValue(v string) (value, rest string) {
+	if v == "" {
+		return
+	}
+	if v[0] != '"' {
+		return consumeToken(v)
+	}
+
+	// parse a quoted-string
+	buffer := new(strings.Builder)
+	for i := 1; i < len(v); i++ {
+		r := v[i]
+		if r == '"' {
+			return buffer.String(), v[i+1:]
+		}
+		// When MSIE sends a full file path (in "intranet mode"), it does not
+		// escape backslashes: "C:\dev\go\foo.txt", not "C:\\dev\\go\\foo.txt".
+		//
+		// No known MIME generators emit unnecessary backslash escapes
+		// for simple token characters like numbers and letters.
+		//
+		// If we see an unnecessary backslash escape, assume it is from MSIE
+		// and intended as a literal backslash. This makes Go servers deal better
+		// with MSIE without affecting the way they handle conforming MIME
+		// generators.
+		if r == '\\' && i+1 < len(v) && isTSpecial(rune(v[i+1])) {
+			buffer.WriteByte(v[i+1])
+			i++
+			continue
+		}
+		if r == '\r' || r == '\n' {
+			return "", v
+		}
+		buffer.WriteByte(v[i])
+	}
+	// Did not find end quote.
+	return "", v
+}
+
+func consumeMediaParam(v string) (param, value, rest string) {
+	rest = strings.TrimLeftFunc(v, unicode.IsSpace)
+	if !strings.HasPrefix(rest, ";") {
+		return "", "", v
+	}
+
+	rest = rest[1:] // consume semicolon
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	param, rest = consumeToken(rest)
+	param = strings.ToLower(param)
+	if param == "" {
+		return "", "", v
+	}
+
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	if !strings.HasPrefix(rest, "=") {
+		return "", "", v
+	}
+	rest = rest[1:] // consume equals sign
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	value, rest2 := consumeValue(rest)
+	if value == "" && rest2 == rest {
+		return "", "", v
+	}
+	rest = rest2
+	return param, value, rest
+}
+
+func percentHexUnescape(s string) (string, error) {
+	// Count %, check that they're well-formed.
+	percents := 0
+	for i := 0; i < len(s); {
+		if s[i] != '%' {
+			i++
+			continue
+		}
+		percents++
+		if i+2 >= len(s) || !ishex(s[i+1]) || !ishex(s[i+2]) {
+			s = s[i:]
+			if len(s) > 3 {
+				s = s[0:3]
+			}
+			return "", fmt.Errorf("mime: bogus characters after %%: %q", s)
+		}
+		i += 3
+	}
+	if percents == 0 {
+		return s, nil
+	}
+
+	t := make([]byte, len(s)-2*percents)
+	j := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '%':
+			t[j] = unhex(s[i+1])<<4 | unhex(s[i+2])
+			j++
+			i += 3
+		default:
+			t[j] = s[i]
+			j++
+			i++
+		}
+	}
+	return string(t), nil
+}
+
+func ishex(c byte) bool {
+	switch {
+	case '0' <= c && c <= '9':
+		return true
+	case 'a' <= c && c <= 'f':
+		return true
+	case 'A' <= c && c <= 'F':
+		return true
+	}
+	return false
+}
+
+func unhex(c byte) byte {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0'
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10
+	}
+	return 0
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/mime/type.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package mime implements parts of the MIME spec.
+package mime
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+)
+
+var (
+	mimeTypes      sync.Map // map[string]string; ".Z" => "application/x-compress"
+	mimeTypesLower sync.Map // map[string]string; ".z" => "application/x-compress"
+
+	// extensions maps from MIME type to list of lowercase file
+	// extensions: "image/jpeg" => [".jpg", ".jpeg"]
+	extensionsMu sync.Mutex // Guards stores (but not loads) on extensions.
+	extensions   sync.Map   // map[string][]string; slice values are append-only.
+)
+
+// setMimeTypes is used by initMime's non-test path, and by tests.
+func setMimeTypes(lowerExt, mixExt map[string]string) {
+	mimeTypes.Clear()
+	mimeTypesLower.Clear()
+	extensions.Clear()
+
+	for k, v := range lowerExt {
+		mimeTypesLower.Store(k, v)
+	}
+	for k, v := range mixExt {
+		mimeTypes.Store(k, v)
+	}
+
+	extensionsMu.Lock()
+	defer extensionsMu.Unlock()
+	for k, v := range lowerExt {
+		justType, _, err := ParseMediaType(v)
+		if err != nil {
+			panic(err)
+		}
+		var exts []string
+		if ei, ok := extensions.Load(justType); ok {
+			exts = ei.([]string)
+		}
+		extensions.Store(justType, append(exts, k))
+	}
+}
+
+var builtinTypesLower = map[string]string{
+	".avif": "image/avif",
+	".css":  "text/css; charset=utf-8",
+	".gif":  "image/gif",
+	".htm":  "text/html; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".jpeg": "image/jpeg",
+	".jpg":  "image/jpeg",
+	".js":   "text/javascript; charset=utf-8",
+	".json": "application/json",
+	".mjs":  "text/javascript; charset=utf-8",
+	".pdf":  "application/pdf",
+	".png":  "image/png",
+	".svg":  "image/svg+xml",
+	".wasm": "application/wasm",
+	".webp": "image/webp",
+	".xml":  "text/xml; charset=utf-8",
+}
+
+var once sync.Once // guards initMime
+
+var testInitMime func()
+
+// osInitMime is what the init function of Go's type_unix.go sets it to.
+var osInitMime = initMimeUnix
+
+func initMime() {
+	if fn := testInitMime; fn != nil {
+		fn()
+	} else {
+		setMimeTypes(builtinTypesLower, builtinTypesLower)
+		osInitMime()
+	}
+}
+
+// TypeByExtension returns the MIME type associated with the file extension ext.
+// The extension ext should begin with a leading dot, as in ".html".
+// When ext has no associated type, TypeByExtension returns "".
+//
+// Extensions are looked up first case-sensitively, then case-insensitively.
+//
+// The built-in table is small but on unix it is augmented by the local
+// system's MIME-info database or mime.types file(s) if available under one or
+// more of these names:
+//
+//	/usr/local/share/mime/globs2
+//	/usr/share/mime/globs2
+//	/etc/mime.types
+//	/etc/apache2/mime.types
+//	/etc/apache/mime.types
+//
+// On Windows, MIME types are extracted from the registry.
+//
+// Text types have the charset parameter set to "utf-8" by default.
+func TypeByExtension(ext string) string {
+	once.Do(initMime)
+
+	// Case-sensitive lookup.
+	if v, ok := mimeTypes.Load(ext); ok {
+		return v.(string)
+	}
+
+	// Case-insensitive lookup.
+	// Optimistically assume a short ASCII extension and be
+	// allocation-free in that case.
+	var buf [10]byte
+	lower := buf[:0]
+	const utf8RuneSelf = 0x80 // from utf8 package, but not importing it.
+	for i := 0; i < len(ext); i++ {
+		c := ext[i]
+		if c >= utf8RuneSelf {
+			// Slow path.
+			si, _ := mimeTypesLower.Load(strings.ToLower(ext))
+			s, _ := si.(string)
+			return s
+		}
+		if 'A' <= c && c <= 'Z' {
+			lower = append(lower, c+('a'-'A'))
+		} else {
+			lower = append(lower, c)
+		}
+	}
+	si, _ := mimeTypesLower.Load(string(lower))
+	s, _ := si.(string)
+	return s
+}
+
+// ExtensionsByType returns the extensions known to be associated with the MIME
+// type typ. The returned extensions will each begin with a leading dot, as in
+// ".html". When typ has no associated extensions, ExtensionsByType returns an
+// nil slice.
+func ExtensionsByType(typ string) ([]string, error) {
+	justType, _, err := ParseMediaType(typ)
+	if err != nil {
+		return nil, err
+	}
+
+	once.Do(initMime)
+	s, ok := extensions.Load(justType)
+	if !ok {
+		return nil, nil
+	}
+	ret := append([]string(nil), s.([]string)...)
+	sort.Strings(ret)
+	return ret, nil
+}
+
+// AddExtensionType sets the MIME type associated with
+// the extension ext to typ. The extension should begin with
+// a leading dot, as in ".html".
+func AddExtensionType(ext, typ string) error {
+	if !strings.HasPrefix(ext, ".") {
+		return fmt.Errorf("mime: extension %q missing leading dot", ext)
+	}
+	once.Do(initMime)
+	return setExtensionType(ext, typ)
+}
+
+func setExtensionType(extension, mimeType string) error {
+	justType, param, err := ParseMediaType(mimeType)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(mimeType, "text/") && param["charset"] == "" {
+		param["charset"] = "utf-8"
+		mimeType = FormatMediaType(mimeType, param)
+	}
+	extLower := strings.ToLower(extension)
+
+	mimeTypes.Store(extension, mimeType)
+	mimeTypesLower.Store(extLower, mimeType)
+
+	extensionsMu.Lock()
+	defer extensionsMu.Unlock()
+	var exts []string
+	if ei, ok := extensions.Load(justType); ok {
+		exts = ei.([]string)
+	}
+	for _, v := range exts {
+		if v == extLower {
+			return nil
+		}
+	}
+	extensions.Store(justType, append(exts, extLower))
+	return nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/mime/type_unix.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package mime
+
+import (
+	"bufio"
+	"os"
+	"strings"
+)
+
+// See https://specifications.freedesktop.org/shared-mime-info-spec/shared-mime-info-spec-0.21.html
+// for the FreeDesktop Shared MIME-info Database specification.
+var mimeGlobs = []string{
+	"/usr/local/share/mime/globs2",
+	"/usr/share/mime/globs2",
+}
+
+// Common locations for mime.types files on unix.
+var typeFiles = []string{
+	"/etc/mime.types",
+	"/etc/apache2/mime.types",
+	"/etc/apache/mime.types",
+	"/etc/httpd/conf/mime.types",
+}
+
+func loadMimeGlobsFile(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		// Each line should be of format: weight:mimetype:glob[:morefields...]
+		fields := strings.Split(scanner.Text(), ":")
+		if len(fields) < 3 || len(fields[0]) < 1 || len(fields[2]) < 3 {
+			continue
+		} else if fields[0][0] == '#' || fields[2][0] != '*' || fields[2][1] != '.' {
+			continue
+		}
+
+		extension := fields[2][1:]
+		if strings.ContainsAny(extension, "?*[") {
+			// Not a bare extension, but a glob. Ignore for now:
+			// - we do not have an implementation for this glob
+			//   syntax (translation to path/filepath.Match could
+			//   be possible)
+			// - support for globs with weight ordering would have
+			//   performance impact to all lookups to support the
+			//   rarely seen glob entries
+			// - trying to match glob metacharacters literally is
+			//   not useful
+			continue
+		}
+		if _, ok := mimeTypes.Load(extension); ok {
+			// We've already seen this extension.
+			// The file is in weight order, so we keep
+			// the first entry that we see.
+			continue
+		}
+
+		setExtensionType(extension, fields[1])
+	}
+	if err := scanner.Err(); err != nil {
+		panic(err)
+	}
+	return nil
+}
+
+func loadMimeFile(filename string) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) <= 1 || fields[0][0] == '#' {
+			continue
+		}
+		mimeType := fields[0]
+		for _, ext := range fields[1:] {
+			if ext[0] == '#' {
+				break
+			}
+			setExtensionType("."+ext, mimeType)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		panic(err)
+	}
+}
+
+func initMimeUnix() {
+	for _, filename := range mimeGlobs {
+		if err := loadMimeGlobsFile(filename); err == nil {
+			return // Stop checking more files if mimetype database is found.
+		}
+	}
+
+	// Fallback if no system-generated mimetype database exists.
+	for _, filename := range typeFiles {
+		loadMimeFile(filename)
+	}
+}
+
+func initMimeForTests() map[string]string {
+	mimeGlobs = []string{""}
+	typeFiles = []string{"testdata/test.types"}
+	return map[string]string{
+		".T1":  "application/test",
+		".t2":  "text/test; charset=utf-8",
+		".png": "image/png",
+	}
 }
 
 """#),
