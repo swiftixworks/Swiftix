@@ -1837,6 +1837,22 @@ public struct GoVirtualMachine: Sendable {
             return GoFiles.inherited(descriptor)
         }
 
+        /// `value` as a copy of its own, with locks of its own: see
+        /// `GoLockCopies`. Any other value is itself.
+        func copiedLocks(_ value: GoValue) throws -> GoValue {
+            guard GoLockCopies.holdsLock(value) else { return value }
+            return try GoLockCopies.copied(
+                value, read: { try read(pointer: $0, heap: heap) },
+                allocate: { try heap.allocate($0) })
+        }
+
+        /// `values` with locks of their own, when they hold any: the
+        /// elements of a new array made of others, or of a zero value.
+        func copiedLocks(_ values: [GoValue]) throws -> [GoValue] {
+            guard let first = values.first, GoLockCopies.holdsLock(first) else { return values }
+            return try values.map(copiedLocks)
+        }
+
         /// Store `values` in the leading elements of `destination`.
         func storeElements(_ values: [GoValue], into destination: GoSliceValue) throws {
             guard !values.isEmpty else { return }
@@ -3489,6 +3505,8 @@ public struct GoVirtualMachine: Sendable {
                     try writePointer(
                         .mutexStorage(storage), through: mutex.storage, heap: &heap)
                 }
+            case GoLockCopies.copyName:
+                stack.append(try copiedLocks(operands[0]))
             case "$sync.RWMutex.RLocker":
                 // The same lock under the type whose `Lock` reads.
                 stack.append(
@@ -4701,7 +4719,8 @@ public struct GoVirtualMachine: Sendable {
                     try heap.replace(mapValue.storage.cell, with: .mapStorage(GoMapStorage()))
                 case .slice(let slice):
                     let range = try validatedSliceRange(slice)
-                    try storeElements(Array(repeating: zero, count: range.count), into: slice)
+                    try storeElements(
+                        try copiedLocks(Array(repeating: zero, count: range.count)), into: slice)
                 default:
                     throw GoRuntimeError.typeMismatch
                 }
@@ -4737,7 +4756,7 @@ public struct GoVirtualMachine: Sendable {
                             ? GoStrings.trimPrefix(text, affix) : GoStrings.trimSuffix(text, affix)))
             case "$append":
                 var zero = try pop(&stack)
-                let values = try sourceElements(try pop(&stack))
+                let values = try copiedLocks(try sourceElements(try pop(&stack)))
                 let base = try pop(&stack)
                 var elements: [GoValue] = []
                 var capacity = 0
@@ -4791,7 +4810,7 @@ public struct GoVirtualMachine: Sendable {
                     newLength,
                     min(overflow ? Int.max : doubled, resourceLimits.maximumCollectionElements))
                 elements.append(contentsOf: repeatElement(zero, count: newCapacity - newLength))
-                let cell = try heap.allocate(.array(elements))
+                let cell = try heap.allocate(.array(try copiedLocks(elements)))
                 stack.append(
                     .slice(
                         GoSliceValue(
@@ -4805,7 +4824,7 @@ public struct GoVirtualMachine: Sendable {
                 if case .slice(let target) = destination {
                     copied = min(values.count, try validatedSliceRange(target).count)
                     values.removeSubrange(copied...)
-                    try storeElements(values, into: target)
+                    try storeElements(try copiedLocks(values), into: target)
                 } else if destination != .nilValue {
                     throw GoRuntimeError.typeMismatch
                 }
@@ -5380,7 +5399,7 @@ public struct GoVirtualMachine: Sendable {
                     }
                     try requireCollectionCount(exactCapacity, resource: "slice elements")
                     let cell = try heap.allocate(
-                        .array(Array(repeating: zero, count: exactCapacity)))
+                        .array(try copiedLocks(Array(repeating: zero, count: exactCapacity))))
                     stack.append(
                         .slice(
                             GoSliceValue(
@@ -5618,7 +5637,7 @@ public struct GoVirtualMachine: Sendable {
                             contentsOf: repeatElement(
                                 slice.zeroValue,
                                 count: newCapacity - values.count))
-                        let cell = try heap.allocate(.array(values))
+                        let cell = try heap.allocate(.array(try copiedLocks(values)))
                         slice = GoSliceValue(
                             backing: GoPointer(cell: cell),
                             start: 0,
@@ -6706,11 +6725,7 @@ public struct GoVirtualMachine: Sendable {
                         case .mutexStorage(var storage) = try read(
                             pointer: mutex.storage, heap: heap)
                     else { throw GoRuntimeError.typeMismatch }
-                    guard storage.locked else {
-                        frames[frameIndex].pendingExit = .panicking(
-                            .string("sync: unlock of unlocked mutex"))
-                        break
-                    }
+                    guard storage.locked else { throw GoFatalError.mutexUnlockOfUnlocked }
                     if storage.waiters.isEmpty {
                         storage.locked = false
                     } else {

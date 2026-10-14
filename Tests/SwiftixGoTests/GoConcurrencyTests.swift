@@ -142,13 +142,13 @@ struct GoConcurrencyTests: GoTestHarness {
     @Test func channelAndSyncMisusePanicsAreRecoverable() throws {
         let source = GoSourceFile(
             path: "main.go",
-            text: "package main\nimport \"fmt\"\nimport \"sync\"\nfunc report() { fmt.Println(recover()) }\nfunc closeNil() {\n\tdefer report()\n\tvar values chan int\n\tclose(values)\n}\nfunc closeTwice() {\n\tdefer report()\n\tvalues := make(chan int)\n\tclose(values)\n\tclose(values)\n}\nfunc unlock() {\n\tdefer report()\n\tvar mutex sync.Mutex\n\tmutex.Unlock()\n}\nfunc negative() {\n\tdefer report()\n\tvar group sync.WaitGroup\n\tgroup.Add(-1)\n}\nfunc main() {\n\tcloseNil()\n\tcloseTwice()\n\tunlock()\n\tnegative()\n}\n")
+            text: "package main\nimport \"fmt\"\nimport \"sync\"\nfunc report() { fmt.Println(recover()) }\nfunc closeNil() {\n\tdefer report()\n\tvar values chan int\n\tclose(values)\n}\nfunc closeTwice() {\n\tdefer report()\n\tvalues := make(chan int)\n\tclose(values)\n\tclose(values)\n}\nfunc unlock() {\n\tdefer report()\n\tvar mutex sync.Mutex\n\tmutex.Unlock()\n}\nfunc negative() {\n\tdefer report()\n\tvar group sync.WaitGroup\n\tgroup.Add(-1)\n}\nfunc main() {\n\tcloseNil()\n\tcloseTwice()\n\tnegative()\n}\n")
 
         let executable = try GoCompiler.compile(sources: [source])
         var output = ""
         try GoVirtualMachine().run(executable) { output += $0 }
 
-        #expect(output == "close of nil channel\nclose of closed channel\nsync: unlock of unlocked mutex\nsync: negative WaitGroup counter\n")
+        #expect(output == "close of nil channel\nclose of closed channel\nsync: negative WaitGroup counter\n")
     }
 
     @Test func completedChildStillLetsBlockedMainDrivePendingTimer() throws {

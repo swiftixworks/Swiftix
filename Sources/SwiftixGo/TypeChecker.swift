@@ -2913,7 +2913,7 @@ struct FunctionChecker {
             }
             if syncReceiverName == "sync.Mutex", name == "Lock" || name == "Unlock" {
                 try checkArguments(arguments, of: callee, declared: [], position: position)
-                guard syncReceiverIsPointer || isAddressable(base) else {
+                guard syncReceiverIsPointer || hasLockAddress(base) else {
                     throw GoDiagnostic(
                         position: base.position,
                         message: "cannot call pointer method on non-addressable value")
@@ -2921,7 +2921,7 @@ struct FunctionChecker {
                 return .void
             }
             if syncReceiverName == "sync.WaitGroup" {
-                guard syncReceiverIsPointer || isAddressable(base) else {
+                guard syncReceiverIsPointer || hasLockAddress(base) else {
                     throw GoDiagnostic(
                         position: base.position,
                         message: "cannot call pointer method on non-addressable value")

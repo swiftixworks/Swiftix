@@ -698,6 +698,15 @@ format, behavior and platform changes are recorded here.
 - A package-level variable initialized by a call to a function that declares
   a variable of the same name (`var n, err = f()` where `f` has `x, err :=
   g()`) is no initialization cycle.
+- Each value that holds a `sync.Mutex` or `sync.WaitGroup` has its own lock,
+  as in Go: the elements of `make([]shard, n)`, arrays, `new`, literals, map
+  entries, appended values, and zero results, at any depth, and a copy is a
+  second lock in the state the first was in. All of them shared one lock, so
+  locking two shards deadlocked.
+- `Unlock` of an unlocked `sync.Mutex` is Go's `fatal error: sync: unlock of
+  unlocked mutex`, which `recover` does not see (was a recoverable panic).
+- `f().mu.Lock()` on a field reached through a pointer a call returns
+  compiles (was `cannot call pointer method on non-addressable value`).
 
 
 ## 0.13.1 — 2026-10-08

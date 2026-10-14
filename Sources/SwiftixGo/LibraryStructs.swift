@@ -287,7 +287,7 @@ enum GoLibraryStructs {
     static let nativeCallNames: Set<String> = {
         var names: Set<String> = [
             "$sync.Mutex.TryLock", "$sync.NewCond", "$time.NewTimer", "$time.NewTicker",
-            "$time.AfterFunc",
+            "$time.AfterFunc", IRLowerer.lockCopyName,
         ]
         for name in [rwMutexName, timerName, tickerName, condName] {
             for member in methodNames(of: name) { names.insert("$\(name).\(member)") }

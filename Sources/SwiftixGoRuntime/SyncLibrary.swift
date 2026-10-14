@@ -70,6 +70,7 @@ struct GoFatalError: Error, Equatable, Sendable, CustomStringConvertible {
 
     static let readUnlockOfUnlocked = GoFatalError(message: "sync: RUnlock of unlocked RWMutex")
     static let unlockOfUnlocked = GoFatalError(message: "sync: Unlock of unlocked RWMutex")
+    static let mutexUnlockOfUnlocked = GoFatalError(message: "sync: unlock of unlocked mutex")
 }
 
 enum GoSync {
@@ -90,6 +91,7 @@ enum GoSync {
         "$sync.Cond.Broadcast": 1,
         condAdd: 1,
         condWait: 2,
+        GoLockCopies.copyName: 1,
     ]
 
     /// The two halves of `(*sync.Cond).Wait` that the VM does itself: draw

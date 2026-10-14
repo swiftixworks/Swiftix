@@ -2742,6 +2742,7 @@ struct IRLowerer {
                 base: collectionRegister,
                 key: keyRegister,
                 zero: zero))
+            copyLocks(in: valueRegister, type: elementType)
             scopes[scopes.count - 1][valueName] = LoweredBinding(
                 register: valueRegister, type: elementType)
         }
@@ -3691,13 +3692,15 @@ struct IRLowerer {
             if case .pointer = baseType { return try lower(base) }
             return try lowerAddress(of: base)
         }
-        if case .pointer = baseType {
+        if case .pointer(let pointee) = baseType {
             let pointer = try lower(base)
             let value = allocateRegister()
             operations.append(.dereference(destination: value, pointer: pointer))
-            return value
+            let place = GoExpression.unary(
+                operator: .dereference, operand: base, position: base.position)
+            return copyingReceiverLocks(value, of: place, type: pointee)
         }
-        return try lower(base)
+        return copyingReceiverLocks(try lower(base), of: base, type: baseType)
     }
 
     /// Whether `callee` is `fmt.Println` (true) or `fmt.Print` (false), or
@@ -5343,7 +5346,10 @@ struct IRLowerer {
     /// Lowers `expression` as a value of type `target`, converting it when
     /// the target is an interface.
     mutating func lowerConverted(_ expression: GoExpression, to target: GoType?) throws -> Int {
-        converted(try lower(expression), from: staticType(of: expression), to: target)
+        let source = staticType(of: expression)
+        return converted(
+            copyingLocks(try lower(expression), of: expression, type: source),
+            from: source, to: target)
     }
 
     /// Lowers call arguments against the parameter types they are passed to.
