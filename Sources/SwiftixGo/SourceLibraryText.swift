@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -40,6 +40,9 @@ enum GoSourceLibraryText {
             "canceler", "causer", "contextName", "deadlineExceededError", "emptyCtx",
             "parentCancelCtx", "removeChild", "stringer", "stringify", "timerCtx", "todoCtx",
             "value", "valueCtx", "withCancel", "withoutCancelCtx",
+        ],
+        "fmt": [
+            "Formatter", "GoStringer", "State", "Stringer",
         ],
         "io": [
             "Closer", "Copy", "Discard", "ErrClosedPipe", "ErrNoProgress", "ErrShortBuffer",
@@ -201,6 +204,7 @@ enum GoSourceLibraryText {
         case "bufio": return bufio
         case "bytes": return bytes
         case "context": return context
+        case "fmt": return fmt
         case "io": return io
         case "io/fs": return ioFs
         case "log": return log
@@ -2920,6 +2924,52 @@ func value(c Context, key any) any {
 			return c.Value(key)
 		}
 	}
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let fmt: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/fmt/print.go",
+            text: #"""
+// Package fmt is the part of fmt that is written in Go: the interfaces a
+// value implements to choose how it prints. The printing functions belong to
+// the run-time library, which calls String, GoString, and Format of the
+// program's types as Go's fmt does. The State it gives Format is a value of
+// its own, *fmt.pp.
+package fmt
+
+// State is what a Format method writes to, and how it learns the flags,
+// width, and precision of the verb it formats for.
+type State interface {
+	// Write is how Format prints.
+	Write(b []byte) (n int, err error)
+	// Width returns the width and whether one was given.
+	Width() (wid int, ok bool)
+	// Precision returns the precision and whether one was given.
+	Precision() (prec int, ok bool)
+	// Flag reports whether the flag c, a character, was given.
+	Flag(c int) bool
+}
+
+// Formatter is implemented by a value that formats itself under every verb.
+type Formatter interface {
+	Format(f State, verb rune)
+}
+
+// Stringer is implemented by a value that has a String method, which
+// prints it under the verbs for text and in Print.
+type Stringer interface {
+	String() string
+}
+
+// GoStringer is implemented by a value that has a GoString method, which
+// prints it under %#v.
+type GoStringer interface {
+	GoString() string
 }
 
 """#),

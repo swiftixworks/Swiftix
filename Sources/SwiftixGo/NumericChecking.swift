@@ -778,6 +778,19 @@ extension FunctionChecker {
         noteDeclaredConstant(constant, named: name, at: position)
     }
 
+    /// What Go says of `failure`, which folding the constant `expression`
+    /// found: the operation that overflowed, as checking it reports it.
+    func reported(_ failure: Error, in expression: GoExpression) -> Error {
+        guard let diagnostic = failure as? GoDiagnostic else { return failure }
+        var checker = self
+        do {
+            _ = try checker.type(of: expression)
+        } catch let reported as GoDiagnostic where reported.position == diagnostic.position {
+            return reported
+        } catch {}
+        return failure
+    }
+
     /// Tells the lowerer the value of the declared constant `name`.
     func noteDeclaredConstant(
         _ constant: GoConstant, named name: String, at position: GoSourcePosition
@@ -800,6 +813,7 @@ extension GoTypeChecker {
     ) throws {
         var pending = globals.filter { $0.isConstant && $0.expression != nil }
         var failure: Error?
+        var failing: (expression: GoExpression, scope: FunctionChecker)?
         while !pending.isEmpty {
             var next: [GoGlobalDeclaration] = []
             failure = nil
@@ -834,6 +848,7 @@ extension GoTypeChecker {
                         constant, named: declaration.name, at: declaration.position)
                 } catch {
                     // It may depend on a constant that has no value yet.
+                    if failure == nil { failing = (expression, scope) }
                     failure = failure ?? error
                     next.append(declaration)
                 }
@@ -841,7 +856,7 @@ extension GoTypeChecker {
             guard next.count < pending.count else { break }
             pending = next
         }
-        if let failure { throw failure }
+        if let failure { throw failing.map { $0.scope.reported(failure, in: $0.expression) } ?? failure }
     }
 
     /// Forgets the nodes of the initializers of the package-level

@@ -296,6 +296,8 @@ enum GoLibraryMethods {
         functions.merge(handleFunctions) { first, _ in first }
         // And those of a time, a location, a month, and a weekday.
         functions.merge(GoCalendar.functions) { first, _ in first }
+        // And those of the `fmt.State` a `Format` method is given.
+        functions.merge(GoFormatState.functions) { first, _ in first }
         return functions
     }()
 

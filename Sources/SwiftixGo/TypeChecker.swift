@@ -435,7 +435,8 @@ public enum GoTypeChecker {
                 methodSignatures: methodSignatures,
                 typeDefinitions: typeDefinitions,
                 availableTypes: availableTypes,
-                globalBindings: bindings)
+                globalBindings: bindings,
+                namePositions: fileByGlobal[declaration.name]?.namePositions ?? [:])
         }
         for declaration in globals {
             guard let expression = declaration.expression,
@@ -979,6 +980,9 @@ struct FunctionChecker {
     func methodExpressionType(
         base: GoExpression, name: String, position: GoSourcePosition
     ) throws -> GoType? {
+        if let method = try typeMethodExpressionType(base: base, name: name, position: position) {
+            return method
+        }
         guard let receiver = GoMethodExpression.receiver(of: base),
             lookup(receiver.typeName) == nil, typeDefinitions[receiver.typeName] != nil
         else { return nil }
@@ -993,14 +997,20 @@ struct FunctionChecker {
         }
         guard let method = value ?? (receiver.pointer ? pointer : nil) else {
             let isField = structFields(of: .named(typeName))?.contains { $0.name == name } == true
+            if receiver.pointer, isInterface(.named(typeName)) {
+                throw GoDiagnostic(
+                    position: position,
+                    message: "\(GoMethodExpression.spelling(receiver, name)) undefined "
+                        + "(type *\(typeName) is pointer to interface, not interface)")
+            }
             throw GoDiagnostic(
                 position: position,
                 message: pointer == nil
                     ? "\(GoMethodExpression.spelling(receiver, name)) undefined "
                         + "(type \(receiver.pointer ? "*" : "")\(typeName) has no "
                         + "\(isField ? "" : "field or ")method \(name))"
-                    : "invalid method expression \(typeName).\(name) "
-                        + "(needs pointer receiver (*\(typeName)).\(name))")
+                    : "invalid method expression \(GoMethodExpression.qualified(typeName)).\(name) "
+                        + "(needs pointer receiver (*\(GoMethodExpression.qualified(typeName))).\(name))")
         }
         let receiverType: GoType = receiver.pointer ? .pointer(.named(typeName)) : .named(typeName)
         return .function(parameters: [receiverType] + method.parameters, results: method.results)
@@ -1012,10 +1022,8 @@ struct FunctionChecker {
         _ callee: GoExpression, arguments: [GoExpression], position: GoSourcePosition
     ) throws -> [GoType]? {
         guard case .selector(let base, let name, _) = callee,
-            let receiver = GoMethodExpression.receiver(of: base),
             let method = try methodExpressionType(base: base, name: name, position: callee.position)
         else { return nil }
-        _ = receiver
         return try resultsOfCall(
             through: method, callee: callee, arguments: arguments, position: position)
     }

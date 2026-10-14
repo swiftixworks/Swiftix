@@ -31,10 +31,26 @@ enum GoNumberLibrary {
             return integer(GoBigInt(Int64(0xFFFD)), kind: .rune)
         case ("utf8", "MaxRune"), ("unicode", "MaxRune"):
             return integer(GoBigInt(Int64(0x10FFFF)), kind: .rune)
+        case ("time", _):
+            return durationConstant(member)
         case ("utf8", "UTFMax"): return integer(GoBigInt(Int64(4)))
         case ("utf8", "RuneSelf"): return integer(GoBigInt(Int64(0x80)))
         default: return nil
         }
+    }
+
+    /// The units of `time`, which are constants of type `time.Duration`, so
+    /// `const timeout = 5 * time.Second` is one too and an overflowing
+    /// product is Go's compile error. They are plain: `time.Duration` is an
+    /// `int64`, which the VM computes exactly, so an expression of them that
+    /// stays within 64 bits is compiled as it was before they were constants.
+    static func durationConstant(_ member: String) -> GoConstant? {
+        guard let value = GoStandardLibrary.integerConstant(package: "time", member: member) else {
+            return nil
+        }
+        return GoConstant(
+            value: GoRational(GoBigInt(value)), kind: .integer, type: GoLibraryTypes.duration,
+            isPlain: true)
     }
 
     /// The floating-point constants of `math`, as its source spells them.

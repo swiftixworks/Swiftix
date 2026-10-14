@@ -919,6 +919,12 @@ public struct GoVirtualMachine: Sendable {
         // such a call, where no guest function can be run.
         var guestCallResults: [GoValue]?
         var guestCallCursor = 0
+        // The `fmt.State` of each `Format` method that is running, by handle.
+        var formatStates: [Int64: GoFormatState] = [:]
+        var nextFormatState: Int64 = 0
+        // Whether the program declares a `Format` or `GoString` method at
+        // all, once `fmt` has asked: a program without one pays nothing more.
+        var hasFormattingMethods: Bool?
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -2330,6 +2336,71 @@ public struct GoVirtualMachine: Sendable {
             }
         }
 
+        /// What `value`, of the dynamic type `type`, prints as by a method
+        /// of the program that Go's `fmt` asks before any other: `Format`
+        /// under every verb (see `GoFormatState`), and `GoString` under
+        /// `%#v`. Nil when the type has neither, or where no guest function
+        /// can run. A method that panics prints as Go prints it: `<nil>` for
+        /// a nil pointer, the panic in a `%!v(PANIC=...)` otherwise.
+        func formatByMethod(
+            _ value: GoValue, type: GoRuntimeType?, _ directive: GoFormat.Directive,
+            scope: GoFormatScope
+        ) throws -> String? {
+            let owner: String
+            switch type {
+            case .named(let symbol)?: owner = symbol
+            case .pointer(.named(let symbol))?: owner = "*" + symbol
+            default: return nil
+            }
+            if hasFormattingMethods == nil {
+                hasFormattingMethods = functions.keys.contains {
+                    ($0.hasSuffix(".Format") || $0.hasSuffix(".GoString"))
+                        && GoLibraryMethods.functions[$0] == nil
+                }
+            }
+            guard hasFormattingMethods == true else { return nil }
+            let isNilPointer = value == .nilValue && owner.hasPrefix("*")
+            let name: String
+            let result: GoValue?
+            if let format = GoFormatState.method(
+                "Format", of: owner, parameterCount: 2, resultCount: 0, in: functions)
+            {
+                if isNilPointer, !format.name.hasPrefix("*") { return GoFormat.nilText }
+                name = "Format"
+                result = try guestCall(
+                    GoFormatState.caller(of: format),
+                    [
+                        try methodReceiver(value, for: format), .int(Int64(directive.verb.value)),
+                        GoFormatState.settings(of: directive),
+                    ],
+                    recovery: .panics)
+            } else if directive.goSyntax, let goString = method("GoString", of: owner) {
+                if isNilPointer, !goString.name.hasPrefix("*") { return GoFormat.nilText }
+                name = "GoString"
+                result = try guestCall(
+                    goString, [try methodReceiver(value, for: goString)], recovery: .panics)
+            } else {
+                return nil
+            }
+            switch result {
+            case .string(let text)?:
+                guard name == "GoString" else { return text }
+                // Go pads and cuts the text as `%s` would.
+                var plain = directive
+                plain.verb = "s"
+                plain.goSyntax = false
+                return GoFormat.string(text, plain) ?? text
+            case .interface(let caught)? where caught.typeName == GoFormat.panicMarker:
+                if isNilPointer { return GoFormat.nilText }
+                return "%!\(directive.verb)(PANIC=\(name) method: "
+                    + (try formatValue(
+                        caught.value, as: nil, GoFormat.Directive(verb: "v"), scope: scope,
+                        depth: 0)) + ")"
+            default:
+                return nil
+            }
+        }
+
         /// Format `operand` under one `fmt` directive the way Go's
         /// `printValue` does. `declared` is its static type when the compiler
         /// supplied one; an interface and an operand without a descriptor
@@ -2410,6 +2481,12 @@ public struct GoVirtualMachine: Sendable {
                 case .other(GoCalendar.timeTypeName)? = type, let time = GoTime(value)
             {
                 return GoTimeFormat.goString(time)
+            }
+            // `Format` under every verb, `GoString` under `%#v`.
+            if scope.callsMethods, depth == 0 || scope.accessible,
+                let text = try formatByMethod(value, type: type, directive, scope: scope)
+            {
+                return text
             }
             // Under a verb for text Go prints a value by its `Error` method,
             // or else its `String` method: an operand always, and inside
@@ -4125,6 +4202,70 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// Run a native of the `fmt.State` a `Format` method is given: see
+        /// `GoFormatState`. Returns `false` when `name` is not such a function.
+        func executeFormatStateNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoFormatState.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount, vm.stack.count >= argumentCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            let operands = Array(vm.stack.suffix(argumentCount))
+            vm.stack.removeLast(argumentCount)
+            if name == GoFormatState.makeNative {
+                guard let state = GoFormatState(settings: operands[0]) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                guard formatStates.count < resourceLimits.maximumCollectionElements else {
+                    throw GoRuntimeError.resourceLimitExceeded("format states")
+                }
+                nextFormatState += 1
+                formatStates[nextFormatState] = state
+                vm.stack.append(
+                    .interface(
+                        GoInterfaceValue(
+                            typeName: GoFormatState.typeName, value: .int(nextFormatState))))
+                return true
+            }
+            var receiver = operands[0]
+            if case .interface(let boxed) = receiver { receiver = boxed.value }
+            guard case .int(let handle) = receiver, var state = formatStates[handle] else {
+                throw GoRuntimeError.typeMismatch
+            }
+            switch name {
+            case GoFormatState.textNative:
+                formatStates[handle] = nil
+                vm.stack.append(.string(String(decoding: state.bytes, as: UTF8.self)))
+                return true
+            case "$fmt.pp.Write", "$fmt.pp.WriteString":
+                var bytes: [UInt8] = []
+                if case .string(let text) = operands[1] {
+                    bytes = Array(text.utf8)
+                } else {
+                    for element in try sliceElements(operands[1]) {
+                        guard case .int(let byte) = element else { throw GoRuntimeError.typeMismatch }
+                        bytes.append(UInt8(truncatingIfNeeded: byte))
+                    }
+                }
+                guard state.bytes.count + bytes.count <= resourceLimits.maximumStringBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                }
+                state.bytes += bytes
+                formatStates[handle] = state
+                vm.stack.append(contentsOf: [.int(Int64(bytes.count)), errorValue(nil)])
+            case "$fmt.pp.Width":
+                vm.stack.append(contentsOf: [.int(Int64(state.width ?? 0)), .bool(state.width != nil)])
+            case "$fmt.pp.Precision":
+                vm.stack.append(
+                    contentsOf: [.int(Int64(state.precision ?? 0)), .bool(state.precision != nil)])
+            default:
+                guard case .int(let flag) = operands[1] else { throw GoRuntimeError.typeMismatch }
+                vm.stack.append(
+                    .bool(Unicode.Scalar(UInt32(truncatingIfNeeded: flag)).map(state.flags.contains) ?? false))
+            }
+            return true
+        }
+
         /// Run a native of `net/http`: see `GoHTTP`. Returns `false` when
         /// `name` is not such a function.
         /// The natives of `net` (`GoNetNatives`): each names a descriptor
@@ -5698,6 +5839,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeURLNative(name, argumentCount: argumentCount)
                                 || executeBytesNative(name, argumentCount: argumentCount)
                                 || executeNetNative(name, argumentCount: argumentCount)
+                                || executeFormatStateNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }

@@ -1913,7 +1913,9 @@ struct IRLowerer {
         case .identifier(let name, _):
             calleeType = lookup(name)?.type ?? globalInfos[name]?.type
         case .selector(let base, let name, _):
-            if methodExpression(base: base, name: name) != nil {
+            if methodExpression(base: base, name: name) != nil
+                || typeMethodExpression(base: base, name: name) != nil
+            {
                 calleeType = try? type(of: callee)
                 break
             }
@@ -4148,6 +4150,7 @@ struct IRLowerer {
         if let method = methodExpression(base: base, name: name) {
             return functionValue(symbol: methodExpressionSymbol(method))
         }
+        if let method = try lowerTypeMethodExpression(base: base, name: name) { return method }
         if let function = try lowerLibraryFunctionValue(base: base, member: name) {
             return function
         }
@@ -4955,6 +4958,9 @@ struct IRLowerer {
                     parameters: [method.receiverType] + method.info.parameterTypes,
                     results: method.info.resultTypes)
             }
+            if let method = typeMethodExpression(base: base, name: name) {
+                return .function(parameters: method.parameters, results: method.results)
+            }
             if let function = libraryFunction(base: base, member: name) { return function.type }
             let baseType = try type(of: base)
             if let lent = try promotedType(expression, baseType: baseType) { return lent }
@@ -5263,7 +5269,7 @@ struct IRLowerer {
         {
             return (function, nil)
         }
-        if let receiver = try? type(of: base),
+        if let receiver = try? type(of: base), !GoMethodExpression.isWrittenType(base),
             let function = GoStandardLibrary.method(
                 of: GoLibraryTypes.methodOwner(receiver) ?? receiver, named: member)
         {

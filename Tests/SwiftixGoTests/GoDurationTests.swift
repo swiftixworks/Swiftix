@@ -387,7 +387,7 @@ struct GoDurationTests: GoTestHarness {
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use timeout (constant of int64 type time.Duration) as int value in variable declaration")
+                == "cannot use timeout (constant 5000000000 of int64 type time.Duration) as int value in variable declaration")
         #expect(
             firstError(
                 """

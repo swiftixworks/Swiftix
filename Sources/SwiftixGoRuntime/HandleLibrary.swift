@@ -74,6 +74,6 @@ extension GoLibraryMethods {
     static func isLibraryType(_ owner: String) -> Bool {
         owner == durationTypeName || owner == "*" + durationTypeName
             || owner == connectionTypeName || owner == listenerTypeName || owner == fileTypeName
-            || GoCalendar.isOwner(owner)
+            || GoCalendar.isOwner(owner) || owner == GoFormatState.typeName
     }
 }

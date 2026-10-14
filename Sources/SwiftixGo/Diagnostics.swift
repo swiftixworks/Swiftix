@@ -1287,13 +1287,20 @@ extension FunctionChecker {
         let verb = failure.isTruncation ? "truncated to" : "overflows"
         for (operand, type) in [(right, rightType), (left, leftType)]
         where diagnostic.position.offset == operand.startPosition.offset {
+            // At the start of the operation, the operand that fits the
+            // other's type is not the one that overflowed: the result did.
+            if operand.startPosition.offset == expression.startPosition.offset,
+                fits(operand, as: operand == left ? rightType : leftType)
+            {
+                continue
+            }
             guard let constant = constantOperand(operand, ofType: type), constant.kind != nil,
                 operand.startPosition.offset != expression.startPosition.offset
                     || untypedName(of: operand == left ? right : left, ofType: .int) == nil
             else { continue }
             return GoDiagnostic(
                 position: Self.start(of: operand, in: namePositions),
-                message: "\(describe(operand, ofType: type)) \(verb) \(failure.type)")
+                message: "\(describe(operand, ofType: type)) \(verb) \(basicName(failure.type))")
         }
         guard diagnostic.position.offset == expression.startPosition.offset,
             let value = Self.text(after: "constant ", in: diagnostic.message)?
@@ -1301,8 +1308,33 @@ extension FunctionChecker {
         else { return diagnostic }
         return GoDiagnostic(
             position: diagnostic.position,
-            message: "\(spelling(of: expression)) (constant \(value) of type \(failure.type)) "
-                + "\(verb) \(failure.type)")
+            message: "\(spelling(of: expression)) (constant \(value) of "
+                + "\(basicPhrase(failure.type))) \(verb) \(basicName(failure.type))")
+    }
+
+    /// The type Go names where a constant does not fit a type: the basic
+    /// type underneath a defined one, `int64` for `time.Duration`.
+    func basicName(_ name: String) -> String {
+        guard let kind = namedKind(.named(name)), GoNumericKind(typeName: kind) != nil else {
+            return name
+        }
+        switch kind {
+        case "byte": return "uint8"
+        case "rune": return "int32"
+        default: return kind
+        }
+    }
+
+    /// `type int8`, or `int64 type time.Duration` for a defined type.
+    func basicPhrase(_ name: String) -> String {
+        let basic = basicName(name)
+        return basic == name ? "type \(name)" : "\(basic) type \(name)"
+    }
+
+    /// Whether `operand` is an untyped constant that is a value of `type`.
+    func fits(_ operand: GoExpression, as type: GoType) -> Bool {
+        guard let value = (try? constant(of: operand)) ?? nil, value.isUntyped else { return false }
+        return (try? converted(value, to: type, at: operand.startPosition)) != nil
     }
 }
 
@@ -1952,8 +1984,9 @@ extension FunctionChecker {
             else { throw diagnostic }
             throw GoDiagnostic(
                 position: diagnostic.position,
-                message: "\(spelling(of: expression)) (constant \(value) of type \(failure.type)) "
-                    + "\(failure.isTruncation ? "truncated to" : "overflows") \(failure.type)")
+                message: "\(spelling(of: expression)) (constant \(value) of "
+                    + "\(basicPhrase(failure.type))) "
+                    + "\(failure.isTruncation ? "truncated to" : "overflows") \(basicName(failure.type))")
         }
     }
 }
