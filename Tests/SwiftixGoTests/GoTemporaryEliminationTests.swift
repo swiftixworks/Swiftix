@@ -38,6 +38,21 @@ struct GoTemporaryEliminationTests: GoTestHarness {
         return (before, after, (count(executable), count(eliminated)))
     }
 
+    /// The elements of a long literal are each stored and loaded once, and
+    /// every pair overlaps every other: one round moves them all, where one
+    /// round each took the compiler most of a minute for `math/rand`'s
+    /// table of 607.
+    @Test(.timeLimit(.minutes(1)))
+    func aLongLiteralIsRewrittenInOneRound() throws {
+        let elements = (0..<607).map { String($0 * 7919 % 1_000_003) }.joined(separator: ", ")
+        let result = try compare(
+            "fmt.Println(table[0], table[606], len(table))",
+            declarations: "var table = [607]int64{\(elements)}")
+        #expect(result.before == "0 798902 607\n")
+        #expect(result.after == result.before)
+        #expect(result.instructions.1 < result.instructions.0)
+    }
+
     @Test func aLoopPrintsTheSameWithFewerInstructions() throws {
         let result = try compare(
             """

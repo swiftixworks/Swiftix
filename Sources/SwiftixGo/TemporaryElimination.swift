@@ -218,78 +218,74 @@ enum GoTemporaryElimination {
             replacement: Array(between) + Array(definition))
     }
 
-    /// One round of rewrites that do not overlap, with where each old
-    /// instruction offset moved, or nil when there is none left.
+    /// One round of rewrites, with where each old instruction offset moved,
+    /// or nil when there is none left.
+    ///
+    /// Rewrites go together when the instructions they take out are apart
+    /// and none's definition reads another's temporary: each definition
+    /// then lands where its load was, whatever lies between, as it would
+    /// alone. The elements of a long literal, each stored and then loaded
+    /// in order, are all moved in one round.
     private static func eliminateRound(
         in instructions: [GoInstruction],
         parameterCount: Int
     ) -> ([GoInstruction], (Int) -> Int)? {
         let targets = jumpTargets(in: instructions)
-        var rewrites: [Rewrite] = []
+        var rewrites: [(local: Int, rewrite: Rewrite)] = []
         for (local, use) in uses(in: instructions) where local >= parameterCount {
             if let rewrite = rewrite(of: use, in: instructions, targets: targets) {
-                rewrites.append(rewrite)
+                rewrites.append((local, rewrite))
             }
         }
-        rewrites.sort { $0.start < $1.start }
+        rewrites.sort { $0.rewrite.start < $1.rewrite.start }
+        func loads(_ rewrite: Rewrite) -> Set<Int> {
+            Set(instructions[rewrite.start..<rewrite.store].compactMap { instruction -> Int? in
+                if case .load(let local) = instruction { return local }
+                return nil
+            })
+        }
         var chosen: [Rewrite] = []
-        for rewrite in rewrites where chosen.last.map({ $0.load < rewrite.start }) ?? true {
+        var removed: Set<Int> = []
+        var chosenLocals: Set<Int> = []
+        var readByChosen: Set<Int> = []
+        for (local, rewrite) in rewrites {
+            let taken = Set(rewrite.start...rewrite.store).union([rewrite.load])
+            let read = loads(rewrite)
+            guard removed.isDisjoint(with: taken), chosenLocals.isDisjoint(with: read),
+                !readByChosen.contains(local)
+            else { continue }
             chosen.append(rewrite)
+            removed.formUnion(taken)
+            chosenLocals.insert(local)
+            readByChosen.formUnion(read)
         }
         guard !chosen.isEmpty else { return nil }
 
-        // Where each kept instruction lands, and where each rewrite starts.
+        // Each kept instruction in its order, and each moved definition
+        // where its load was.
+        var definitionAt: [Int: Rewrite] = [:]
+        for rewrite in chosen { definitionAt[rewrite.load] = rewrite }
         var result: [GoInstruction] = []
         result.reserveCapacity(instructions.count)
         var newIndex = [Int](repeating: -1, count: instructions.count + 1)
-        var newStarts: [Int] = []
-        var cursor = 0
-        for rewrite in chosen {
-            for index in cursor..<rewrite.start {
+        for index in instructions.indices {
+            if let rewrite = definitionAt[index] {
+                newIndex[index] = result.count
+                result += instructions[rewrite.start..<rewrite.store]
+            } else if !removed.contains(index) {
                 newIndex[index] = result.count
                 result.append(instructions[index])
             }
-            newStarts.append(result.count)
-            result += rewrite.replacement
-            cursor = rewrite.load + 1
-        }
-        for index in cursor..<instructions.count {
-            newIndex[index] = result.count
-            result.append(instructions[index])
         }
         newIndex[instructions.count] = result.count
-
-        /// The rewrite whose old code holds `offset`, and its new start.
-        func region(of offset: Int) -> (Rewrite, Int)? {
-            var low = 0
-            var high = chosen.count
-            while low < high {
-                let middle = (low + high) / 2
-                if chosen[middle].start <= offset { low = middle + 1 } else { high = middle }
-            }
-            guard low > 0, offset <= chosen[low - 1].load else { return nil }
-            return (chosen[low - 1], newStarts[low - 1])
+        // An instruction taken out is where the next one that stays is now:
+        // control that reached it reaches what followed it, the moved code
+        // being pure.
+        for index in stride(from: instructions.count - 1, through: 0, by: -1) where newIndex[index] < 0 {
+            newIndex[index] = newIndex[index + 1]
         }
-        // No jump lands inside a rewrite, only at its start.
-        func target(_ old: Int) -> Int {
-            if let (_, newStart) = region(of: old) { return newStart }
-            return newIndex[old]
-        }
-        // A statement that began in moved code begins where that code now
-        // is; one that began at the store or the load, where the definition
-        // now is.
-        let moved: (Int) -> Int = { offset in
-            guard let (rewrite, newStart) = region(of: offset) else { return newIndex[offset] }
-            if offset == rewrite.start { return newStart }
-            if offset < rewrite.store {
-                return newStart + rewrite.between + (offset - rewrite.start)
-            }
-            if offset == rewrite.store || offset == rewrite.load {
-                return newStart + rewrite.between
-            }
-            return newStart + (offset - rewrite.store - 1)
-        }
-        return (retargeted(result, target), moved)
+        let moved: (Int) -> Int = { offset in newIndex[min(max(offset, 0), instructions.count)] }
+        return (retargeted(result, moved), moved)
     }
 
     /// `instructions` with each jump target given by `target` of the old one.
