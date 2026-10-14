@@ -274,7 +274,7 @@ struct GoStringsPackageTests: GoTestHarness {
                 == "not enough arguments in call to strings.TrimPrefix\n\thave (string)\n\twant (string, string)")
         #expect(diagnostic("var n int = strings.TrimSuffix(\"a\", \"b\")\nfmt.Println(n)") != nil)
         #expect(diagnostic("var s string = strings.Fields(\"a\")\nfmt.Println(s)") != nil)
-        #expect(diagnostic("fmt.Println(strings.Title(\"a\"))") == "undefined: strings.Title")
+        #expect(diagnostic("fmt.Println(strings.ToValidUTF8(\"a\"))") == "undefined: strings.ToValidUTF8")
         #expect(
             diagnostic(
                 """

@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["context", "io", "log", "net/http", "net/url", "sort", "strings", "sync", "sync/atomic"]
+    static let paths: Set<String> = ["context", "io", "log", "net/http", "net/url", "sort", "strconv", "strings", "sync", "sync/atomic"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -103,8 +103,19 @@ enum GoSourceLibraryText {
             "siftDownFunc", "stableSort", "stableSortFunc", "swapRange", "swapRangeFunc",
             "xorshift",
         ],
+        "strconv": [
+            "AppendInt", "AppendQuote", "ErrRange", "ErrSyntax", "FormatBool", "NumError",
+            "ParseBool", "Quote", "QuoteToASCII", "Unquote", "digit", "escaped", "number",
+        ],
         "strings": [
-            "NewReader", "Reader",
+            "Builder", "Compare", "ContainsAny", "ContainsFunc", "Cut", "CutPrefix", "CutSuffix",
+            "EqualFold", "FieldsFunc", "IndexAny", "IndexFunc", "LastIndexAny", "LastIndexByte",
+            "LastIndexFunc", "Map", "NewReader", "NewReplacer", "Reader", "Replace", "ReplaceAll",
+            "Replacer", "SplitAfter", "SplitAfterN", "SplitN", "Title", "ToTitle", "Trim",
+            "TrimFunc", "TrimLeft", "TrimLeftFunc", "TrimRight", "TrimRightFunc", "beginsWord",
+            "firstWhere", "folded", "lastRune", "lastWhere", "replacesBytes",
+            "replacesBytesByStrings", "replacesOneString", "replacesStrings", "runeAt", "split",
+            "titleCase",
         ],
         "sync": [
             "Map", "Once", "Pool",
@@ -127,6 +138,7 @@ enum GoSourceLibraryText {
         case "net/http": return netHttp
         case "net/url": return netUrl
         case "sort": return sort
+        case "strconv": return strconv
         case "strings": return strings
         case "sync": return sync
         case "sync/atomic": return syncAtomic
@@ -7207,19 +7219,322 @@ func rotateFunc(x any, less func(i, j int) bool, a, m, b int) {
 }
 
 extension GoSourceLibraryText {
+    static let strconv: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/strconv/strconv.go",
+            text: #"""
+// Package strconv is the part of strconv that is written in Go: quoting,
+// booleans, and the functions that append to a byte slice. The numbers are
+// read and written by the run-time library, which this file imports under
+// the same path.
+package strconv
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"unicode/utf8"
+)
+
+// ErrSyntax is the error of a text that is not what the function reads.
+var ErrSyntax = errors.New("invalid syntax")
+
+// ErrRange is the error of a value too large for its type.
+var ErrRange = errors.New("value out of range")
+
+// A NumError is a failed conversion: the function, its input, and why.
+type NumError struct {
+	Func string
+	Num  string
+	Err  error
+}
+
+func (e *NumError) Error() string {
+	return "strconv." + e.Func + ": parsing " + Quote(e.Num) + ": " + e.Err.Error()
+}
+
+func (e *NumError) Unwrap() error { return e.Err }
+
+// Quote is s as a string literal of Go in double quotes, with escapes for
+// what does not print.
+func Quote(s string) string { return fmt.Sprintf("%q", s) }
+
+// QuoteToASCII is Quote with escapes for everything outside ASCII too.
+func QuoteToASCII(s string) string { return fmt.Sprintf("%+q", s) }
+
+// AppendQuote appends Quote(s) to dst.
+func AppendQuote(dst []byte, s string) []byte { return append(dst, Quote(s)...) }
+
+// AppendInt appends the digits of i in the given base to dst.
+func AppendInt(dst []byte, i int64, base int) []byte {
+	return append(dst, strconv.FormatInt(i, base)...)
+}
+
+// FormatBool is "true" or "false".
+func FormatBool(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ParseBool reads the boolean that 1, t, T, TRUE, true, True, 0, f, F,
+// FALSE, false, or False names. Anything else is an error.
+func ParseBool(str string) (bool, error) {
+	switch str {
+	case "1", "t", "T", "true", "TRUE", "True":
+		return true, nil
+	case "0", "f", "F", "false", "FALSE", "False":
+		return false, nil
+	}
+	return false, &NumError{Func: "ParseBool", Num: str, Err: ErrSyntax}
+}
+
+// digit is the value of the digit c in a base up to 16, or -1.
+func digit(c byte, base int) int {
+	value := -1
+	switch {
+	case c >= '0' && c <= '9':
+		value = int(c - '0')
+	case c >= 'a' && c <= 'f':
+		value = int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		value = int(c-'A') + 10
+	}
+	if value >= base {
+		return -1
+	}
+	return value
+}
+
+// number reads count digits of s in base from i on, or gives -1.
+func number(s string, i, count, base int) int {
+	if i+count > len(s) {
+		return -1
+	}
+	value := 0
+	for _, c := range []byte(s[i : i+count]) {
+		d := digit(c, base)
+		if d < 0 {
+			return -1
+		}
+		value = value*base + d
+	}
+	return value
+}
+
+// escaped reads the escape sequence that follows the backslash at
+// s[i-1], inside a literal in the given quote. It appends what the escape
+// stands for to out and returns where the escape ends, or -1.
+func escaped(s string, i int, quote byte, out []byte) ([]byte, int) {
+	if i >= len(s) {
+		return out, -1
+	}
+	c := s[i]
+	i++
+	simple := "a\ab\bf\fn\nr\rt\tv\v\\\\"
+	for k := 0; k < len(simple); k += 2 {
+		if simple[k] == c {
+			return append(out, simple[k+1]), i
+		}
+	}
+	switch c {
+	case '\'', '"':
+		if c != quote {
+			return out, -1
+		}
+		return append(out, c), i
+	case 'x':
+		value := number(s, i, 2, 16)
+		if value < 0 {
+			return out, -1
+		}
+		return append(out, byte(value)), i + 2
+	case 'u', 'U':
+		count := 4
+		if c == 'U' {
+			count = 8
+		}
+		value := number(s, i, count, 16)
+		if value < 0 || value > utf8.MaxRune || value >= 0xD800 && value <= 0xDFFF {
+			return out, -1
+		}
+		return append(out, string(rune(value))...), i + count
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		value := number(s, i-1, 3, 8)
+		if value < 0 || value > 255 {
+			return out, -1
+		}
+		return append(out, byte(value)), i + 2
+	}
+	return out, -1
+}
+
+// Unquote reads s as a literal of Go, a string in double quotes or in
+// back quotes or a character in single quotes, and returns what it
+// denotes. Anything else is ErrSyntax.
+func Unquote(s string) (string, error) {
+	if len(s) < 2 || s[0] != s[len(s)-1] {
+		return "", ErrSyntax
+	}
+	quote := s[0]
+	inside := s[1 : len(s)-1]
+	var out []byte
+	switch quote {
+	case '`':
+		// Everything stands for itself; a carriage return is dropped,
+		// as it is from a source file.
+		for _, c := range []byte(inside) {
+			if c == '`' {
+				return "", ErrSyntax
+			}
+			if c != '\r' {
+				out = append(out, c)
+			}
+		}
+		return string(out), nil
+	case '"', '\'':
+	default:
+		return "", ErrSyntax
+	}
+	characters := 0
+	for i := 0; i < len(inside); characters++ {
+		c := inside[i]
+		switch {
+		case c == quote || c == '\n':
+			return "", ErrSyntax
+		case c == '\\':
+			out, i = escaped(inside, i+1, quote, out)
+			if i < 0 {
+				return "", ErrSyntax
+			}
+		case c < utf8.RuneSelf:
+			out = append(out, c)
+			i++
+		default:
+			// Bytes that are no character read as U+FFFD, as Go has it.
+			r, width := utf8.DecodeRuneInString(inside[i:min(i+utf8.UTFMax, len(inside))])
+			out = append(out, string(r)...)
+			i += width
+		}
+	}
+	// Go takes a character literal of no character for an empty string.
+	if quote == '\'' && characters > 1 {
+		return "", ErrSyntax
+	}
+	return string(out), nil
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
     static let strings: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/strings/builder.go",
+            text: #"""
+package strings
+
+// A Builder collects text piece by piece and gives it as one string. Its
+// zero value is empty and ready. Once written to it must not be copied:
+// the copy would share its bytes, so a write through one panics.
+type Builder struct {
+	self *Builder // the Builder that was written to; nil until then
+	buf  []byte
+}
+
+// written notes that b is being written to, and panics when what was
+// written to before is another Builder that b was copied from.
+func (b *Builder) written() {
+	if b.self == nil {
+		b.self = b
+		return
+	}
+	if b.self != b {
+		panic("strings: illegal use of non-zero Builder copied by value")
+	}
+}
+
+// String is the text collected so far.
+func (b *Builder) String() string { return string(b.buf) }
+
+// Len is the number of bytes collected so far.
+func (b *Builder) Len() int { return len(b.buf) }
+
+// Cap is the number of bytes b has room for, those it holds included.
+func (b *Builder) Cap() int { return cap(b.buf) }
+
+// Reset makes b empty, and free to be copied again.
+func (b *Builder) Reset() {
+	b.self = nil
+	b.buf = nil
+}
+
+// Grow makes room for n more bytes, so that writing them allocates
+// nothing. A negative n panics.
+func (b *Builder) Grow(n int) {
+	b.written()
+	if n < 0 {
+		panic("strings.Builder.Grow: negative count")
+	}
+	if cap(b.buf)-len(b.buf) >= n {
+		return
+	}
+	roomy := make([]byte, len(b.buf), 2*cap(b.buf)+n)
+	copy(roomy, b.buf)
+	b.buf = roomy
+}
+
+// Write adds the bytes of p. The error is always nil.
+func (b *Builder) Write(p []byte) (int, error) {
+	b.written()
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+// WriteByte adds the byte c. The error is always nil.
+func (b *Builder) WriteByte(c byte) error {
+	b.written()
+	b.buf = append(b.buf, c)
+	return nil
+}
+
+// WriteRune adds the UTF-8 encoding of r and returns its length. A value
+// that is no code point is written as U+FFFD. The error is always nil.
+func (b *Builder) WriteRune(r rune) (int, error) {
+	b.written()
+	before := len(b.buf)
+	b.buf = append(b.buf, string(r)...)
+	return len(b.buf) - before, nil
+}
+
+// WriteString adds s. The error is always nil.
+func (b *Builder) WriteString(s string) (int, error) {
+	b.written()
+	b.buf = append(b.buf, s...)
+	return len(s), nil
+}
+
+"""#),
         GoSourceFile(
             path: "$GOROOT/src/strings/reader.go",
             text: #"""
 // Package strings is the part of strings that is written in Go.
 package strings
 
-import "io"
+import (
+	"errors"
+	"io"
+	"unicode/utf8"
+)
 
-// A Reader reads the bytes of a string, as an io.Reader.
+// A Reader reads the bytes of a string, as an io.Reader, and a byte or a
+// character at a time, from any place of it.
 type Reader struct {
-	s string
-	i int // how far reading has come
+	s        string
+	i        int // how far reading has come
+	prevRune int // where the character just read began, or negative
 }
 
 // Len is the number of bytes not yet read.
@@ -7231,20 +7546,773 @@ func (r *Reader) Len() int {
 }
 
 // Size is the length of the whole string, read or not.
-func (r *Reader) Size() int { return len(r.s) }
+func (r *Reader) Size() int64 { return int64(len(r.s)) }
 
 // Read copies the next bytes of the string into b.
 func (r *Reader) Read(b []byte) (n int, err error) {
 	if r.i >= len(r.s) {
 		return 0, io.EOF
 	}
-	n = copy(b, r.s[r.i:])
+	r.prevRune = -1
+	n = r.copyFrom(b, r.i)
 	r.i += n
 	return n, nil
 }
 
+// copyFrom copies the bytes of the string from at on into b, as
+// copy(b, r.s[at:]) does, and returns how many. A string of the VM is
+// whole characters and a slice of one is a copy, so the bytes that end a
+// character begun before at are copied one by one, and the rest as the
+// characters that reach the end of b and no more of the string.
+func (r *Reader) copyFrom(b []byte, at int) int {
+	n := 0
+	for n < len(b) && at < len(r.s) && r.s[at]&0xC0 == 0x80 {
+		b[n] = r.s[at]
+		n++
+		at++
+	}
+	end := min(at+len(b)-n, len(r.s))
+	for end < len(r.s) && r.s[end]&0xC0 == 0x80 {
+		end++
+	}
+	return n + copy(b[n:], r.s[at:end])
+}
+
 // NewReader returns a Reader of s.
-func NewReader(s string) *Reader { return &Reader{s: s, i: 0} }
+func NewReader(s string) *Reader { return &Reader{s: s, i: 0, prevRune: -1} }
+
+// ReadAt copies the bytes from off on into b, and moves nothing. Fewer
+// bytes than b holds come with io.EOF.
+func (r *Reader) ReadAt(b []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, errors.New("strings.Reader.ReadAt: negative offset")
+	}
+	if off >= int64(len(r.s)) {
+		return 0, io.EOF
+	}
+	n = r.copyFrom(b, int(off))
+	if n < len(b) {
+		err = io.EOF
+	}
+	return n, err
+}
+
+// ReadByte reads the next byte.
+func (r *Reader) ReadByte() (byte, error) {
+	r.prevRune = -1
+	if r.i >= len(r.s) {
+		return 0, io.EOF
+	}
+	b := r.s[r.i]
+	r.i++
+	return b, nil
+}
+
+// UnreadByte steps back over one byte.
+func (r *Reader) UnreadByte() error {
+	if r.i <= 0 {
+		return errors.New("strings.Reader.UnreadByte: at beginning of string")
+	}
+	r.prevRune = -1
+	r.i--
+	return nil
+}
+
+// ReadRune reads the next character, and says how many bytes it is.
+func (r *Reader) ReadRune() (ch rune, size int, err error) {
+	if r.i >= len(r.s) {
+		r.prevRune = -1
+		return 0, 0, io.EOF
+	}
+	r.prevRune = r.i
+	ch, size = rune(r.s[r.i]), 1
+	switch {
+	case ch < utf8.RuneSelf:
+	case ch < 0xC0:
+		// A byte from inside a character, after a read that ended
+		// there: no character, and nothing to slice the string at.
+		ch = utf8.RuneError
+	default:
+		ch, size = utf8.DecodeRuneInString(r.s[r.i:min(r.i+utf8.UTFMax, len(r.s))])
+	}
+	r.i += size
+	return ch, size, nil
+}
+
+// UnreadRune steps back over the character ReadRune has just read. After
+// anything else it is an error.
+func (r *Reader) UnreadRune() error {
+	if r.i <= 0 {
+		return errors.New("strings.Reader.UnreadRune: at beginning of string")
+	}
+	if r.prevRune < 0 {
+		return errors.New("strings.Reader.UnreadRune: previous operation was not ReadRune")
+	}
+	r.i = r.prevRune
+	r.prevRune = -1
+	return nil
+}
+
+// Seek moves to offset, counted from the start, from here, or from the
+// end as whence says, and returns the place from the start. It may be
+// past the end; before the start is an error.
+func (r *Reader) Seek(offset int64, whence int) (int64, error) {
+	r.prevRune = -1
+	var from int64
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		from = int64(r.i)
+	case io.SeekEnd:
+		from = int64(len(r.s))
+	default:
+		return 0, errors.New("strings.Reader.Seek: invalid whence")
+	}
+	if from+offset < 0 {
+		return 0, errors.New("strings.Reader.Seek: negative position")
+	}
+	r.i = int(from + offset)
+	return from + offset, nil
+}
+
+// WriteTo writes what has not been read to w, and has then read it.
+func (r *Reader) WriteTo(w io.Writer) (n int64, err error) {
+	r.prevRune = -1
+	if r.i >= len(r.s) {
+		return 0, nil
+	}
+	rest := r.s[r.i:]
+	wrote, err := io.WriteString(w, rest)
+	if wrote > len(rest) {
+		panic("strings.Reader.WriteTo: invalid WriteString count")
+	}
+	r.i += wrote
+	if wrote != len(rest) && err == nil {
+		err = io.ErrShortWrite
+	}
+	return int64(wrote), err
+}
+
+// Reset makes r a Reader of s, at its start.
+func (r *Reader) Reset(s string) {
+	r.s = s
+	r.i = 0
+	r.prevRune = -1
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/strings/replacer.go",
+            text: #"""
+package strings
+
+import (
+	"io"
+	"strings"
+)
+
+// A Replacer replaces each of a list of strings by the string that is paired
+// with it. It looks for them at one place of the text after another, from
+// the start, and where several are found at one place it takes the one
+// that came first among the arguments. What it has replaced is not looked
+// at again.
+type Replacer struct {
+	olds, news []string
+	how        int
+	// starts[b] is set when an old string begins with the byte b; nil
+	// when one of them is empty, which is found everywhere.
+	starts []bool
+}
+
+// How a Replacer writes, which is all that tells Go's four algorithms
+// apart: the text between two replacements and the replacements are
+// written as they are found, each with a call of its own.
+const (
+	// One pair, of an old string longer than a byte.
+	replacesOneString = iota
+	// Every old string is one byte and so is every new one: a byte that
+	// is replaced by itself is not found at all.
+	replacesBytes
+	// Every old string is one byte.
+	replacesBytesByStrings
+	// Anything else.
+	replacesStrings
+)
+
+// NewReplacer returns a Replacer of the pairs oldnew: an old string, then
+// what replaces it. A string without its pair panics.
+func NewReplacer(oldnew ...string) *Replacer {
+	if len(oldnew)%2 == 1 {
+		panic("strings.NewReplacer: odd argument count")
+	}
+	r := &Replacer{how: replacesBytes}
+	if len(oldnew) == 2 && len(oldnew[0]) > 1 {
+		r.how = replacesOneString
+	}
+	seen := make([]bool, 256)
+	r.starts = make([]bool, 256)
+	for i := 0; i < len(oldnew); i += 2 {
+		old, new := oldnew[i], oldnew[i+1]
+		switch {
+		case r.how == replacesOneString:
+		case len(old) != 1:
+			r.how = replacesStrings
+		case len(new) != 1 && r.how == replacesBytes:
+			r.how = replacesBytesByStrings
+		}
+		if old == "" {
+			r.starts = nil
+		} else if r.starts != nil {
+			r.starts[old[0]] = true
+		}
+		r.olds = append(r.olds, old)
+		r.news = append(r.news, new)
+	}
+	if r.how != replacesBytes {
+		return r
+	}
+	// The first pair of a byte decides, also that it stays what it is.
+	for i, old := range r.olds {
+		if !seen[old[0]] && old == r.news[i] {
+			r.starts[old[0]] = false
+		}
+		seen[old[0]] = true
+	}
+	return r
+}
+
+// match is the pair whose old string is at s[i:], the first of them, or
+// -1. An empty old string is not found when skipEmpty is set.
+func (r *Replacer) match(s string, i int, skipEmpty bool) int {
+	for k, old := range r.olds {
+		end := i + len(old)
+		if end > len(s) || end == i && skipEmpty {
+			continue
+		}
+		if end == i || s[i] == old[0] && s[i:end] == old {
+			return k
+		}
+	}
+	return -1
+}
+
+// each calls kept with every stretch of s that stays and replaced with
+// what replaces every string found, in order, as the algorithm of Go that
+// r.how names writes them. It stops at the first error either returns.
+func (r *Replacer) each(s string, kept, replaced func(string) error) error {
+	if r.how == replacesOneString {
+		pieces := strings.Split(s, r.olds[0])
+		for _, piece := range pieces[:len(pieces)-1] {
+			if err := kept(piece); err != nil {
+				return err
+			}
+			if err := replaced(r.news[0]); err != nil {
+				return err
+			}
+		}
+		return kept(pieces[len(pieces)-1])
+	}
+	bytes := r.how != replacesStrings
+	last := 0
+	afterEmpty := false
+	for i := 0; i <= len(s); {
+		k := -1
+		if r.starts == nil || i < len(s) && r.starts[s[i]] {
+			k = r.match(s, i, afterEmpty)
+		}
+		if k < 0 {
+			afterEmpty = false
+			i++
+			continue
+		}
+		afterEmpty = r.olds[k] == ""
+		// Go's byte algorithms write no empty stretch; the general
+		// one writes every stretch.
+		if !bytes || last != i {
+			if err := kept(s[last:i]); err != nil {
+				return err
+			}
+		}
+		if err := replaced(r.news[k]); err != nil {
+			return err
+		}
+		i += len(r.olds[k])
+		last = i
+	}
+	if last != len(s) {
+		return kept(s[last:])
+	}
+	return nil
+}
+
+// Replace is s with every replacement made.
+func (r *Replacer) Replace(s string) string {
+	var pieces []string
+	add := func(piece string) error {
+		pieces = append(pieces, piece)
+		return nil
+	}
+	r.each(s, add, add)
+	return strings.Join(pieces, "")
+}
+
+// WriteString writes s to w with every replacement made, and returns the
+// number of bytes written and the first error of w.
+func (r *Replacer) WriteString(w io.Writer, s string) (n int, err error) {
+	sw, hasWriteString := w.(io.StringWriter)
+	text := func(piece string) error {
+		var wrote int
+		var failure error
+		if hasWriteString {
+			wrote, failure = sw.WriteString(piece)
+		} else {
+			wrote, failure = w.Write([]byte(piece))
+		}
+		n += wrote
+		return failure
+	}
+	replaced := text
+	if r.how == replacesBytes || r.how == replacesBytesByStrings {
+		// Go keeps the replacements of bytes as bytes, and writes them
+		// so to a writer that takes strings too.
+		replaced = func(piece string) error {
+			wrote, failure := w.Write([]byte(piece))
+			n += wrote
+			return failure
+		}
+	}
+	err = r.each(s, text, replaced)
+	return n, err
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/strings/strings.go",
+            text: #"""
+package strings
+
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
+// The functions of this file are built on the searches the run-time library
+// does natively (Index, Count, Split, Join, ContainsRune), so that a call
+// costs VM instructions for each piece or each character it must look at
+// and not for each byte of the string. A tail s[i:] is a copy in the VM;
+// no loop here takes one for each step.
+
+// lastRune decodes the character that ends s[:end], and its width: for
+// bytes that end no character, utf8.RuneError and 1.
+func lastRune(s string, end int) (rune, int) {
+	start := end - 1
+	if s[start] < utf8.RuneSelf {
+		return rune(s[start]), 1
+	}
+	for start > 0 && start > end-utf8.UTFMax && s[start]&0xC0 == 0x80 {
+		start--
+	}
+	r, width := utf8.DecodeRuneInString(s[start:end])
+	if start+width != end {
+		return utf8.RuneError, 1
+	}
+	return r, width
+}
+
+// runeAt decodes the character that begins at s[i], and its width.
+func runeAt(s string, i int) (rune, int) {
+	if s[i] < utf8.RuneSelf {
+		return rune(s[i]), 1
+	}
+	return utf8.DecodeRuneInString(s[i:min(i+utf8.UTFMax, len(s))])
+}
+
+// Compare is -1, 0, or 1 as a sorts before, with, or after b by its bytes.
+func Compare(a, b string) int {
+	switch {
+	case a == b:
+		return 0
+	case a < b:
+		return -1
+	}
+	return 1
+}
+
+// Cut divides s at the first sep: what is before it, what is after it, and
+// whether it is there at all. Without it, before is s.
+func Cut(s, sep string) (before, after string, found bool) {
+	at := strings.Index(s, sep)
+	if at < 0 {
+		return s, "", false
+	}
+	return s[:at], s[at+len(sep):], true
+}
+
+// CutPrefix is s without the prefix it begins with, and whether it did.
+func CutPrefix(s, prefix string) (after string, found bool) {
+	if strings.HasPrefix(s, prefix) {
+		return s[len(prefix):], true
+	}
+	return s, false
+}
+
+// CutSuffix is s without the suffix it ends with, and whether it did.
+func CutSuffix(s, suffix string) (before string, found bool) {
+	if strings.HasSuffix(s, suffix) {
+		return s[:len(s)-len(suffix)], true
+	}
+	return s, false
+}
+
+// ReplaceAll is s with every old replaced by new.
+func ReplaceAll(s, old, new string) string { return Replace(s, old, new, -1) }
+
+// Replace is s with the first n occurrences of old replaced by new, all of
+// them when n is negative. An empty old is found before each character
+// and at the end.
+func Replace(s, old, new string, n int) string {
+	if old == new || n == 0 {
+		return s
+	}
+	found := strings.Count(s, old)
+	if found == 0 {
+		return s
+	}
+	if n < 0 || n > found {
+		n = found
+	}
+	// The pieces between occurrences, joined by new where an occurrence
+	// is replaced and by old where it stays.
+	pieces := strings.Split(s, old)
+	if old == "" {
+		// The pieces are the characters. An occurrence is before each
+		// and after the last, so n of them are around an empty piece
+		// and the first n-1 characters.
+		around := append([]string{""}, pieces[:n-1]...)
+		return strings.Join(around, new) + new + strings.Join(pieces[n-1:], "")
+	}
+	if n == found {
+		return strings.Join(pieces, new)
+	}
+	return strings.Join(pieces[:n], new) + new + strings.Join(pieces[n:], old)
+}
+
+// split is the work of the four Split functions that take a count or keep
+// the separator: at most n pieces of s, all of them for a negative n, each
+// but the last with sep after it when after is set.
+func split(s, sep string, after bool, n int) []string {
+	if n == 0 {
+		return nil
+	}
+	pieces := strings.Split(s, sep)
+	if sep == "" {
+		// One piece for each character, none for an empty string.
+		if n < 0 || n >= len(pieces) {
+			return pieces
+		}
+	} else if n < 0 {
+		n = len(pieces)
+	} else if n > len(s)+1 {
+		n = len(s) + 1
+	}
+	if after && sep != "" {
+		for i := 0; i < len(pieces)-1 && i < n-1; i++ {
+			pieces[i] += sep
+		}
+	}
+	if n == len(pieces) && cap(pieces) == n {
+		return pieces
+	}
+	// Go's result has room for n pieces, however many there are.
+	limited := make([]string, n)
+	if len(pieces) <= n {
+		return limited[:copy(limited, pieces)]
+	}
+	copy(limited, pieces[:n-1])
+	limited[n-1] = strings.Join(pieces[n-1:], sep)
+	return limited
+}
+
+// SplitN is the pieces of s between separators, at most n of them: the
+// last is then the rest of s. A negative n means all, and 0 none.
+func SplitN(s, sep string, n int) []string { return split(s, sep, false, n) }
+
+// SplitAfter is the pieces of s that each end with a separator, and what
+// follows the last one.
+func SplitAfter(s, sep string) []string { return split(s, sep, true, -1) }
+
+// SplitAfterN is SplitAfter with a count as that of SplitN.
+func SplitAfterN(s, sep string, n int) []string { return split(s, sep, true, n) }
+
+// IndexAny is where the first character of s that is one of chars begins,
+// or -1.
+func IndexAny(s, chars string) int {
+	if chars == "" {
+		return -1
+	}
+	for i, r := range s {
+		if strings.ContainsRune(chars, r) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ContainsAny reports whether a character of chars is in s.
+func ContainsAny(s, chars string) bool { return IndexAny(s, chars) >= 0 }
+
+// LastIndexAny is where the last character of s that is one of chars
+// begins, or -1.
+func LastIndexAny(s, chars string) int {
+	if chars == "" {
+		return -1
+	}
+	for end := len(s); end > 0; {
+		r, width := lastRune(s, end)
+		end -= width
+		if strings.ContainsRune(chars, r) {
+			return end
+		}
+	}
+	return -1
+}
+
+// LastIndexByte is the index of the last byte c of s, or -1.
+func LastIndexByte(s string, c byte) int {
+	if c < utf8.RuneSelf {
+		// A byte of ASCII is a character, which a search finds whole.
+		return strings.LastIndex(s, string(rune(c)))
+	}
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// firstWhere is where the first character c of s with f(c) == want
+// begins, or -1.
+func firstWhere(s string, f func(rune) bool, want bool) int {
+	for i, r := range s {
+		if f(r) == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastWhere is where the last character c of s with f(c) == want begins
+// and ends, or -1 and 0.
+func lastWhere(s string, f func(rune) bool, want bool) (start, end int) {
+	for end = len(s); end > 0; end = start {
+		r, width := lastRune(s, end)
+		start = end - width
+		if f(r) == want {
+			return start, end
+		}
+	}
+	return -1, 0
+}
+
+// IndexFunc is where the first character of s that satisfies f begins, or
+// -1.
+func IndexFunc(s string, f func(rune) bool) int { return firstWhere(s, f, true) }
+
+// LastIndexFunc is where the last character of s that satisfies f begins,
+// or -1.
+func LastIndexFunc(s string, f func(rune) bool) int {
+	start, _ := lastWhere(s, f, true)
+	return start
+}
+
+// ContainsFunc reports whether a character of s satisfies f.
+func ContainsFunc(s string, f func(rune) bool) bool { return firstWhere(s, f, true) >= 0 }
+
+// TrimLeftFunc is s without the characters at its start that satisfy f.
+func TrimLeftFunc(s string, f func(rune) bool) string {
+	start := firstWhere(s, f, false)
+	if start < 0 {
+		return ""
+	}
+	return s[start:]
+}
+
+// TrimRightFunc is s without the characters at its end that satisfy f.
+func TrimRightFunc(s string, f func(rune) bool) string {
+	_, end := lastWhere(s, f, false)
+	return s[:end]
+}
+
+// TrimFunc is s without the characters at its start and at its end that
+// satisfy f.
+func TrimFunc(s string, f func(rune) bool) string {
+	return TrimRightFunc(TrimLeftFunc(s, f), f)
+}
+
+// TrimLeft is s without the characters at its start that are in cutset.
+func TrimLeft(s, cutset string) string {
+	if s == "" || cutset == "" {
+		return s
+	}
+	for i, r := range s {
+		if !strings.ContainsRune(cutset, r) {
+			return s[i:]
+		}
+	}
+	return ""
+}
+
+// TrimRight is s without the characters at its end that are in cutset.
+func TrimRight(s, cutset string) string {
+	if cutset == "" {
+		return s
+	}
+	end := len(s)
+	for end > 0 {
+		r, width := lastRune(s, end)
+		if !strings.ContainsRune(cutset, r) {
+			break
+		}
+		end -= width
+	}
+	return s[:end]
+}
+
+// Trim is s without the characters at its start and at its end that are
+// in cutset.
+func Trim(s, cutset string) string {
+	if s == "" || cutset == "" {
+		return s
+	}
+	return TrimRight(TrimLeft(s, cutset), cutset)
+}
+
+// FieldsFunc is the runs of characters of s that do not satisfy f, which
+// is asked once about each character, in order.
+func FieldsFunc(s string, f func(rune) bool) []string {
+	// Where each field begins and ends, one after the other.
+	var bounds []int
+	inside := false
+	for i, r := range s {
+		if f(r) == inside {
+			bounds = append(bounds, i)
+			inside = !inside
+		}
+	}
+	if inside {
+		bounds = append(bounds, len(s))
+	}
+	fields := make([]string, len(bounds)/2)
+	for i := range fields {
+		fields[i] = s[bounds[2*i]:bounds[2*i+1]]
+	}
+	return fields
+}
+
+// Map is s with each character replaced by what mapping makes of it, and
+// dropped where that is negative.
+func Map(mapping func(rune) rune, s string) string {
+	var mapped []byte
+	for _, r := range s {
+		if to := mapping(r); to >= 0 {
+			mapped = append(mapped, string(to)...)
+		}
+	}
+	return string(mapped)
+}
+
+// titleCase is unicode.ToTitle: the upper case of r, but for the letters
+// that are two letters in one, whose title case has only the first in
+// upper case, and for Georgian, whose title case is the letter itself.
+func titleCase(r rune) rune {
+	switch {
+	case r >= 0x1C4 && r <= 0x1CC:
+		return r - (r-0x1C4)%3 + 1
+	case r >= 0x1F1 && r <= 0x1F3:
+		return 0x1F2
+	case r >= 0x10D0 && r <= 0x10FA, r >= 0x10FD && r <= 0x10FF:
+		return r
+	}
+	return unicode.ToUpper(r)
+}
+
+// ToTitle is s with every letter in its title case.
+func ToTitle(s string) string {
+	var mapped []byte
+	for _, r := range s {
+		mapped = append(mapped, string(titleCase(r))...)
+	}
+	return string(mapped)
+}
+
+// beginsWord reports whether a letter after r is the first of a word, as
+// Title sees words: r is no letter, digit, or underscore, and is ASCII or
+// white space.
+func beginsWord(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		return false
+	case r < utf8.RuneSelf:
+		return true
+	case unicode.IsLetter(r), unicode.IsDigit(r):
+		return false
+	}
+	return unicode.IsSpace(r)
+}
+
+// Title is s with the first letter of each word in title case.
+//
+// Deprecated: as in Go, its words are not those of Unicode.
+func Title(s string) string {
+	var mapped []byte
+	before := ' '
+	for _, r := range s {
+		if beginsWord(before) {
+			mapped = append(mapped, string(titleCase(r))...)
+		} else {
+			mapped = append(mapped, string(r)...)
+		}
+		before = r
+	}
+	return string(mapped)
+}
+
+// folded is one character for all those that differ from r by case only:
+// the lower case of the upper case, but for the two letters i of Turkish,
+// which fold to nothing else.
+func folded(r rune) rune {
+	if r == 0x130 || r == 0x131 {
+		return r
+	}
+	return unicode.ToLower(unicode.ToUpper(r))
+}
+
+// EqualFold reports whether s and t are equal but for the case of their
+// letters, by Unicode's simple case folding.
+func EqualFold(s, t string) bool {
+	if s == t {
+		return true
+	}
+	if utf8.RuneCountInString(s) == len(s) && utf8.RuneCountInString(t) == len(t) {
+		// One byte to a character: letters of ASCII fold among
+		// themselves alone, as ToLower maps them.
+		return len(s) == len(t) && strings.ToLower(s) == strings.ToLower(t)
+	}
+	at := 0
+	for _, a := range s {
+		if at >= len(t) {
+			return false
+		}
+		b, width := runeAt(t, at)
+		at += width
+		if a != b && folded(a) != folded(b) {
+			return false
+		}
+	}
+	return at == len(t)
+}
 
 """#),
     ]

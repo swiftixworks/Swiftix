@@ -319,7 +319,7 @@ struct GoHTTPServerTests: GoTestHarness {
         }
         #expect(GoSourceLibrary.declares(path: "io", member: "ReadAll"))
         #expect(!GoSourceLibrary.declares(path: "io", member: "EOF"))
-        #expect(GoSourceLibraryText.declared["strings"] == ["NewReader", "Reader"])
+        #expect(GoSourceLibraryText.declared["strings"]?.isSuperset(of: ["NewReader", "Reader"]) == true)
     }
 
     // MARK: - Diagnostics
