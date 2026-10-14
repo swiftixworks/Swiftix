@@ -37,9 +37,9 @@ enum GoSourceLibraryText {
             "Context", "DeadlineExceeded", "TODO", "WithCancel", "WithCancelCause", "WithDeadline",
             "WithDeadlineCause", "WithTimeout", "WithTimeoutCause", "WithValue", "WithoutCancel",
             "afterFuncCtx", "backgroundCtx", "cancelCtx", "cancelCtxKey", "cancelCtxKeyType",
-            "canceler", "contextName", "deadlineExceededError", "emptyCtx", "parentCancelCtx",
-            "removeChild", "stringer", "stringify", "timerCtx", "todoCtx", "value", "valueCtx",
-            "withCancel", "withoutCancelCtx",
+            "canceler", "causer", "contextName", "deadlineExceededError", "emptyCtx",
+            "parentCancelCtx", "removeChild", "stringer", "stringify", "timerCtx", "todoCtx",
+            "value", "valueCtx", "withCancel", "withoutCancelCtx",
         ],
         "io": [
             "Closer", "Copy", "Discard", "ErrNoProgress", "ErrShortBuffer", "ErrShortWrite",
@@ -55,16 +55,18 @@ enum GoSourceLibraryText {
             "standardError", "std",
         ],
         "net/http": [
-            "CanonicalHeaderKey", "Client", "DefaultClient", "DefaultMaxHeaderBytes",
+            "CanonicalHeaderKey", "Client", "ConnState", "DefaultClient", "DefaultMaxHeaderBytes",
             "DefaultServeMux", "DetectContentType", "ErrAbortHandler", "ErrBodyNotAllowed",
-            "ErrBodyReadAfterClose", "ErrContentLength", "ErrLineTooLong", "ErrServerClosed",
-            "ErrUseLastResponse", "Error", "Flusher", "Get", "Handle", "HandleFunc", "Handler",
-            "HandlerFunc", "Head", "Header", "ListenAndServe", "MaxBytesError", "MaxBytesReader",
-            "MethodConnect", "MethodDelete", "MethodGet", "MethodHead", "MethodOptions",
-            "MethodPatch", "MethodPost", "MethodPut", "MethodTrace", "NewRequest", "NewServeMux",
-            "NoBody", "NotFound", "NotFoundHandler", "ParseHTTPVersion", "Post", "PostForm",
-            "Redirect", "RedirectHandler", "Request", "Response", "ResponseWriter", "Serve",
-            "ServeMux", "Server", "StatusAccepted", "StatusAlreadyReported", "StatusBadGateway",
+            "ErrBodyReadAfterClose", "ErrContentLength", "ErrHandlerTimeout", "ErrLineTooLong",
+            "ErrServerClosed", "ErrUseLastResponse", "Error", "Flusher", "Get", "Handle",
+            "HandleFunc", "Handler", "HandlerFunc", "Head", "Header", "ListenAndServe",
+            "MaxBytesError", "MaxBytesReader", "MethodConnect", "MethodDelete", "MethodGet",
+            "MethodHead", "MethodOptions", "MethodPatch", "MethodPost", "MethodPut", "MethodTrace",
+            "NewRequest", "NewRequestWithContext", "NewServeMux", "NoBody", "NotFound",
+            "NotFoundHandler", "ParseHTTPVersion", "Post", "PostForm", "Redirect",
+            "RedirectHandler", "Request", "Response", "ResponseWriter", "Serve", "ServeMux",
+            "Server", "ServerContextKey", "StateActive", "StateClosed", "StateHijacked",
+            "StateIdle", "StateNew", "StatusAccepted", "StatusAlreadyReported", "StatusBadGateway",
             "StatusBadRequest", "StatusConflict", "StatusContinue", "StatusCreated",
             "StatusEarlyHints", "StatusExpectationFailed", "StatusFailedDependency",
             "StatusForbidden", "StatusFound", "StatusGatewayTimeout", "StatusGone",
@@ -83,26 +85,29 @@ enum GoSourceLibraryText {
             "StatusTemporaryRedirect", "StatusText", "StatusTooEarly", "StatusTooManyRequests",
             "StatusUnauthorized", "StatusUnavailableForLegalReasons", "StatusUnprocessableEntity",
             "StatusUnsupportedMediaType", "StatusUpgradeRequired", "StatusUseProxy",
-            "StatusVariantAlsoNegotiates", "StripPrefix", "TimeFormat", "TrailerPrefix",
-            "badRequestError", "badStringError", "body", "bodyAllowedForStatus", "bodyEOFSignal",
-            "bufferBeforeChunkingSize", "cleanPath", "closeBody", "combineRelationships",
-            "commonPath", "compareSegments", "conn", "connReader", "connWriteBufferSize",
+            "StatusVariantAlsoNegotiates", "StripPrefix", "TimeFormat", "TimeoutHandler",
+            "TrailerPrefix", "badRequestError", "badStringError", "body", "bodyAllowedForStatus",
+            "bodyEOFSignal", "bodySignal", "bufferBeforeChunkingSize", "cleanPath", "cloneValues",
+            "closeBody", "closeConn", "combineRelationships", "commonPath", "compareSegments",
+            "conn", "connReader", "connWriteBufferSize", "contextKey", "deadlineError",
             "defaultMaxHeaderBytes", "describeConflict", "differencePath", "discardBody",
-            "disjoint", "equivalent", "errMissingHost", "errTooLarge", "errTrailerEOF",
-            "errorHeaders", "exactMatch", "expectContinueReader", "globalOptionsHandler",
-            "hasToken", "hexEscapeNonASCII", "htmlEscape", "inverseRelationship", "isAbortHandler",
-            "isProtocolSwitchResponse", "isSpace", "isTokenBoundary", "isUnsupportedTEError",
-            "isValidWildcardName", "matchMethodAndPath", "matchPath", "matchingPath",
-            "matchingSegment", "maxBytesReader", "maxFormSize", "maxPostHandlerReadBytes",
-            "moreGeneral", "moreSpecific", "muxEntry", "newConnReader", "noBody", "outgoingLength",
-            "overlaps", "parseContentLength", "parseHTTPVersion", "parseHexUint", "parsePattern",
-            "parsePostForm", "parseRequest", "pathClean", "pathUnescape", "pattern",
+            "disjoint", "equivalent", "errDeadline", "errMissingHost", "errTooLarge",
+            "errTrailerEOF", "errorHeaders", "exactMatch", "expectContinueReader",
+            "globalOptionsHandler", "hasToken", "hexEscapeNonASCII", "htmlEscape",
+            "inverseRelationship", "isAbortHandler", "isProtocolSwitchResponse", "isSpace",
+            "isTokenBoundary", "isUnsupportedTEError", "isValidWildcardName", "matchMethodAndPath",
+            "matchPath", "matchingPath", "matchingSegment", "maxBytesReader", "maxFormSize",
+            "maxPostHandlerReadBytes", "moreGeneral", "moreSpecific", "muxEntry", "newConnReader",
+            "newRequest", "newRequestCanceler", "noBody", "outgoingLength", "overlaps",
+            "parseContentLength", "parseHTTPVersion", "parseHexUint", "parsePattern",
+            "parsePostForm", "parseRequest", "pathClean", "pathUnescape", "pattern", "pendingRead",
             "protocolError", "readRequest", "readResponse", "redirectHandler", "refererForURL",
-            "relationship", "requestPath", "response", "segment", "send", "shouldClose",
-            "splitHostPort", "splitPath", "statusError", "statusLine", "stripHostPort",
-            "stripPassword", "transfer", "transportError", "trimOWS", "trimString",
-            "unsupportedTEError", "urlErrorOp", "validHeaderKey", "validHostHeader",
-            "valuesContainToken", "writeRequest",
+            "relationship", "requestBody", "requestCanceler", "requestPath", "response", "segment",
+            "send", "serverCtx", "shouldClose", "shutdownPollIntervalMax", "splitHostPort",
+            "splitPath", "statusError", "statusLine", "stripHostPort", "stripPassword",
+            "timeoutError", "timeoutHandler", "timeoutWriter", "trackedListener", "transfer",
+            "transportError", "trimOWS", "trimString", "unsupportedTEError", "urlErrorOp",
+            "validHeaderKey", "validHostHeader", "valuesContainToken", "writeRequest",
         ],
         "net/url": [
             "Error", "EscapeError", "InvalidHostError", "Parse", "ParseQuery", "ParseRequestURI",
@@ -2463,15 +2468,27 @@ func withCancel(parent Context) *cancelCtx {
 // Cause returns why c was cancelled: the cause its cancel function was
 // given, or else what c.Err returns. It is nil until c is cancelled.
 func Cause(c Context) error {
-	if cc, ok := c.Value(cancelCtxKey).(*cancelCtx); ok {
-		cc.mu.Lock()
-		cause := cc.cause
-		cc.mu.Unlock()
-		return cause
+	// The cancelCtx is asked through an interface, so that a program that
+	// has none, such as one whose net/http client calls Cause, is not
+	// linked with one.
+	if cc, ok := c.Value(cancelCtxKey).(causer); ok {
+		return cc.cancelCause()
 	}
 	// No cancelCtx is under c: it is a context of the program's own, or one
 	// that is never cancelled.
 	return c.Err()
+}
+
+// A causer is a *cancelCtx, as Cause finds it.
+type causer interface {
+	cancelCause() error
+}
+
+func (c *cancelCtx) cancelCause() error {
+	c.mu.Lock()
+	cause := c.cause
+	c.mu.Unlock()
+	return cause
 }
 
 // AfterFunc arranges for f to run in a goroutine of its own once ctx is
@@ -2721,15 +2738,14 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 		c.cancel(true, DeadlineExceeded, cause) // the deadline has passed
 		return c, func() { c.cancel(false, Canceled, nil) }
 	}
-	if c.Err() == nil {
-		// The timer: it ends with the context, whichever comes first.
-		go func() {
-			select {
-			case <-time.After(dur):
-				c.cancel(true, DeadlineExceeded, cause)
-			case <-c.done:
-			}
-		}()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		// The timer, which cancel stops: a context that ends sooner leaves
+		// nothing waiting for the deadline.
+		c.timer = time.AfterFunc(dur, func() {
+			c.cancel(true, DeadlineExceeded, cause)
+		})
 	}
 	return c, func() { c.cancel(true, Canceled, nil) }
 }
@@ -2737,6 +2753,7 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 // A timerCtx is a cancelCtx with a deadline, which a timer enforces.
 type timerCtx struct {
 	cancelCtx
+	timer *time.Timer // under cancelCtx.mu
 
 	deadline time.Time
 }
@@ -2757,6 +2774,12 @@ func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
 		// Take this timerCtx out of the children of its parent.
 		removeChild(c.cancelCtx.Context, c)
 	}
+	c.mu.Lock()
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.mu.Unlock()
 }
 
 // WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).
@@ -3378,6 +3401,156 @@ func Panicln(v ...any) {
 extension GoSourceLibraryText {
     static let netHttp: [GoSourceFile] = [
         GoSourceFile(
+            path: "$GOROOT/src/net/http/cancel.go",
+            text: #"""
+package http
+
+import (
+	"context"
+	"net"
+	"sync"
+	"time"
+)
+
+// A requestCanceler gives up on a request a client sends when the
+// request's context is done or the client's Timeout passes: it closes the
+// connection, which wakes whatever waits on it, and keeps the reason, which
+// the error of the request then is.
+type requestCanceler struct {
+	mu       sync.Mutex
+	conn     net.Conn
+	err      error // why the request was given up; nil while it runs
+	timedOut bool  // whether that was the Timeout of the client
+	closed   bool  // whether the connection was closed
+	stopped  bool
+	stop     chan struct{}
+	timer    *time.Timer
+}
+
+// newRequestCanceler watches ctx, and gives the request timeout to finish
+// when it is more than zero. It returns nil when there is nothing to watch.
+func newRequestCanceler(ctx context.Context, timeout time.Duration) *requestCanceler {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+	if done == nil && timeout <= 0 {
+		return nil
+	}
+	rc := &requestCanceler{stop: make(chan struct{})}
+	if timeout > 0 {
+		rc.timer = time.AfterFunc(timeout, func() {
+			rc.cancel(context.DeadlineExceeded, true)
+		})
+	}
+	if done != nil {
+		select {
+		case <-done:
+			// Done already: the request is not sent at all.
+			rc.cancel(context.Cause(ctx), false)
+			return rc
+		default:
+		}
+		go func() {
+			select {
+			case <-done:
+				rc.cancel(context.Cause(ctx), false)
+			case <-rc.stop:
+			}
+		}()
+	}
+	return rc
+}
+
+// cancel gives up on the request for err. Only the first call does.
+func (rc *requestCanceler) cancel(err error, timedOut bool) {
+	rc.mu.Lock()
+	if rc.err != nil || rc.stopped {
+		rc.mu.Unlock()
+		return
+	}
+	rc.err = err
+	rc.timedOut = timedOut
+	conn := rc.conn
+	rc.mu.Unlock()
+	if conn != nil {
+		rc.closeConn(conn)
+	}
+}
+
+// reason returns why the request was given up, or nil.
+func (rc *requestCanceler) reason() error {
+	if rc == nil {
+		return nil
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.err
+}
+
+// attach makes conn the connection a cancel closes, and reports false,
+// without attaching it, when the request was given up already.
+func (rc *requestCanceler) attach(conn net.Conn) bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if rc.err != nil {
+		return false
+	}
+	rc.conn = conn
+	rc.closed = false
+	return true
+}
+
+// closeConn closes conn once, whether the request or a cancel asks first.
+func (rc *requestCanceler) closeConn(conn net.Conn) {
+	rc.mu.Lock()
+	closed := rc.closed && rc.conn == conn
+	if rc.conn == conn {
+		rc.closed = true
+	}
+	rc.mu.Unlock()
+	if !closed {
+		conn.Close()
+	}
+}
+
+// finish ends the watch: the response has been read, or the request
+// failed.
+func (rc *requestCanceler) finish() {
+	if rc == nil {
+		return
+	}
+	rc.mu.Lock()
+	stopped := rc.stopped
+	rc.stopped = true
+	rc.mu.Unlock()
+	if stopped {
+		return
+	}
+	if rc.timer != nil {
+		rc.timer.Stop()
+	}
+	close(rc.stop)
+}
+
+// requestError is the error of a request that failed with err: the reason
+// it was given up, when it was, as Go words it for a client's Timeout.
+func (rc *requestCanceler) requestError(err error, during string) error {
+	reason := rc.reason()
+	if reason == nil {
+		return err
+	}
+	rc.mu.Lock()
+	timedOut := rc.timedOut
+	rc.mu.Unlock()
+	if timedOut {
+		return &timeoutError{reason.Error() + " (Client.Timeout " + during + ")"}
+	}
+	return reason
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/http/client.go",
             text: #"""
 package http
@@ -3390,6 +3563,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A Response is the response to a request a client sent.
@@ -3438,6 +3612,11 @@ type Client struct {
 	// request to send next and via the requests sent so far. An error
 	// stops there, and ErrUseLastResponse returns the redirect itself.
 	CheckRedirect func(req *Request, via []*Request) error
+
+	// Timeout is how long a request may take, redirects and the reading of
+	// the response's body included; zero is no limit. A request that takes
+	// longer fails with an error whose Timeout method reports true.
+	Timeout time.Duration
 }
 
 // DefaultClient is the Client that Get, Head, and Post use.
@@ -3523,7 +3702,31 @@ func stripPassword(u *url.URL) string {
 // CheckRedirect allows: after 301, 302, and 303 with GET, or HEAD for a
 // HEAD, and after 307 and 308 with the method and the body again. An error
 // is a *url.Error; a response with a status that is no success is not one.
+// It gives up when the request's context is done or c.Timeout passes.
 func (c *Client) Do(req *Request) (*Response, error) {
+	rc := newRequestCanceler(req.ctx, c.Timeout)
+	resp, err := c.do(req, rc)
+	if rc != nil {
+		if es, ok := bodySignal(resp); ok && err == nil {
+			// The body is read under the same watch.
+			es.cancel = rc
+		} else {
+			rc.finish()
+		}
+	}
+	return resp, err
+}
+
+// bodySignal returns the body of resp that closes its connection.
+func bodySignal(resp *Response) (*bodyEOFSignal, bool) {
+	if resp == nil {
+		return nil, false
+	}
+	es, ok := resp.Body.(*bodyEOFSignal)
+	return es, ok
+}
+
+func (c *Client) do(req *Request, rc *requestCanceler) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, &url.Error{Op: urlErrorOp(req.Method), Err: errors.New("http: nil Request.URL")}
@@ -3620,8 +3823,11 @@ func (c *Client) Do(req *Request) (*Response, error) {
 
 		reqs = append(reqs, req)
 		var err error
-		resp, err = send(req)
+		resp, err = send(req, rc)
 		if err != nil {
+			if rc != nil {
+				err = rc.requestError(err, "exceeded while awaiting headers")
+			}
 			return nil, uerr(err)
 		}
 
@@ -3710,7 +3916,7 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // send sends one request on a connection of its own and reads the header
 // of the response. The connection is closed when the body of the response
 // has been read to its end, or is closed.
-func send(req *Request) (*Response, error) {
+func send(req *Request, rc *requestCanceler) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, errors.New("http: nil Request.URL")
@@ -3756,14 +3962,24 @@ func send(req *Request) (*Response, error) {
 	if hostname == "localhost" {
 		hostname = "127.0.0.1"
 	}
+	if err := rc.reason(); err != nil {
+		// Given up on before it was sent.
+		closeBody(req)
+		return nil, err
+	}
 	conn, err := net.Dial("tcp", hostname+":"+port)
 	if err != nil {
 		closeBody(req)
 		return nil, err
 	}
+	if rc != nil && !rc.attach(conn) {
+		conn.Close()
+		closeBody(req)
+		return nil, rc.reason()
+	}
 
 	if err := writeRequest(conn, req); err != nil {
-		conn.Close()
+		closeConn(conn, rc)
 		return nil, err
 	}
 
@@ -3778,15 +3994,24 @@ func send(req *Request) (*Response, error) {
 		resp, err = readResponse(r, req)
 	}
 	if err != nil {
-		conn.Close()
+		closeConn(conn, rc)
 		return nil, err
 	}
 	if b, ok := resp.Body.(*body); ok {
-		resp.Body = &bodyEOFSignal{body: b, conn: conn}
+		resp.Body = &bodyEOFSignal{body: b, conn: conn, rc: rc}
+	} else {
+		closeConn(conn, rc)
+	}
+	return resp, nil
+}
+
+// closeConn closes the connection of a request, once.
+func closeConn(conn net.Conn, rc *requestCanceler) {
+	if rc != nil {
+		rc.closeConn(conn)
 	} else {
 		conn.Close()
 	}
-	return resp, nil
 }
 
 // A bodyEOFSignal is the body of a response, which gives the connection
@@ -3796,6 +4021,10 @@ type bodyEOFSignal struct {
 	conn   net.Conn
 	closed bool
 	done   bool
+	// What closes the connection when the request is given up, and, for
+	// the response Do returns, the watch that ends with the body.
+	rc     *requestCanceler
+	cancel *requestCanceler
 }
 
 func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
@@ -3804,6 +4033,9 @@ func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
 	}
 	n, err = es.body.Read(p)
 	if err != nil {
+		if err != io.EOF && es.cancel != nil {
+			err = es.cancel.requestError(err, "or context cancellation while reading body")
+		}
 		es.finish()
 	}
 	return n, err
@@ -3821,7 +4053,8 @@ func (es *bodyEOFSignal) Close() error {
 func (es *bodyEOFSignal) finish() {
 	if !es.done {
 		es.done = true
-		es.conn.Close()
+		closeConn(es.conn, es.rc)
+		es.cancel.finish()
 	}
 }
 
@@ -4064,6 +4297,191 @@ func readResponse(r *connReader, req *Request) (*Response, error) {
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/net/http/deadline.go",
+            text: #"""
+package http
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// A connection's read deadline, and the read that watches for a client to
+// go away, as a server has them.
+//
+// A read of the connection waits until the peer sends something or goes
+// away; nothing else wakes it but closing the connection. So when a read
+// has to be given up on, it runs in a goroutine of its own: the reader
+// waits for its result or for the deadline, whichever comes first, and a
+// result that comes later is the result of the next read. Nothing read is
+// lost, and a connection without a deadline or a watching read is read
+// directly.
+
+// A pendingRead is what a read in a goroutine of its own read.
+type pendingRead struct {
+	p   []byte
+	err error
+}
+
+// A timeoutError is a read or a write whose deadline passed.
+type timeoutError struct {
+	err string
+}
+
+func (e *timeoutError) Error() string { return e.err }
+
+// Timeout reports that the error is a time that ran out.
+func (e *timeoutError) Timeout() bool { return true }
+
+// Temporary reports that the operation may succeed when tried again.
+func (e *timeoutError) Temporary() bool { return true }
+
+// Is reports that the error is, as Go's is, context.DeadlineExceeded.
+func (e *timeoutError) Is(err error) bool { return err == context.DeadlineExceeded }
+
+// A deadlineError is a read or a write of a connection after its deadline.
+type deadlineError struct{}
+
+func (deadlineError) Error() string   { return "i/o timeout" }
+func (deadlineError) Timeout() bool   { return true }
+func (deadlineError) Temporary() bool { return true }
+
+var errDeadline error = deadlineError{}
+
+// startRead reads the connection in a goroutine of its own. gone, when not
+// nil, is called when the read ends without a byte: the client went away,
+// or the connection was closed.
+func (r *connReader) startRead(gone func()) {
+	ch := make(chan pendingRead, 1)
+	r.pending = ch
+	conn := r.conn
+	go func() {
+		p := make([]byte, 4096)
+		n, err := conn.Read(p)
+		if n == 0 && gone != nil {
+			gone()
+		}
+		ch <- pendingRead{p[:n], err}
+	}()
+}
+
+// startBackgroundRead watches for the client to go away while a handler
+// runs, with a read whose bytes, if the client sends any, are the start of
+// the next request. It has no deadline.
+func (r *connReader) startBackgroundRead(gone func()) {
+	r.clearReadDeadline()
+	if r.pending == nil && r.err == nil {
+		r.startRead(gone)
+	}
+}
+
+// setReadDeadline gives the reads from now on until at to complete.
+func (r *connReader) setReadDeadline(at time.Time) {
+	r.clearReadDeadline()
+	r.hasDeadline = true
+	if d := time.Until(at); d > 0 {
+		r.deadline = time.NewTimer(d)
+	} else {
+		r.expired = true
+	}
+}
+
+// clearReadDeadline lets reads wait as long as they take.
+func (r *connReader) clearReadDeadline() {
+	if r.deadline != nil {
+		r.deadline.Stop()
+		r.deadline = nil
+	}
+	r.hasDeadline = false
+	r.expired = false
+}
+
+// fillPending is fill for a connection with a read under way or a read
+// deadline. A deadline that passes is an error of this read, not of the
+// connection.
+func (r *connReader) fillPending() error {
+	if r.expired {
+		return errDeadline
+	}
+	if r.pending == nil {
+		r.startRead(nil)
+	}
+	var res pendingRead
+	if r.deadline == nil {
+		res = <-r.pending
+	} else {
+		select {
+		case res = <-r.pending:
+		case <-r.deadline.C:
+			r.expired = true
+			return errDeadline
+		}
+	}
+	r.pending = nil
+	if len(res.p) > 0 {
+		r.buf = append(r.buf, res.p...)
+		return nil
+	}
+	err := res.err
+	if err == nil {
+		return nil
+	}
+	r.err = err
+	return err
+}
+
+// A serverCtx is the context of a request a server serves: it is done when
+// the handler returns, when the client goes away, and when the server
+// closes the connection.
+type serverCtx struct {
+	srv  *Server
+	mu   sync.Mutex
+	done chan struct{}
+	err  error
+}
+
+// A contextKey is the key of a value the server puts in the context of a
+// request.
+type contextKey struct {
+	name string
+}
+
+func (k *contextKey) String() string { return "net/http context value " + k.name }
+
+// ServerContextKey is the key of the *Server in the context of a request
+// it serves.
+var ServerContextKey = &contextKey{"http-server"}
+
+func (c *serverCtx) Deadline() (deadline time.Time, ok bool) { return }
+
+func (c *serverCtx) Done() <-chan struct{} { return c.done }
+
+func (c *serverCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *serverCtx) Value(key any) any {
+	if k, ok := key.(*contextKey); ok && k == ServerContextKey {
+		return c.srv
+	}
+	return nil
+}
+
+// cancel ends the context. Only the first call does anything.
+func (c *serverCtx) cancel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		c.err = context.Canceled
+		close(c.done)
+	}
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/http/header.go",
             text: #"""
 package http
@@ -4287,6 +4705,7 @@ const (
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -4363,6 +4782,84 @@ type Request struct {
 	pat         *pattern
 	matches     []string
 	otherValues map[string]string
+
+	// The context of the request: the client's, or the one the server
+	// cancels. Nil is context.Background.
+	ctx context.Context
+}
+
+// Context returns the context of the request. A server cancels it when
+// the client goes away or the handler returns; a client gives up on a
+// request when it is done. It is context.Background when none was given.
+func (r *Request) Context() context.Context {
+	if r.ctx != nil {
+		return r.ctx
+	}
+	return context.Background()
+}
+
+// WithContext returns a shallow copy of r whose context is ctx.
+func (r *Request) WithContext(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	return r2
+}
+
+// Clone returns a deep copy of r whose context is ctx. The body is shared.
+func (r *Request) Clone(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	if r.URL != nil {
+		u2 := new(url.URL)
+		*u2 = *r.URL
+		if r.URL.User != nil {
+			u2.User = new(url.Userinfo)
+			*u2.User = *r.URL.User
+		}
+		r2.URL = u2
+	}
+	r2.Header = r.Header.Clone()
+	r2.Trailer = r.Trailer.Clone()
+	if s := r.TransferEncoding; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.TransferEncoding = s2
+	}
+	r2.Form = cloneValues(r.Form)
+	r2.PostForm = cloneValues(r.PostForm)
+	if s := r.matches; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.matches = s2
+	}
+	if r.otherValues != nil {
+		r2.otherValues = map[string]string{}
+		for k, v := range r.otherValues {
+			r2.otherValues[k] = v
+		}
+	}
+	return r2
+}
+
+func cloneValues(v url.Values) url.Values {
+	if v == nil {
+		return nil
+	}
+	v2 := url.Values{}
+	for k, vv := range v {
+		vv2 := make([]string, len(vv))
+		copy(vv2, vv)
+		v2[k] = vv2
+	}
+	return v2
 }
 
 // ProtoAtLeast reports whether the request's protocol is at least
@@ -4527,6 +5024,24 @@ func (r *Request) wantsClose() bool {
 // which may be nil. A body that is a *strings.Reader gives the request its
 // length.
 func NewRequest(method, target string, body io.Reader) (*Request, error) {
+	return newRequest(nil, method, target, body)
+}
+
+// NewRequestWithContext is NewRequest with the context the request is sent
+// under: a client gives up on it when ctx is done.
+func NewRequestWithContext(ctx context.Context, method, target string, body io.Reader) (*Request, error) {
+	if method == "" {
+		method = "GET"
+	}
+	if native.validToken(method) && ctx == nil {
+		return nil, errors.New("net/http: nil Context")
+	}
+	return newRequest(ctx, method, target, body)
+}
+
+// newRequest makes the request of NewRequest. A nil ctx is Background,
+// which a program that never asks for a context does not link.
+func newRequest(ctx context.Context, method, target string, body io.Reader) (*Request, error) {
 	if method == "" {
 		method = "GET"
 	}
@@ -4542,6 +5057,7 @@ func NewRequest(method, target string, body io.Reader) (*Request, error) {
 		u.Host = u.Host[:len(u.Host)-1]
 	}
 	req := &Request{
+		ctx:        ctx,
 		Method:     method,
 		URL:        u,
 		Proto:      "HTTP/1.1",
@@ -5563,6 +6079,7 @@ import (
 	urlpkg "net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -5647,6 +6164,18 @@ type conn struct {
 	werr error
 	// The method of the request before this one.
 	lastMethod string
+
+	// The context of the request being answered, which the client going
+	// away cancels.
+	ctx *serverCtx
+	// The state of the connection, and the Unix second it was set, for
+	// Shutdown; whether the connection is closed. Under server.mu.
+	state     ConnState
+	stateUnix int64
+	closed    bool
+	// When the response must be sent by, as WriteTimeout says.
+	hasWriteDeadline bool
+	writeDeadline    time.Time
 }
 
 // write adds p to what is to be sent, and sends when that is a buffer full.
@@ -5669,10 +6198,15 @@ func (c *conn) flush() error {
 	if len(c.out) == 0 {
 		return c.werr
 	}
+	if c.werr == nil && c.hasWriteDeadline && !time.Now().Before(c.writeDeadline) {
+		c.werr = errDeadline
+		c.clientGone()
+	}
 	if c.werr == nil {
 		_, err := c.rwc.Write(c.out)
 		if err != nil {
 			c.werr = err
+			c.clientGone()
 		}
 	}
 	c.out = c.out[:0]
@@ -5692,6 +6226,35 @@ func badRequestError(e string) error { return statusError{code: StatusBadRequest
 // readRequest reads the next request of the connection and makes the
 // response its handler writes to.
 func (c *conn) readRequest() (*response, error) {
+	// The header has ReadHeaderTimeout, or ReadTimeout, to arrive, and the
+	// whole request ReadTimeout; the response has WriteTimeout from the end
+	// of the request.
+	srv := c.server
+	t0 := time.Now()
+	if d := srv.readHeaderTimeout(); d > 0 {
+		c.r.setReadDeadline(t0.Add(d))
+	} else {
+		c.r.clearReadDeadline()
+	}
+	if d := srv.WriteTimeout; d > 0 {
+		defer func() {
+			c.hasWriteDeadline = true
+			c.writeDeadline = time.Now().Add(d)
+		}()
+	}
+	w, err := c.readRequestHeader()
+	if err == nil && srv.readHeaderTimeout() != srv.ReadTimeout {
+		if srv.ReadTimeout > 0 {
+			c.r.setReadDeadline(t0.Add(srv.ReadTimeout))
+		} else {
+			c.r.clearReadDeadline()
+		}
+	}
+	return w, err
+}
+
+// readRequestHeader reads the request line and the header.
+func (c *conn) readRequestHeader() (*response, error) {
 	c.r.limited = true
 	c.r.remain = c.server.maxHeaderBytes() + 4096
 	if c.lastMethod == "POST" {
@@ -6480,6 +7043,10 @@ func (c *conn) serve() {
 
 	for {
 		w, err := c.readRequest()
+		if c.r.remain != c.server.maxHeaderBytes()+4096 {
+			// Something was read: the connection is busy.
+			c.setState(StateActive)
+		}
 		if err != nil {
 			switch {
 			case err == errTooLarge:
@@ -6491,6 +7058,9 @@ func (c *conn) serve() {
 				return
 			case err == io.EOF:
 				// The client went away between requests.
+				return
+			case err == errDeadline:
+				// The request did not come in time.
 				return
 			default:
 				if v, ok := err.(statusError); ok {
@@ -6505,6 +7075,9 @@ func (c *conn) serve() {
 		}
 
 		req := w.req
+		ctx := &serverCtx{srv: c.server, done: make(chan struct{})}
+		req.ctx = ctx
+		c.ctx = ctx
 		if req.expectsContinue() {
 			if req.ProtoAtLeast(1, 1) && req.ContentLength != 0 {
 				// The first read of the body tells the client to send it.
@@ -6525,15 +7098,31 @@ func (c *conn) serve() {
 		if req.RequestURI == "*" && req.Method == "OPTIONS" {
 			handler = globalOptionsHandler{}
 		}
+		// While the handler runs, a read watches for the client to go away,
+		// once the body has been read.
+		if b := requestBody(req.Body); b != nil && !b.sawEOF {
+			b.onDone = c.startBackgroundRead
+		} else {
+			c.startBackgroundRead()
+		}
 		handler.ServeHTTP(w, w.req)
+		ctx.cancel()
 		w.finishRequest()
+		c.hasWriteDeadline = false
 		if !w.shouldReuseConnection() {
 			return
 		}
+		c.setState(StateIdle)
 		if !c.server.doKeepAlives() {
 			return
 		}
-		// The next request, when the client sends one.
+		// The next request, when the client sends one within IdleTimeout,
+		// or ReadTimeout.
+		if d := c.server.idleTimeout(); d > 0 {
+			c.r.setReadDeadline(time.Now().Add(d))
+		} else {
+			c.r.clearReadDeadline()
+		}
 		if !c.r.peek(4) {
 			return
 		}
@@ -6553,8 +7142,35 @@ func isUnsupportedTEError(err error) bool {
 }
 
 func (c *conn) close() {
+	if c.ctx != nil {
+		c.ctx.cancel()
+	}
 	c.flush()
-	c.rwc.Close()
+	c.closeConn()
+	c.setState(StateClosed)
+}
+
+// startBackgroundRead watches for the client to go away.
+func (c *conn) startBackgroundRead() {
+	c.r.startBackgroundRead(c.clientGone)
+}
+
+// clientGone cancels the context of the request being answered: the
+// client went away, or the connection failed.
+func (c *conn) clientGone() {
+	if ctx := c.ctx; ctx != nil {
+		ctx.cancel()
+	}
+}
+
+// requestBody returns the body of the connection under a request's Body,
+// or nil when it has none.
+func requestBody(rc io.ReadCloser) *body {
+	if ecr, ok := rc.(*expectContinueReader); ok {
+		rc = ecr.readCloser
+	}
+	b, _ := rc.(*body)
+	return b
 }
 
 // globalOptionsHandler answers "OPTIONS *", which asks about the server
@@ -6580,11 +7196,49 @@ type Server struct {
 	// Handler answers the requests. A nil Handler is DefaultServeMux.
 	Handler Handler
 
+	// ReadTimeout is how long the server waits for a whole request, from
+	// its first byte; zero or less is no limit. ReadHeaderTimeout is how
+	// long it waits for the header, ReadTimeout when it is zero.
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+
+	// WriteTimeout is how long the server has to send a response, from the
+	// end of the request's header; zero or less is no limit.
+	WriteTimeout time.Duration
+
+	// IdleTimeout is how long a connection waits for its next request,
+	// ReadTimeout when it is zero.
+	IdleTimeout time.Duration
+
 	// MaxHeaderBytes is the most header the server reads of a request.
 	// Zero is DefaultMaxHeaderBytes.
 	MaxHeaderBytes int
 
+	// ConnState, when set, is called when a connection changes state.
+	ConnState func(net.Conn, ConnState)
+
 	noKeepAlives bool
+
+	// The listeners and connections Close and Shutdown close (shutdown.go).
+	mu         sync.Mutex
+	inShutdown bool
+	listeners  []*trackedListener
+	conns      []*conn
+	onShutdown []func()
+}
+
+func (srv *Server) readHeaderTimeout() time.Duration {
+	if srv.ReadHeaderTimeout > 0 {
+		return srv.ReadHeaderTimeout
+	}
+	return srv.ReadTimeout
+}
+
+func (srv *Server) idleTimeout() time.Duration {
+	if srv.IdleTimeout != 0 {
+		return srv.IdleTimeout
+	}
+	return srv.ReadTimeout
 }
 
 func (srv *Server) maxHeaderBytes() int {
@@ -6595,13 +7249,16 @@ func (srv *Server) maxHeaderBytes() int {
 }
 
 func (srv *Server) doKeepAlives() bool {
-	return !srv.noKeepAlives
+	return !srv.noKeepAlives && !srv.shuttingDown()
 }
 
 // SetKeepAlivesEnabled says whether a connection carries more than one
-// request. It does by default.
+// request. It does by default; turning it off closes the idle ones.
 func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	srv.noKeepAlives = !v
+	if !v {
+		srv.closeIdleConns()
+	}
 }
 
 // logf reports what the server cannot tell a client, through the standard
@@ -6612,8 +7269,12 @@ func (srv *Server) logf(format string, args ...any) {
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
-// accepts. It returns when the server cannot listen or accept.
+// accepts. It returns when the server cannot listen or accept, and
+// ErrServerClosed after Shutdown or Close.
 func (srv *Server) ListenAndServe() error {
+	if srv.shuttingDown() {
+		return ErrServerClosed
+	}
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":80"
@@ -6627,14 +7288,24 @@ func (srv *Server) ListenAndServe() error {
 
 // Serve accepts connections on l and serves each in a goroutine of its
 // own, which reads requests and calls srv.Handler for them. It returns
-// when l fails.
+// when l fails, and ErrServerClosed after Shutdown or Close. It closes l.
 func (srv *Server) Serve(l net.Listener) error {
+	t := srv.trackListener(l)
+	if t == nil {
+		l.Close()
+		return ErrServerClosed
+	}
+	defer srv.untrackListener(t)
 	for {
 		rw, err := l.Accept()
 		if err != nil {
+			if srv.shuttingDown() {
+				return ErrServerClosed
+			}
 			return err
 		}
 		c := &conn{server: srv, rwc: rw}
+		c.setState(StateNew)
 		go c.serve()
 	}
 }
@@ -6871,6 +7542,241 @@ func (l *maxBytesReader) Close() error {
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/net/http/shutdown.go",
+            text: #"""
+package http
+
+import (
+	"context"
+	"net"
+	"time"
+)
+
+// A ConnState is a state of a connection a server serves, which the
+// server's ConnState hook is told of.
+type ConnState int
+
+const (
+	// StateNew is a connection that has been accepted and has sent nothing
+	// yet.
+	StateNew ConnState = iota
+
+	// StateActive is a connection that has sent a request and is being
+	// answered.
+	StateActive
+
+	// StateIdle is a connection between requests.
+	StateIdle
+
+	// StateHijacked is a connection the server gave to a handler.
+	StateHijacked
+
+	// StateClosed is a connection that is closed.
+	StateClosed
+)
+
+func (c ConnState) String() string {
+	switch c {
+	case StateNew:
+		return "new"
+	case StateActive:
+		return "active"
+	case StateIdle:
+		return "idle"
+	case StateHijacked:
+		return "hijacked"
+	case StateClosed:
+		return "closed"
+	}
+	return ""
+}
+
+// A trackedListener is a listener a server accepts on, which Close and
+// Shutdown close once.
+type trackedListener struct {
+	l      net.Listener
+	closed bool
+}
+
+// shuttingDown reports whether Shutdown or Close has been called.
+func (srv *Server) shuttingDown() bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.inShutdown
+}
+
+// trackListener adds a listener to those Close and Shutdown close, and
+// returns nil when the server is shutting down already.
+func (srv *Server) trackListener(l net.Listener) *trackedListener {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.inShutdown {
+		return nil
+	}
+	t := &trackedListener{l: l}
+	srv.listeners = append(srv.listeners, t)
+	return t
+}
+
+// untrackListener closes a listener Serve is done with, unless Close or
+// Shutdown did, and forgets it.
+func (srv *Server) untrackListener(t *trackedListener) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !t.closed {
+		t.closed = true
+		t.l.Close()
+	}
+	for i, x := range srv.listeners {
+		if x == t {
+			srv.listeners = append(srv.listeners[:i], srv.listeners[i+1:]...)
+			break
+		}
+	}
+}
+
+// closeListenersLocked closes the listeners, which ends their Serve with
+// ErrServerClosed.
+func (srv *Server) closeListenersLocked() error {
+	var err error
+	for _, t := range srv.listeners {
+		if !t.closed {
+			t.closed = true
+			if cerr := t.l.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
+		}
+	}
+	return err
+}
+
+// setState records the state of a connection, and tells the ConnState
+// hook. A new connection is tracked, a closed one is not.
+func (c *conn) setState(state ConnState) {
+	srv := c.server
+	srv.mu.Lock()
+	switch state {
+	case StateNew:
+		srv.conns = append(srv.conns, c)
+	case StateHijacked, StateClosed:
+		for i, x := range srv.conns {
+			if x == c {
+				srv.conns = append(srv.conns[:i], srv.conns[i+1:]...)
+				break
+			}
+		}
+	}
+	c.state = state
+	c.stateUnix = time.Now().Unix()
+	srv.mu.Unlock()
+	if hook := srv.ConnState; hook != nil {
+		hook(c.rwc, state)
+	}
+}
+
+// closeConn closes the connection once, whoever asks first: its own
+// goroutine, Close, Shutdown, or a deadline.
+func (c *conn) closeConn() {
+	c.server.mu.Lock()
+	closed := c.closed
+	c.closed = true
+	c.server.mu.Unlock()
+	if !closed {
+		c.rwc.Close()
+	}
+}
+
+// RegisterOnShutdown arranges for f to be called, in a goroutine of its
+// own, when Shutdown is.
+func (srv *Server) RegisterOnShutdown(f func()) {
+	srv.mu.Lock()
+	srv.onShutdown = append(srv.onShutdown, f)
+	srv.mu.Unlock()
+}
+
+// Close closes the listeners and every connection at once, whether or not
+// a request is being answered on it. Serve and ListenAndServe then return
+// ErrServerClosed. It returns what closing the listeners returned.
+func (srv *Server) Close() error {
+	srv.mu.Lock()
+	srv.inShutdown = true
+	err := srv.closeListenersLocked()
+	conns := srv.conns
+	srv.conns = nil
+	srv.mu.Unlock()
+	for _, c := range conns {
+		c.closeConn()
+	}
+	return err
+}
+
+// The longest Shutdown waits between two looks at the connections.
+const shutdownPollIntervalMax = 500 * time.Millisecond
+
+// Shutdown stops the server without interrupting a request: it closes the
+// listeners, then the idle connections, and waits for each active one to
+// become idle to close it, looking again after 1ms, 2ms, 4ms, and so on up
+// to 500ms. When ctx is done first, it returns ctx's error and leaves the
+// rest open. Serve and ListenAndServe return ErrServerClosed at once.
+func (srv *Server) Shutdown(ctx context.Context) error {
+	srv.mu.Lock()
+	srv.inShutdown = true
+	lnerr := srv.closeListenersLocked()
+	for _, f := range srv.onShutdown {
+		go f()
+	}
+	srv.mu.Unlock()
+
+	pollInterval := time.Millisecond
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
+	for {
+		if srv.closeIdleConns() {
+			return lnerr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			pollInterval *= 2
+			if pollInterval > shutdownPollIntervalMax {
+				pollInterval = shutdownPollIntervalMax
+			}
+			timer.Reset(pollInterval)
+		}
+	}
+}
+
+// closeIdleConns closes the connections that wait for a request, and a new
+// one that has said nothing for five seconds, and reports whether every
+// connection is closed.
+func (srv *Server) closeIdleConns() bool {
+	srv.mu.Lock()
+	quiescent := true
+	var idle []*conn
+	var rest []*conn
+	for _, c := range srv.conns {
+		st := c.state
+		if st == StateNew && c.stateUnix < time.Now().Unix()-5 {
+			st = StateIdle
+		}
+		if st != StateIdle {
+			quiescent = false
+			rest = append(rest, c)
+			continue
+		}
+		idle = append(idle, c)
+	}
+	srv.conns = rest
+	srv.mu.Unlock()
+	for _, c := range idle {
+		c.closeConn()
+	}
+	return quiescent
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/http/status.go",
             text: #"""
 package http
@@ -7079,6 +7985,152 @@ func StatusText(code int) string {
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/net/http/timeout.go",
+            text: #"""
+package http
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"sync"
+	"time"
+)
+
+// TimeoutHandler returns a handler that runs h with dt to answer: h's
+// response is kept and sent when h returns in time, and otherwise the
+// client gets "503 Service Unavailable" with msg as the body (a short HTML
+// page when msg is empty), and h's writes from then on fail with
+// ErrHandlerTimeout. The context of h's request is done at dt.
+func TimeoutHandler(h Handler, dt time.Duration, msg string) Handler {
+	return &timeoutHandler{
+		handler: h,
+		body:    msg,
+		dt:      dt,
+	}
+}
+
+// ErrHandlerTimeout is what a handler that TimeoutHandler gave up on gets
+// from Write.
+var ErrHandlerTimeout = errors.New("http: Handler timeout")
+
+type timeoutHandler struct {
+	handler Handler
+	body    string
+	dt      time.Duration
+}
+
+func (h *timeoutHandler) errorBody() string {
+	if h.body != "" {
+		return h.body
+	}
+	return "<html><head><title>Timeout</title></head><body><h1>Timeout</h1></body></html>"
+}
+
+func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
+	ctx, cancelCtx := context.WithTimeout(r.Context(), h.dt)
+	defer cancelCtx()
+	r = r.WithContext(ctx)
+	done := make(chan struct{})
+	tw := &timeoutWriter{
+		w:   w,
+		h:   Header{},
+		req: r,
+	}
+	panicChan := make(chan any, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				panicChan <- p
+			}
+		}()
+		h.handler.ServeHTTP(tw, r)
+		close(done)
+	}()
+	select {
+	case p := <-panicChan:
+		panic(p)
+	case <-done:
+		tw.mu.Lock()
+		defer tw.mu.Unlock()
+		dst := w.Header()
+		for k, vv := range tw.h {
+			dst[k] = vv
+		}
+		if !tw.wroteHeader {
+			tw.code = StatusOK
+		}
+		w.WriteHeader(tw.code)
+		w.Write(tw.wbuf)
+	case <-ctx.Done():
+		tw.mu.Lock()
+		defer tw.mu.Unlock()
+		switch err := ctx.Err(); err {
+		case context.DeadlineExceeded:
+			w.WriteHeader(StatusServiceUnavailable)
+			io.WriteString(w, h.errorBody())
+			tw.err = ErrHandlerTimeout
+		default:
+			w.WriteHeader(StatusServiceUnavailable)
+			tw.err = err
+		}
+	}
+}
+
+// A timeoutWriter keeps what the handler of a TimeoutHandler writes until
+// it is known to be in time.
+type timeoutWriter struct {
+	w    ResponseWriter
+	h    Header
+	wbuf []byte
+	req  *Request
+
+	mu          sync.Mutex
+	err         error
+	wroteHeader bool
+	code        int
+}
+
+func (tw *timeoutWriter) Header() Header { return tw.h }
+
+func (tw *timeoutWriter) Write(p []byte) (int, error) {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	if tw.err != nil {
+		return 0, tw.err
+	}
+	if !tw.wroteHeader {
+		tw.writeHeaderLocked(StatusOK)
+	}
+	tw.wbuf = append(tw.wbuf, p...)
+	return len(p), nil
+}
+
+func (tw *timeoutWriter) writeHeaderLocked(code int) {
+	if code < 100 || code > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", code))
+	}
+	switch {
+	case tw.err != nil:
+		return
+	case tw.wroteHeader:
+		log.Printf("http: superfluous response.WriteHeader call")
+	default:
+		tw.wroteHeader = true
+		tw.code = code
+	}
+}
+
+func (tw *timeoutWriter) WriteHeader(code int) {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	tw.writeHeaderLocked(code)
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/net/http/transfer.go",
             text: #"""
 package http
@@ -7090,6 +8142,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ErrLineTooLong is returned for a chunk header or a trailer line that is
@@ -7115,6 +8168,12 @@ type connReader struct {
 	// How many more bytes of a header may be used, when limited.
 	limited bool
 	remain  int
+	// A read under way in a goroutine of its own, and the read deadline
+	// (deadline.go).
+	pending     chan pendingRead
+	hasDeadline bool
+	expired     bool
+	deadline    *time.Timer
 }
 
 func newConnReader(conn net.Conn) *connReader {
@@ -7125,6 +8184,9 @@ func newConnReader(conn net.Conn) *connReader {
 func (r *connReader) fill() error {
 	if r.err != nil {
 		return r.err
+	}
+	if r.pending != nil || r.hasDeadline {
+		return r.fillPending()
 	}
 	n, err := r.conn.Read(r.scratch)
 	if n > 0 {
@@ -7809,6 +8871,23 @@ type Error struct {
 func (e *Error) Unwrap() error { return e.Err }
 
 func (e *Error) Error() string { return fmt.Sprintf("%s %q: %s", e.Op, e.URL, e.Err) }
+
+// Timeout reports whether the error is one of a time that ran out.
+func (e *Error) Timeout() bool {
+	t, ok := e.Err.(interface {
+		Timeout() bool
+	})
+	return ok && t.Timeout()
+}
+
+// Temporary reports whether the error may go away when the operation is
+// tried again.
+func (e *Error) Temporary() bool {
+	t, ok := e.Err.(interface {
+		Temporary() bool
+	})
+	return ok && t.Temporary()
+}
 
 // The part of a URL a string belongs to, which decides what is escaped in
 // it. The run-time library knows the parts by these numbers.

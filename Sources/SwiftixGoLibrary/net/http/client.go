@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A Response is the response to a request a client sent.
@@ -56,6 +57,11 @@ type Client struct {
 	// request to send next and via the requests sent so far. An error
 	// stops there, and ErrUseLastResponse returns the redirect itself.
 	CheckRedirect func(req *Request, via []*Request) error
+
+	// Timeout is how long a request may take, redirects and the reading of
+	// the response's body included; zero is no limit. A request that takes
+	// longer fails with an error whose Timeout method reports true.
+	Timeout time.Duration
 }
 
 // DefaultClient is the Client that Get, Head, and Post use.
@@ -141,7 +147,31 @@ func stripPassword(u *url.URL) string {
 // CheckRedirect allows: after 301, 302, and 303 with GET, or HEAD for a
 // HEAD, and after 307 and 308 with the method and the body again. An error
 // is a *url.Error; a response with a status that is no success is not one.
+// It gives up when the request's context is done or c.Timeout passes.
 func (c *Client) Do(req *Request) (*Response, error) {
+	rc := newRequestCanceler(req.ctx, c.Timeout)
+	resp, err := c.do(req, rc)
+	if rc != nil {
+		if es, ok := bodySignal(resp); ok && err == nil {
+			// The body is read under the same watch.
+			es.cancel = rc
+		} else {
+			rc.finish()
+		}
+	}
+	return resp, err
+}
+
+// bodySignal returns the body of resp that closes its connection.
+func bodySignal(resp *Response) (*bodyEOFSignal, bool) {
+	if resp == nil {
+		return nil, false
+	}
+	es, ok := resp.Body.(*bodyEOFSignal)
+	return es, ok
+}
+
+func (c *Client) do(req *Request, rc *requestCanceler) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, &url.Error{Op: urlErrorOp(req.Method), Err: errors.New("http: nil Request.URL")}
@@ -238,8 +268,11 @@ func (c *Client) Do(req *Request) (*Response, error) {
 
 		reqs = append(reqs, req)
 		var err error
-		resp, err = send(req)
+		resp, err = send(req, rc)
 		if err != nil {
+			if rc != nil {
+				err = rc.requestError(err, "exceeded while awaiting headers")
+			}
 			return nil, uerr(err)
 		}
 
@@ -328,7 +361,7 @@ var errMissingHost = errors.New("http: Request.Write on Request with no Host or 
 // send sends one request on a connection of its own and reads the header
 // of the response. The connection is closed when the body of the response
 // has been read to its end, or is closed.
-func send(req *Request) (*Response, error) {
+func send(req *Request, rc *requestCanceler) (*Response, error) {
 	if req.URL == nil {
 		closeBody(req)
 		return nil, errors.New("http: nil Request.URL")
@@ -374,14 +407,24 @@ func send(req *Request) (*Response, error) {
 	if hostname == "localhost" {
 		hostname = "127.0.0.1"
 	}
+	if err := rc.reason(); err != nil {
+		// Given up on before it was sent.
+		closeBody(req)
+		return nil, err
+	}
 	conn, err := net.Dial("tcp", hostname+":"+port)
 	if err != nil {
 		closeBody(req)
 		return nil, err
 	}
+	if rc != nil && !rc.attach(conn) {
+		conn.Close()
+		closeBody(req)
+		return nil, rc.reason()
+	}
 
 	if err := writeRequest(conn, req); err != nil {
-		conn.Close()
+		closeConn(conn, rc)
 		return nil, err
 	}
 
@@ -396,15 +439,24 @@ func send(req *Request) (*Response, error) {
 		resp, err = readResponse(r, req)
 	}
 	if err != nil {
-		conn.Close()
+		closeConn(conn, rc)
 		return nil, err
 	}
 	if b, ok := resp.Body.(*body); ok {
-		resp.Body = &bodyEOFSignal{body: b, conn: conn}
+		resp.Body = &bodyEOFSignal{body: b, conn: conn, rc: rc}
+	} else {
+		closeConn(conn, rc)
+	}
+	return resp, nil
+}
+
+// closeConn closes the connection of a request, once.
+func closeConn(conn net.Conn, rc *requestCanceler) {
+	if rc != nil {
+		rc.closeConn(conn)
 	} else {
 		conn.Close()
 	}
-	return resp, nil
 }
 
 // A bodyEOFSignal is the body of a response, which gives the connection
@@ -414,6 +466,10 @@ type bodyEOFSignal struct {
 	conn   net.Conn
 	closed bool
 	done   bool
+	// What closes the connection when the request is given up, and, for
+	// the response Do returns, the watch that ends with the body.
+	rc     *requestCanceler
+	cancel *requestCanceler
 }
 
 func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
@@ -422,6 +478,9 @@ func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
 	}
 	n, err = es.body.Read(p)
 	if err != nil {
+		if err != io.EOF && es.cancel != nil {
+			err = es.cancel.requestError(err, "or context cancellation while reading body")
+		}
 		es.finish()
 	}
 	return n, err
@@ -439,7 +498,8 @@ func (es *bodyEOFSignal) Close() error {
 func (es *bodyEOFSignal) finish() {
 	if !es.done {
 		es.done = true
-		es.conn.Close()
+		closeConn(es.conn, es.rc)
+		es.cancel.finish()
 	}
 }
 

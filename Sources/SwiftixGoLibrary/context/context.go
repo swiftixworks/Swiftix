@@ -101,15 +101,27 @@ func withCancel(parent Context) *cancelCtx {
 // Cause returns why c was cancelled: the cause its cancel function was
 // given, or else what c.Err returns. It is nil until c is cancelled.
 func Cause(c Context) error {
-	if cc, ok := c.Value(cancelCtxKey).(*cancelCtx); ok {
-		cc.mu.Lock()
-		cause := cc.cause
-		cc.mu.Unlock()
-		return cause
+	// The cancelCtx is asked through an interface, so that a program that
+	// has none, such as one whose net/http client calls Cause, is not
+	// linked with one.
+	if cc, ok := c.Value(cancelCtxKey).(causer); ok {
+		return cc.cancelCause()
 	}
 	// No cancelCtx is under c: it is a context of the program's own, or one
 	// that is never cancelled.
 	return c.Err()
+}
+
+// A causer is a *cancelCtx, as Cause finds it.
+type causer interface {
+	cancelCause() error
+}
+
+func (c *cancelCtx) cancelCause() error {
+	c.mu.Lock()
+	cause := c.cause
+	c.mu.Unlock()
+	return cause
 }
 
 // AfterFunc arranges for f to run in a goroutine of its own once ctx is
@@ -359,15 +371,14 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 		c.cancel(true, DeadlineExceeded, cause) // the deadline has passed
 		return c, func() { c.cancel(false, Canceled, nil) }
 	}
-	if c.Err() == nil {
-		// The timer: it ends with the context, whichever comes first.
-		go func() {
-			select {
-			case <-time.After(dur):
-				c.cancel(true, DeadlineExceeded, cause)
-			case <-c.done:
-			}
-		}()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		// The timer, which cancel stops: a context that ends sooner leaves
+		// nothing waiting for the deadline.
+		c.timer = time.AfterFunc(dur, func() {
+			c.cancel(true, DeadlineExceeded, cause)
+		})
 	}
 	return c, func() { c.cancel(true, Canceled, nil) }
 }
@@ -375,6 +386,7 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 // A timerCtx is a cancelCtx with a deadline, which a timer enforces.
 type timerCtx struct {
 	cancelCtx
+	timer *time.Timer // under cancelCtx.mu
 
 	deadline time.Time
 }
@@ -395,6 +407,12 @@ func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
 		// Take this timerCtx out of the children of its parent.
 		removeChild(c.cancelCtx.Context, c)
 	}
+	c.mu.Lock()
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.mu.Unlock()
 }
 
 // WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).

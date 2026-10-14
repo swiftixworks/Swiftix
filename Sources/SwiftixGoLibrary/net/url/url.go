@@ -22,6 +22,23 @@ func (e *Error) Unwrap() error { return e.Err }
 
 func (e *Error) Error() string { return fmt.Sprintf("%s %q: %s", e.Op, e.URL, e.Err) }
 
+// Timeout reports whether the error is one of a time that ran out.
+func (e *Error) Timeout() bool {
+	t, ok := e.Err.(interface {
+		Timeout() bool
+	})
+	return ok && t.Timeout()
+}
+
+// Temporary reports whether the error may go away when the operation is
+// tried again.
+func (e *Error) Temporary() bool {
+	t, ok := e.Err.(interface {
+		Temporary() bool
+	})
+	return ok && t.Temporary()
+}
+
 // The part of a URL a string belongs to, which decides what is escaped in
 // it. The run-time library knows the parts by these numbers.
 const (

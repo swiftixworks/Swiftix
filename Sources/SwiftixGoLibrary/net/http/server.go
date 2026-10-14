@@ -18,6 +18,7 @@ import (
 	urlpkg "net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -102,6 +103,18 @@ type conn struct {
 	werr error
 	// The method of the request before this one.
 	lastMethod string
+
+	// The context of the request being answered, which the client going
+	// away cancels.
+	ctx *serverCtx
+	// The state of the connection, and the Unix second it was set, for
+	// Shutdown; whether the connection is closed. Under server.mu.
+	state     ConnState
+	stateUnix int64
+	closed    bool
+	// When the response must be sent by, as WriteTimeout says.
+	hasWriteDeadline bool
+	writeDeadline    time.Time
 }
 
 // write adds p to what is to be sent, and sends when that is a buffer full.
@@ -124,10 +137,15 @@ func (c *conn) flush() error {
 	if len(c.out) == 0 {
 		return c.werr
 	}
+	if c.werr == nil && c.hasWriteDeadline && !time.Now().Before(c.writeDeadline) {
+		c.werr = errDeadline
+		c.clientGone()
+	}
 	if c.werr == nil {
 		_, err := c.rwc.Write(c.out)
 		if err != nil {
 			c.werr = err
+			c.clientGone()
 		}
 	}
 	c.out = c.out[:0]
@@ -147,6 +165,35 @@ func badRequestError(e string) error { return statusError{code: StatusBadRequest
 // readRequest reads the next request of the connection and makes the
 // response its handler writes to.
 func (c *conn) readRequest() (*response, error) {
+	// The header has ReadHeaderTimeout, or ReadTimeout, to arrive, and the
+	// whole request ReadTimeout; the response has WriteTimeout from the end
+	// of the request.
+	srv := c.server
+	t0 := time.Now()
+	if d := srv.readHeaderTimeout(); d > 0 {
+		c.r.setReadDeadline(t0.Add(d))
+	} else {
+		c.r.clearReadDeadline()
+	}
+	if d := srv.WriteTimeout; d > 0 {
+		defer func() {
+			c.hasWriteDeadline = true
+			c.writeDeadline = time.Now().Add(d)
+		}()
+	}
+	w, err := c.readRequestHeader()
+	if err == nil && srv.readHeaderTimeout() != srv.ReadTimeout {
+		if srv.ReadTimeout > 0 {
+			c.r.setReadDeadline(t0.Add(srv.ReadTimeout))
+		} else {
+			c.r.clearReadDeadline()
+		}
+	}
+	return w, err
+}
+
+// readRequestHeader reads the request line and the header.
+func (c *conn) readRequestHeader() (*response, error) {
 	c.r.limited = true
 	c.r.remain = c.server.maxHeaderBytes() + 4096
 	if c.lastMethod == "POST" {
@@ -935,6 +982,10 @@ func (c *conn) serve() {
 
 	for {
 		w, err := c.readRequest()
+		if c.r.remain != c.server.maxHeaderBytes()+4096 {
+			// Something was read: the connection is busy.
+			c.setState(StateActive)
+		}
 		if err != nil {
 			switch {
 			case err == errTooLarge:
@@ -946,6 +997,9 @@ func (c *conn) serve() {
 				return
 			case err == io.EOF:
 				// The client went away between requests.
+				return
+			case err == errDeadline:
+				// The request did not come in time.
 				return
 			default:
 				if v, ok := err.(statusError); ok {
@@ -960,6 +1014,9 @@ func (c *conn) serve() {
 		}
 
 		req := w.req
+		ctx := &serverCtx{srv: c.server, done: make(chan struct{})}
+		req.ctx = ctx
+		c.ctx = ctx
 		if req.expectsContinue() {
 			if req.ProtoAtLeast(1, 1) && req.ContentLength != 0 {
 				// The first read of the body tells the client to send it.
@@ -980,15 +1037,31 @@ func (c *conn) serve() {
 		if req.RequestURI == "*" && req.Method == "OPTIONS" {
 			handler = globalOptionsHandler{}
 		}
+		// While the handler runs, a read watches for the client to go away,
+		// once the body has been read.
+		if b := requestBody(req.Body); b != nil && !b.sawEOF {
+			b.onDone = c.startBackgroundRead
+		} else {
+			c.startBackgroundRead()
+		}
 		handler.ServeHTTP(w, w.req)
+		ctx.cancel()
 		w.finishRequest()
+		c.hasWriteDeadline = false
 		if !w.shouldReuseConnection() {
 			return
 		}
+		c.setState(StateIdle)
 		if !c.server.doKeepAlives() {
 			return
 		}
-		// The next request, when the client sends one.
+		// The next request, when the client sends one within IdleTimeout,
+		// or ReadTimeout.
+		if d := c.server.idleTimeout(); d > 0 {
+			c.r.setReadDeadline(time.Now().Add(d))
+		} else {
+			c.r.clearReadDeadline()
+		}
 		if !c.r.peek(4) {
 			return
 		}
@@ -1008,8 +1081,35 @@ func isUnsupportedTEError(err error) bool {
 }
 
 func (c *conn) close() {
+	if c.ctx != nil {
+		c.ctx.cancel()
+	}
 	c.flush()
-	c.rwc.Close()
+	c.closeConn()
+	c.setState(StateClosed)
+}
+
+// startBackgroundRead watches for the client to go away.
+func (c *conn) startBackgroundRead() {
+	c.r.startBackgroundRead(c.clientGone)
+}
+
+// clientGone cancels the context of the request being answered: the
+// client went away, or the connection failed.
+func (c *conn) clientGone() {
+	if ctx := c.ctx; ctx != nil {
+		ctx.cancel()
+	}
+}
+
+// requestBody returns the body of the connection under a request's Body,
+// or nil when it has none.
+func requestBody(rc io.ReadCloser) *body {
+	if ecr, ok := rc.(*expectContinueReader); ok {
+		rc = ecr.readCloser
+	}
+	b, _ := rc.(*body)
+	return b
 }
 
 // globalOptionsHandler answers "OPTIONS *", which asks about the server
@@ -1035,11 +1135,49 @@ type Server struct {
 	// Handler answers the requests. A nil Handler is DefaultServeMux.
 	Handler Handler
 
+	// ReadTimeout is how long the server waits for a whole request, from
+	// its first byte; zero or less is no limit. ReadHeaderTimeout is how
+	// long it waits for the header, ReadTimeout when it is zero.
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+
+	// WriteTimeout is how long the server has to send a response, from the
+	// end of the request's header; zero or less is no limit.
+	WriteTimeout time.Duration
+
+	// IdleTimeout is how long a connection waits for its next request,
+	// ReadTimeout when it is zero.
+	IdleTimeout time.Duration
+
 	// MaxHeaderBytes is the most header the server reads of a request.
 	// Zero is DefaultMaxHeaderBytes.
 	MaxHeaderBytes int
 
+	// ConnState, when set, is called when a connection changes state.
+	ConnState func(net.Conn, ConnState)
+
 	noKeepAlives bool
+
+	// The listeners and connections Close and Shutdown close (shutdown.go).
+	mu         sync.Mutex
+	inShutdown bool
+	listeners  []*trackedListener
+	conns      []*conn
+	onShutdown []func()
+}
+
+func (srv *Server) readHeaderTimeout() time.Duration {
+	if srv.ReadHeaderTimeout > 0 {
+		return srv.ReadHeaderTimeout
+	}
+	return srv.ReadTimeout
+}
+
+func (srv *Server) idleTimeout() time.Duration {
+	if srv.IdleTimeout != 0 {
+		return srv.IdleTimeout
+	}
+	return srv.ReadTimeout
 }
 
 func (srv *Server) maxHeaderBytes() int {
@@ -1050,13 +1188,16 @@ func (srv *Server) maxHeaderBytes() int {
 }
 
 func (srv *Server) doKeepAlives() bool {
-	return !srv.noKeepAlives
+	return !srv.noKeepAlives && !srv.shuttingDown()
 }
 
 // SetKeepAlivesEnabled says whether a connection carries more than one
-// request. It does by default.
+// request. It does by default; turning it off closes the idle ones.
 func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	srv.noKeepAlives = !v
+	if !v {
+		srv.closeIdleConns()
+	}
 }
 
 // logf reports what the server cannot tell a client, through the standard
@@ -1067,8 +1208,12 @@ func (srv *Server) logf(format string, args ...any) {
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
-// accepts. It returns when the server cannot listen or accept.
+// accepts. It returns when the server cannot listen or accept, and
+// ErrServerClosed after Shutdown or Close.
 func (srv *Server) ListenAndServe() error {
+	if srv.shuttingDown() {
+		return ErrServerClosed
+	}
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":80"
@@ -1082,14 +1227,24 @@ func (srv *Server) ListenAndServe() error {
 
 // Serve accepts connections on l and serves each in a goroutine of its
 // own, which reads requests and calls srv.Handler for them. It returns
-// when l fails.
+// when l fails, and ErrServerClosed after Shutdown or Close. It closes l.
 func (srv *Server) Serve(l net.Listener) error {
+	t := srv.trackListener(l)
+	if t == nil {
+		l.Close()
+		return ErrServerClosed
+	}
+	defer srv.untrackListener(t)
 	for {
 		rw, err := l.Accept()
 		if err != nil {
+			if srv.shuttingDown() {
+				return ErrServerClosed
+			}
 			return err
 		}
 		c := &conn{server: srv, rwc: rw}
+		c.setState(StateNew)
 		go c.serve()
 	}
 }

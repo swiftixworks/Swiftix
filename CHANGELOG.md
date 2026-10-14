@@ -327,6 +327,11 @@ format, behavior and platform changes are recorded here.
   server (RESP over TCP through `bufio`, a goroutine for each connection, a
   sharded store under `sync.RWMutex`, expiry, `atomic`, `log`, `context`)
   with five concurrent clients prints what Go prints, and is a test.
+- `net/http`: `r.Context()`, cancelled when the handler returns or the client
+  goes away; `r.WithContext`, `r.Clone`, `http.NewRequestWithContext`;
+  `Server.ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`,
+  `ConnState`, `Shutdown`, `Close`, and `RegisterOnShutdown`;
+  `Client.Timeout`; `http.TimeoutHandler`; `url.Error.Timeout` and `Temporary`.
 
 
 ### Changed
@@ -707,6 +712,10 @@ format, behavior and platform changes are recorded here.
   unlocked mutex`, which `recover` does not see (was a recoverable panic).
 - `f().mu.Lock()` on a field reached through a pointer a call returns
   compiles (was `cannot call pointer method on non-addressable value`).
+- Closing a `net.Listener` or a `net.Conn` wakes a goroutine blocked in
+  `Accept` or `Read` with `use of closed network connection` (was a
+  deadlock). A cancelled `context.WithTimeout` stops its timer (it waited
+  until the deadline, and many of them exhausted the timer limit).
 
 
 ## 0.13.1 — 2026-10-08

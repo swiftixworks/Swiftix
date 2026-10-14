@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ErrLineTooLong is returned for a chunk header or a trailer line that is
@@ -32,6 +33,12 @@ type connReader struct {
 	// How many more bytes of a header may be used, when limited.
 	limited bool
 	remain  int
+	// A read under way in a goroutine of its own, and the read deadline
+	// (deadline.go).
+	pending     chan pendingRead
+	hasDeadline bool
+	expired     bool
+	deadline    *time.Timer
 }
 
 func newConnReader(conn net.Conn) *connReader {
@@ -42,6 +49,9 @@ func newConnReader(conn net.Conn) *connReader {
 func (r *connReader) fill() error {
 	if r.err != nil {
 		return r.err
+	}
+	if r.pending != nil || r.hasDeadline {
+		return r.fillPending()
 	}
 	n, err := r.conn.Read(r.scratch)
 	if n > 0 {

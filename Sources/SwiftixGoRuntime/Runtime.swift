@@ -907,6 +907,10 @@ public struct GoVirtualMachine: Sendable {
         // Cooperative-run state: host continuations (timers, descriptor and
         // network waits, the quantum yield) that will resume a suspended run.
         var pendingHostWaits = 0
+        // Who is parked in `Accept` or `Read` of a network handle, by
+        // descriptor, and the descriptors closed since (`GoParkedNetWait`).
+        var parkedNetWaits: [Int: [GoParkedNetWait]] = [:]
+        var closedNetDescriptors: Set<Int> = []
         var yieldRequested = false
         var descriptorWrites: [Int: [PendingDescriptorWrite]] = [:]
         var standardInputCarry: [UInt8] = []
@@ -6167,6 +6171,7 @@ public struct GoVirtualMachine: Sendable {
                             value: .string("net: socket creation failed"))))
                         break
                     }
+                    closedNetDescriptors.remove(fd)
                     let dialingID = currentGoroutineID
                     beginHostWait()
                     processContext.tcpConnect(fd, to: ip, port: port) {
@@ -6262,6 +6267,7 @@ public struct GoVirtualMachine: Sendable {
                             value: .string("net: listen on \(address) failed"))))
                         break
                     }
+                    closedNetDescriptors.remove(fd)
                     stack.append(.netListener(GoNetListenerValue(
                         fd: fd, network: "tcp", localAddr: address)))
                     stack.append(.nilValue)
@@ -6277,10 +6283,31 @@ public struct GoVirtualMachine: Sendable {
                             value: .string("net: network not available"))))
                         break
                     }
+                    if closedNetDescriptors.contains(listener.fd) {
+                        stack.append(.nilValue)
+                        stack.append(errorValue(GoParkedNetWait.closedMessage(
+                            "accept", GoParkedNetWait.listenerAddress(listener.localAddr))))
+                        break
+                    }
                     let acceptingID = currentGoroutineID
+                    let parked = GoParkedNetWait(
+                        goroutine: acceptingID,
+                        resultsOnClose: [
+                            .nilValue,
+                            errorValue(GoParkedNetWait.closedMessage(
+                                "accept", GoParkedNetWait.listenerAddress(listener.localAddr))),
+                        ])
+                    parkedNetWaits[listener.fd, default: []].append(parked)
                     beginHostWait()
                     processContext.tcpAccept(listener.fd) { acceptedFD in
+                        if parked.abandoned {
+                            // The listener was closed meanwhile.
+                            processContext.close(acceptedFD)
+                            return
+                        }
                         defer { endHostWait() }
+                        parkedNetWaits[listener.fd]?.removeAll { $0 === parked }
+                        closedNetDescriptors.remove(acceptedFD)
                         guard executionIsActive, asynchronousError == nil else { return }
                         // Who connected, as Go's `RemoteAddr` says it.
                         let peer = processContext.tcpPeer(acceptedFD)
@@ -6317,11 +6344,25 @@ public struct GoVirtualMachine: Sendable {
                             value: .string("net: network not available"))))
                         break
                     }
+                    let closedMessage = GoParkedNetWait.closedMessage(
+                        "read", conn.remoteAddr)
+                    if closedNetDescriptors.contains(conn.fd) {
+                        stack.append(.int(0))
+                        stack.append(errorValue(closedMessage))
+                        break
+                    }
                     let readingID = currentGoroutineID
                     let maxBytes = buf.length
+                    let parked = GoParkedNetWait(
+                        goroutine: readingID,
+                        resultsOnClose: [.int(0), errorValue(closedMessage)])
+                    parkedNetWaits[conn.fd, default: []].append(parked)
                     beginHostWait()
                     processContext.tcpRecv(conn.fd, max: maxBytes) { bytes in
+                        // The connection was closed meanwhile.
+                        if parked.abandoned { return }
                         defer { endHostWait() }
+                        parkedNetWaits[conn.fd]?.removeAll { $0 === parked }
                         guard executionIsActive, asynchronousError == nil else { return }
                         do {
                             guard bytes.count <= maxBytes,
@@ -6407,6 +6448,13 @@ public struct GoVirtualMachine: Sendable {
                     }
                     if let processContext {
                         processContext.close(fd)
+                    }
+                    closedNetDescriptors.insert(fd)
+                    // Whoever waits on the handle is woken, as by Go's Close.
+                    for parked in parkedNetWaits.removeValue(forKey: fd) ?? [] {
+                        parked.abandoned = true
+                        endHostWait()
+                        try wakeGoroutine(parked.goroutine, values: parked.resultsOnClose)
                     }
                     stack.append(.nilValue)
                 case .netLookupHost:

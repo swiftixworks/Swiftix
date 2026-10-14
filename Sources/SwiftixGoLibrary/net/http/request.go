@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -77,6 +78,84 @@ type Request struct {
 	pat         *pattern
 	matches     []string
 	otherValues map[string]string
+
+	// The context of the request: the client's, or the one the server
+	// cancels. Nil is context.Background.
+	ctx context.Context
+}
+
+// Context returns the context of the request. A server cancels it when
+// the client goes away or the handler returns; a client gives up on a
+// request when it is done. It is context.Background when none was given.
+func (r *Request) Context() context.Context {
+	if r.ctx != nil {
+		return r.ctx
+	}
+	return context.Background()
+}
+
+// WithContext returns a shallow copy of r whose context is ctx.
+func (r *Request) WithContext(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	return r2
+}
+
+// Clone returns a deep copy of r whose context is ctx. The body is shared.
+func (r *Request) Clone(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	if r.URL != nil {
+		u2 := new(url.URL)
+		*u2 = *r.URL
+		if r.URL.User != nil {
+			u2.User = new(url.Userinfo)
+			*u2.User = *r.URL.User
+		}
+		r2.URL = u2
+	}
+	r2.Header = r.Header.Clone()
+	r2.Trailer = r.Trailer.Clone()
+	if s := r.TransferEncoding; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.TransferEncoding = s2
+	}
+	r2.Form = cloneValues(r.Form)
+	r2.PostForm = cloneValues(r.PostForm)
+	if s := r.matches; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.matches = s2
+	}
+	if r.otherValues != nil {
+		r2.otherValues = map[string]string{}
+		for k, v := range r.otherValues {
+			r2.otherValues[k] = v
+		}
+	}
+	return r2
+}
+
+func cloneValues(v url.Values) url.Values {
+	if v == nil {
+		return nil
+	}
+	v2 := url.Values{}
+	for k, vv := range v {
+		vv2 := make([]string, len(vv))
+		copy(vv2, vv)
+		v2[k] = vv2
+	}
+	return v2
 }
 
 // ProtoAtLeast reports whether the request's protocol is at least
@@ -241,6 +320,24 @@ func (r *Request) wantsClose() bool {
 // which may be nil. A body that is a *strings.Reader gives the request its
 // length.
 func NewRequest(method, target string, body io.Reader) (*Request, error) {
+	return newRequest(nil, method, target, body)
+}
+
+// NewRequestWithContext is NewRequest with the context the request is sent
+// under: a client gives up on it when ctx is done.
+func NewRequestWithContext(ctx context.Context, method, target string, body io.Reader) (*Request, error) {
+	if method == "" {
+		method = "GET"
+	}
+	if native.validToken(method) && ctx == nil {
+		return nil, errors.New("net/http: nil Context")
+	}
+	return newRequest(ctx, method, target, body)
+}
+
+// newRequest makes the request of NewRequest. A nil ctx is Background,
+// which a program that never asks for a context does not link.
+func newRequest(ctx context.Context, method, target string, body io.Reader) (*Request, error) {
 	if method == "" {
 		method = "GET"
 	}
@@ -256,6 +353,7 @@ func NewRequest(method, target string, body io.Reader) (*Request, error) {
 		u.Host = u.Host[:len(u.Host)-1]
 	}
 	req := &Request{
+		ctx:        ctx,
 		Method:     method,
 		URL:        u,
 		Proto:      "HTTP/1.1",

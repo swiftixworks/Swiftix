@@ -217,7 +217,7 @@ struct GoSourceLibraryTests: GoTestHarness {
 
         let paths = units.map(\.importPath)
         #expect(paths.first == "main")
-        #expect(Set(paths.dropFirst()) == ["io", "net/http", "net/url", "sort"])
+        #expect(Set(paths.dropFirst()) == ["context", "io", "net/http", "net/url", "sort"])
         #expect(try #require(paths.firstIndex(of: "net/url")) < (try #require(paths.firstIndex(of: "net/http"))))
         #expect(try #require(paths.firstIndex(of: "io")) < (try #require(paths.firstIndex(of: "net/http"))))
         #expect(units.map(\.isLibrary) == [false] + Array(repeating: true, count: units.count - 1))
