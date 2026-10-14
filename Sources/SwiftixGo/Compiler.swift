@@ -85,9 +85,22 @@ public enum GoCompiler {
         units: [GoLinkedUnit],
         fallbackPath: String
     ) throws -> GoExecutable {
-        // What the program uses of the library that is Go source is linked
-        // like a package of its own.
-        let units = try GoSourceLibrary.link(units)
+        // What the program uses of the library that is written in Go is
+        // linked like packages of its own.
+        let linked = try GoSourceLibrary.link(units)
+        do {
+            return try compile(linked: linked, fallbackPath: fallbackPath)
+        } catch let diagnostic as GoDiagnostic {
+            throw GoSourceLibrary.inGoSpelling(diagnostic)
+        }
+    }
+
+    /// Lowers `units`, which name what they use of the library's Go text
+    /// by its symbols and hold the packages of it they reach.
+    private static func compile(
+        linked units: [GoLinkedUnit],
+        fallbackPath: String
+    ) throws -> GoExecutable {
         let files = try GoNames.resolve(
             program: try units.flatMap { try GoNames.resolve($0.files) })
         let package = try GoTypeChecker.check(files)
@@ -193,9 +206,20 @@ public enum GoCompiler {
         // imports has done both.
         var initializers: [String] = []
         var globalInitializers: [GoIRFunction] = []
-        var functionCursor = 0
-        var fileCursor = 0
+        // Where the files and the functions of each unit begin. A package
+        // of the library initializes before the program's, wherever it
+        // stands among the units.
+        var unitStarts: [(file: Int, function: Int)] = []
+        var nextStart = (file: 0, function: 0)
         for unit in units {
+            unitStarts.append(nextStart)
+            nextStart.file += unit.files.count
+            nextStart.function += unit.files.reduce(0) { $0 + $1.functions.count }
+        }
+        for unitIndex in GoSourceLibrary.initializationOrder(of: units) {
+            let unit = units[unitIndex]
+            var fileCursor = unitStarts[unitIndex].file
+            var functionCursor = unitStarts[unitIndex].function
             // The unit's files as name resolution left them, one for one:
             // an initializer names types and writes literals like any
             // other code.
@@ -276,14 +300,7 @@ public enum GoCompiler {
         importedPackages: [String: GoCompiledPackage],
         packageOrder: [String] = []
     ) throws -> GoExecutable {
-        let syntax = try sources.map(GoParser.parse)
-        if importedPackages.isEmpty, try GoEmbeddedLibrary.isNeeded(by: syntax) {
-            // A package of the library that is written in Go is linked with
-            // the program, as a local package of a module is.
-            return try compile(
-                packages: [GoPackageSource(importPath: "main", sources: sources)], root: "main")
-        }
-        let parsed = try GoNames.resolve(syntax)
+        let parsed = try GoNames.resolve(try sources.map(GoParser.parse))
         if importedPackages.isEmpty {
             return try compile(
                 units: [

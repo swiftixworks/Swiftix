@@ -1,10 +1,9 @@
 /// The natives of `net/http`, which the Go source of the package calls.
 ///
-/// The package is written in Go (see `GoEmbeddedLibrary`) and imports its own
-/// path to reach these: `nethttp.DetectContentType(p)` in its source is the
-/// native, as `strconv.Itoa` is one in a program. A program does not reach
-/// them. Its `http.DetectContentType` is the function the package declares,
-/// because the linker resolves every `http.X` of a program to the package.
+/// The package is written in Go (see `GoSourceLibrary`) and calls these as
+/// its text calls any native: `native.DetectContentType(p)` is the reserved
+/// call `$DetectContentType` of the package. A program does not reach them.
+/// Its `http.DetectContentType` is the function the package declares in Go.
 /// The VM's side is `GoHTTP`.
 extension GoStandardLibrary {
     static func httpNativeFunction(_ member: String) -> GoNativeFunction? {
@@ -53,7 +52,7 @@ extension GoStandardLibrary {
             parameters: parameters, results: results)
     }
 
-    static let httpNativeCallNames: Set<String> = [
+    static let httpNativeCallNames = [
         "$http.CanonicalHeaderKey", "$http.DetectContentType", "$http.lineEnd",
         "$http.formatTime", "$http.remoteAddr", "$http.validToken", "$http.validHeaderValue",
         "$url.unescape", "$url.escape", "$url.validEncoded", "$url.hasControlByte",

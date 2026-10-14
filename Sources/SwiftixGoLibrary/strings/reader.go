@@ -1,13 +1,3 @@
-/// Go source of the members of `strings` that are written in Go. See `GoEmbeddedLibrary`.
-///
-/// The text is Go as `gofmt` prints it, compiled with every program that
-/// uses the package. A path under `$GOROOT/src` names each file in a
-/// diagnostic, which only a mistake in this source can produce.
-extension GoEmbeddedSources {
-    static let strings: [GoSourceFile] = [
-        GoSourceFile(
-            path: "$GOROOT/src/strings/reader.go",
-            text: #"""
 // Package strings is the part of strings that is written in Go.
 package strings
 
@@ -42,6 +32,3 @@ func (r *Reader) Read(b []byte) (n int, err error) {
 
 // NewReader returns a Reader of s.
 func NewReader(s string) *Reader { return &Reader{s: s, i: 0} }
-"""#),
-    ]
-}

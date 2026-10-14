@@ -255,10 +255,6 @@ extension GoStandardLibrary {
                 symbol: "$time.Unix", goName: "time.Unix",
                 parameters: [GoNumericKind.int64.type, GoNumericKind.int64.type],
                 results: [GoPredeclared.time])
-        case ("http", _):
-            return httpNativeFunction(member)
-        case ("url", _):
-            return urlNativeFunction(member)
         default:
             return GoNumberLibrary.nativeFunction(package: package, member: member)
         }
@@ -361,7 +357,6 @@ extension GoStandardLibrary {
             || name.hasPrefix(GoPredeclared.liveResults)
             || GoLibraryTypes.nativeCallNames.contains(name)
             || GoNumberLibrary.isCallName(name)
-            || httpNativeCallNames.contains(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(

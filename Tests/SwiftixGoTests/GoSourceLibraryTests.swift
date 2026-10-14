@@ -136,33 +136,159 @@ struct GoSourceLibraryTests: GoTestHarness {
         let withText = try GoSourceLibrary.link([
             GoLinkedUnit(importPath: "main", initializerName: "$package.init", files: using)
         ])
-        #expect(withText.map(\.importPath) == ["main", GoSourceLibrary.unitPath])
-        #expect(withText[1].files.map(\.path) == ["$GOROOT/src/sort/sort.go"])
-        #expect(withText[1].files[0].functions.contains { $0.name == "sort.stableSort" })
-        #expect(!withText[1].files[0].functions.contains { $0.name == "sort.quickSort" })
+        #expect(withText.map(\.importPath) == ["main", "sort"])
+        #expect(
+            withText[1].files.map(\.path)
+                == ["$GOROOT/src/sort/sort.go", "$GOROOT/src/sort/sorting.go"])
+        #expect(withText[1].files[1].functions.contains { $0.name == "sort.stableSort" })
+        #expect(!withText[1].files[1].functions.contains { $0.name == "sort.quickSort" })
     }
 
-    /// Both families of sorting functions are one text: each function of
-    /// the second is the first with the calls of the methods replaced.
-    @Test func theTwoFamiliesOfSortingFunctionsAreOneText() {
-        let both = GoSourceLibraryText.variants(
-            of: "func sift$(data Interface, a int) {\n    if data.Less(a, 0) {\n        data.Swap(a, 0)\n        sift$(data, 0)\n    }\n}\n")
+    /// The first error of compiling `body` as the body of `func main`, as
+    /// `line:column: message`: what Go prints after the name of the file.
+    private func firstError(_ body: String, imports: [String], declarations: String = "") -> String? {
+        do {
+            _ = try GoCompiler.compile(sources: [
+                GoSourceFile(
+                    path: "main.go",
+                    text: goMainSource(body, imports: imports, declarations: declarations))
+            ])
+            return nil
+        } catch let diagnostic as GoDiagnostic {
+            return String(diagnostic.description.dropFirst("main.go:".count))
+        } catch {
+            return String(describing: error)
+        }
+    }
+
+    /// A package that is all Go is linked like one that is Go in part: a
+    /// constant brings no function, a variable brings what initializes it,
+    /// and a type brings its methods and what they reach, not the package.
+    @Test func aPackageIsLinkedByWhatIsReachedOfIt() throws {
+        let constants = try functionNames(
+            "fmt.Println(http.StatusOK, http.MethodGet)", imports: ["fmt", "net/http"])
+        #expect(constants == ["main", "$net/http.init"])
+
+        let discard = try functionNames(
+            """
+            n, err := io.Discard.Write([]byte("gone"))
+            fmt.Println(n, err, io.EOF)
+            """, imports: ["fmt", "io"])
+        #expect(discard == ["main", "$io.init", "io.discard.Write", "io.discard.WriteString"])
+
+        let header = try functionNames(
+            """
+            h := http.Header{}
+            h.Set("a", "b")
+            fmt.Println(h.Get("A"))
+            """, imports: ["fmt", "net/http"])
+        #expect(header.contains("net/http.Header.Set"))
+        #expect(!header.contains("net/http.ListenAndServe"))
+        #expect(!header.contains { $0.contains("Server") || $0.contains("Client") })
+        #expect(!header.contains { $0.hasPrefix("net/url.") || $0.hasPrefix("io.") })
+
+        let server = try functionNames(
+            "http.ListenAndServe(\":80\", nil)", imports: ["net/http"])
+        #expect(server.contains("*net/http.Server.Serve"))
+        #expect(server.contains("net/url.ParseRequestURI"))
+        #expect(!server.contains("net/http.Get"))
+        #expect(!server.contains("*net/http.Client.Do"))
+    }
+
+    /// The packages of the text are units after the program's, a package
+    /// after those it names, and they initialize before the program.
+    @Test func thePackagesOfTheTextInitializeFirstInGosOrder() throws {
+        let program = try GoNames.resolve([
+            try GoParser.parse(
+                GoSourceFile(
+                    path: "main.go",
+                    text: """
+                        package main
+                        import "net/http"
+                        import "sort"
+                        var mux = http.DefaultServeMux
+                        func main() { sort.Stable(nil) }
+
+                        """))
+        ])
+        let units = try GoSourceLibrary.link([
+            GoLinkedUnit(importPath: "main", initializerName: "$package.init", files: program)
+        ])
+
+        let paths = units.map(\.importPath)
+        #expect(paths.first == "main")
+        #expect(Set(paths.dropFirst()) == ["io", "net/http", "net/url", "sort"])
+        #expect(try #require(paths.firstIndex(of: "net/url")) < (try #require(paths.firstIndex(of: "net/http"))))
+        #expect(try #require(paths.firstIndex(of: "io")) < (try #require(paths.firstIndex(of: "net/http"))))
+        #expect(units.map(\.isLibrary) == [false] + Array(repeating: true, count: units.count - 1))
         #expect(
-            both == """
-                func sift(data Interface, a int) {
-                    if data.Less(a, 0) {
-                        data.Swap(a, 0)
-                        sift(data, 0)
+            GoSourceLibrary.initializationOrder(of: units)
+                == Array(1..<units.count) + [0])
+    }
+
+    /// A variable of a package of the text has its value when a variable
+    /// or an `init` of the program reads it. Expected output is Go's.
+    @Test func aVariableOfTheTextIsInitializedBeforeTheProgram() throws {
+        #expect(
+            try runGoMain(
+                """
+                n, err := sink.Write([]byte("gone"))
+                fmt.Println(n, err, errors.Is(wrapped, http.ErrServerClosed), status, notFound)
+                fmt.Println(io.ErrUnexpectedEOF, io.ErrShortWrite, http.ErrBodyNotAllowed)
+                fmt.Println(fmt.Sprintf("%T %T %T", sink, mux, http.NoBody))
+                fmt.Println(http.DefaultClient == http.DefaultClient, http.MethodGet, http.TimeFormat)
+                """,
+                imports: ["errors", "fmt", "io", "net/http"],
+                declarations: """
+                    var (
+                        mux      = http.DefaultServeMux
+                        sink     = io.Discard
+                        closed   = http.ErrServerClosed
+                        wrapped  = fmt.Errorf("serve: %w", http.ErrServerClosed)
+                        status   = http.StatusTeapot
+                        notFound = http.StatusText(http.StatusNotFound)
+                    )
+
+                    func init() {
+                        fmt.Println("init", mux != nil, mux == http.DefaultServeMux, closed)
                     }
-                }
-                func siftFunc(x any, less func(i, j int) bool, a int) {
-                    if less(a, 0) {
-                        native.swap(x, a, 0)
-                        siftFunc(x, less, 0)
-                    }
-                }
+                    """)
+                == """
+                init true true http: Server closed
+                4 <nil> true 418 Not Found
+                unexpected EOF short write http: request method or response status code does not allow body
+                io.discard *http.ServeMux http.noBody
+                true GET Mon, 02 Jan 2006 15:04:05 GMT
 
                 """)
+    }
+
+    /// A member written in Go is named as Go names it, whatever the path
+    /// of its package and whatever the file calls the package, and what
+    /// the text does not export is not there. Each is Go's first error.
+    @Test func mistakesNameTheLibraryAsGoDoes() {
+        #expect(
+            firstError("fmt.Println(http.cleanPath(\"/\"))", imports: ["fmt", "net/http"])
+                == "6:18: undefined: http.cleanPath")
+        #expect(
+            firstError("var d io.discard\nfmt.Println(d)", imports: ["fmt", "io"])
+                == "6:10: undefined: io.discard")
+        #expect(
+            firstError(
+                "mux := http.NewServeMux()\nfmt.Println(mux.mu)", imports: ["fmt", "net/http"])
+                == "7:17: mux.mu undefined (cannot refer to unexported field mu)")
+        #expect(
+            firstError("http.HandleFunc(\"/\", 5)", imports: ["net/http"])
+                == "5:22: cannot use 5 (untyped int constant) as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
+        #expect(
+            firstError(
+                "h.HandleFunc(\"/\", 5)", imports: [], declarations: "import h \"net/http\"")
+                == "4:19: cannot use 5 (untyped int constant) as func(http.ResponseWriter, *http.Request) value in argument to h.HandleFunc")
+        #expect(
+            firstError(
+                "var u *url.URL = &http.Request{}\nfmt.Println(u)",
+                imports: ["fmt", "net/http", "net/url"])
+                == "7:18: cannot use &http.Request{} (value of type *http.Request) as *url.URL value in variable declaration")
     }
 
     /// Two packages of one module that both sort, share a `sync.Once`

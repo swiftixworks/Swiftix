@@ -1,13 +1,3 @@
-/// Go source of the package `net/url`. See `GoEmbeddedLibrary`.
-///
-/// The text is Go as `gofmt` prints it, compiled with every program that
-/// uses the package. A path under `$GOROOT/src` names each file in a
-/// diagnostic, which only a mistake in this source can produce.
-extension GoEmbeddedSources {
-    static let netURL: [GoSourceFile] = [
-        GoSourceFile(
-            path: "$GOROOT/src/net/url/url.go",
-            text: #"""
 // Package url parses URLs and escapes their parts, for the URLs of HTTP: a
 // scheme, an authority, a path, a query, and a fragment. Its results are
 // those of Go's net/url. Escaping goes over a string byte by byte, so the
@@ -17,7 +7,6 @@ package url
 import (
 	"errors"
 	"fmt"
-	neturl "net/url"
 	"sort"
 	"strings"
 )
@@ -65,7 +54,7 @@ func unescape(s string, mode int) (string, error) {
 	if !strings.Contains(s, "%") && mode == encodePath {
 		return s, nil
 	}
-	out, bad, kind := neturl.unescape(s, mode)
+	out, bad, kind := native.unescape(s, mode)
 	switch kind {
 	case 1:
 		return "", EscapeError(bad)
@@ -87,12 +76,12 @@ func PathUnescape(s string) (string, error) {
 
 // QueryEscape escapes s for use as a key or a value of a query.
 func QueryEscape(s string) string {
-	return neturl.escape(s, encodeQueryComponent)
+	return native.escape(s, encodeQueryComponent)
 }
 
 // PathEscape escapes s for use as one segment of a path.
 func PathEscape(s string) string {
-	return neturl.escape(s, encodePathSegment)
+	return native.escape(s, encodePathSegment)
 }
 
 // A URL is a parsed URL:
@@ -153,9 +142,9 @@ func (u *Userinfo) String() string {
 	if u == nil {
 		return ""
 	}
-	s := neturl.escape(u.username, encodeUserPassword)
+	s := native.escape(u.username, encodeUserPassword)
 	if u.passwordSet {
-		s += ":" + neturl.escape(u.password, encodeUserPassword)
+		s += ":" + native.escape(u.password, encodeUserPassword)
 	}
 	return s
 }
@@ -221,7 +210,7 @@ func ParseRequestURI(rawURL string) (*URL, error) {
 // parse parses a URL without a fragment. One that arrived in a request may
 // not be a relative path.
 func parse(rawURL string, viaRequest bool) (*URL, error) {
-	if neturl.hasControlByte(rawURL) {
+	if native.hasControlByte(rawURL) {
 		return nil, errors.New("net/url: invalid control character in URL")
 	}
 
@@ -365,7 +354,7 @@ func (u *URL) setPath(p string) error {
 		return err
 	}
 	u.Path = path
-	if escp := neturl.escape(path, encodePath); p == escp {
+	if escp := native.escape(path, encodePath); p == escp {
 		u.RawPath = ""
 	} else {
 		u.RawPath = p
@@ -376,7 +365,7 @@ func (u *URL) setPath(p string) error {
 // EscapedPath returns the path as the URL writes it: RawPath when that is
 // a valid escaping of Path, and Path escaped otherwise.
 func (u *URL) EscapedPath() string {
-	if u.RawPath != "" && neturl.validEncoded(u.RawPath, encodePath) {
+	if u.RawPath != "" && native.validEncoded(u.RawPath, encodePath) {
 		p, err := unescape(u.RawPath, encodePath)
 		if err == nil && p == u.Path {
 			return u.RawPath
@@ -385,7 +374,7 @@ func (u *URL) EscapedPath() string {
 	if u.Path == "*" {
 		return "*" // don't escape (Issue 11202)
 	}
-	return neturl.escape(u.Path, encodePath)
+	return native.escape(u.Path, encodePath)
 }
 
 // setFragment is setPath for the fragment.
@@ -395,7 +384,7 @@ func (u *URL) setFragment(f string) error {
 		return err
 	}
 	u.Fragment = frag
-	if escf := neturl.escape(frag, encodeFragment); f == escf {
+	if escf := native.escape(frag, encodeFragment); f == escf {
 		u.RawFragment = ""
 	} else {
 		u.RawFragment = f
@@ -405,13 +394,13 @@ func (u *URL) setFragment(f string) error {
 
 // EscapedFragment is EscapedPath for the fragment.
 func (u *URL) EscapedFragment() string {
-	if u.RawFragment != "" && neturl.validEncoded(u.RawFragment, encodeFragment) {
+	if u.RawFragment != "" && native.validEncoded(u.RawFragment, encodeFragment) {
 		f, err := unescape(u.RawFragment, encodeFragment)
 		if err == nil && f == u.Fragment {
 			return u.RawFragment
 		}
 	}
-	return neturl.escape(u.Fragment, encodeFragment)
+	return native.escape(u.Fragment, encodeFragment)
 }
 
 // validOptionalPort reports whether port is empty or a colon and digits.
@@ -476,7 +465,7 @@ func (u *URL) String() string {
 					buf += ui.String() + "@"
 				}
 				if h := u.Host; h != "" {
-					buf += neturl.escape(h, encodeHost)
+					buf += native.escape(h, encodeHost)
 				}
 			}
 		}
@@ -763,7 +752,4 @@ func (v Values) Encode() string {
 		}
 	}
 	return buf
-}
-"""#),
-    ]
 }

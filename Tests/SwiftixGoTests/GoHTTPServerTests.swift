@@ -217,8 +217,8 @@ struct GoHTTPServerTests: GoTestHarness {
                 fmt.Println(string(data), err, err == io.EOF)
             }
             """)
-        #expect(reader.contains("swiftix/go/io.ReadAll"))
-        #expect(reader.contains("swiftix/go/strings.NewReader"))
+        #expect(reader.contains("io.ReadAll"))
+        #expect(reader.contains("strings.NewReader"))
         #expect(!reader.contains { $0.hasPrefix("net/http.") })
 
         let server = try functionNames(
@@ -311,16 +311,15 @@ struct GoHTTPServerTests: GoTestHarness {
     /// members written in Go knows which they are: a file that did not
     /// parse would leave its names to the native package without a word.
     @Test func theLibraryParses() throws {
-        for sources in GoEmbeddedLibrary.packages.values {
-            for source in sources { _ = try GoParser.parse(source) }
+        for path in GoSourceLibraryText.paths {
+            for source in GoSourceLibraryText.files(ofPackage: path) ?? [] {
+                _ = try GoParser.parse(source)
+            }
+            #expect(GoSourceLibraryText.declared[path]?.isEmpty == false)
         }
-        for supplement in GoEmbeddedLibrary.supplements.values {
-            for source in supplement.sources { _ = try GoParser.parse(source) }
-            #expect(!supplement.names.isEmpty)
-        }
-        #expect(GoEmbeddedLibrary.supplements["io"]?.names.contains("ReadAll") == true)
-        #expect(GoEmbeddedLibrary.supplements["io"]?.names.contains("EOF") == false)
-        #expect(GoEmbeddedLibrary.supplements["strings"]?.names == ["NewReader", "Reader"])
+        #expect(GoSourceLibrary.declares(path: "io", member: "ReadAll"))
+        #expect(!GoSourceLibrary.declares(path: "io", member: "EOF"))
+        #expect(GoSourceLibraryText.declared["strings"] == ["NewReader", "Reader"])
     }
 
     // MARK: - Diagnostics

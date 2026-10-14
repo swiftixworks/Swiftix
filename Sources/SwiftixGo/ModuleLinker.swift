@@ -30,6 +30,10 @@ struct GoLinkedUnit {
     let importPath: String
     let initializerName: String
     let files: [GoFile]
+    /// Whether the unit is a package of the run-time library that is
+    /// written in Go, which initializes before any package of the program
+    /// wherever its functions stand. See `GoSourceLibrary`.
+    var isLibrary = false
 }
 
 struct GoLinkedModule {
@@ -125,9 +129,7 @@ enum GoModuleLinker {
                     position: syntheticPosition("<link>"),
                     message: "no Go source files in package \(path)")
             }
-            let files = try GoEmbeddedLibrary.redirected(
-                GoLocalTypes.hoist(GoBlankNames.name(try sources.map(GoParser.parse))),
-                inPackage: path)
+            let files = try GoLocalTypes.hoist(GoBlankNames.name(try sources.map(GoParser.parse)))
             let name = files[0].packageName
             for file in files where file.packageName != name {
                 throw GoDiagnostic(
@@ -138,15 +140,6 @@ enum GoModuleLinker {
             var seen: Set<String> = []
             for declaration in files.flatMap(\.imports).sorted(by: { $0.path < $1.path })
             where seen.insert(declaration.path).inserted {
-                // A package of the library that is written in Go means the
-                // natives it has by its own path, and is linked like a
-                // local package where another imports it.
-                if declaration.path == path, GoEmbeddedLibrary.isPackage(path) { continue }
-                if sourcesByPath[declaration.path] == nil,
-                    let embedded = GoEmbeddedLibrary.sources(importedBy: declaration)
-                {
-                    sourcesByPath[declaration.path] = embedded
-                }
                 guard sourcesByPath[declaration.path] != nil else {
                     guard GoStandardLibrary.supportedPackages.contains(declaration.path) else {
                         throw GoDiagnostic(

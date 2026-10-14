@@ -1,13 +1,3 @@
-/// Go source of the members of `io` that are written in Go. See `GoEmbeddedLibrary`.
-///
-/// The text is Go as `gofmt` prints it, compiled with every program that
-/// uses the package. A path under `$GOROOT/src` names each file in a
-/// diagnostic, which only a mistake in this source can produce.
-extension GoEmbeddedSources {
-    static let io: [GoSourceFile] = [
-        GoSourceFile(
-            path: "$GOROOT/src/io/io.go",
-            text: #"""
 // Package io is the part of io that is written in Go: the interfaces, and
 // the functions that call their methods. EOF and the Seek constants belong
 // to the run-time library, which this file imports under the same path.
@@ -153,6 +143,3 @@ func (d discard) WriteString(s string) (int, error) { return len(s), nil }
 
 // Discard accepts every write and keeps nothing.
 var Discard Writer = discard{}
-"""#),
-    ]
-}
