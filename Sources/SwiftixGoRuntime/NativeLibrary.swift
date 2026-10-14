@@ -28,6 +28,7 @@ enum GoNative {
         "$copy": 2,
         "$new": 1,
         "$clear": 2,
+        "$slice.full": 6,
         "$append": 3,
         "$strings.ToUpper": 1,
         "$strings.ToLower": 1,

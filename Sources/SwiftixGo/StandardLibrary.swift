@@ -357,6 +357,7 @@ extension GoStandardLibrary {
             || name.hasPrefix(GoPredeclared.bindVariable)
             || name == GoPredeclared.callFunctionValue
             || name == GoPredeclared.requireValue
+            || name == GoFullSlice.nativeName
             || name.hasPrefix(GoPredeclared.liveResults)
             || GoLibraryTypes.nativeCallNames.contains(name)
             || GoProcessLibrary.nativeCallNames.contains(name)

@@ -225,6 +225,10 @@ struct GoOperatorSpacing: Equatable, Sendable {
             visit(index, depth: depth + 1)
         case .slicing(let base, let low, let high, let position):
             visit(base, depth: 1)
+            if let bounds = high?.fullSliceBounds {
+                visitFullSlice(low: low, bounds: bounds, depth: depth, at: position)
+                break
+            }
             if depth <= 1, let low, let high, binary(low) != nil || binary(high) != nil {
                 spacedSlices.insert(position.offset)
             }
@@ -368,5 +372,21 @@ struct GoOperatorSpacing: Equatable, Sendable {
                 visit(selectCase.body)
             }
         }
+    }
+}
+
+extension GoOperatorSpacing {
+    /// `a[low:high:max]`: Go's printer puts blanks around its colons when
+    /// any index is an operation, outside an expression that already
+    /// spaces its own operators more tightly.
+    fileprivate mutating func visitFullSlice(
+        low: GoExpression?, bounds: (high: GoExpression, max: GoExpression), depth: Int,
+        at position: GoSourcePosition
+    ) {
+        let indexes = [low, bounds.high, bounds.max].compactMap { $0 }
+        if depth <= 1, indexes.contains(where: { binary($0) != nil }) {
+            spacedSlices.insert(position.offset)
+        }
+        for index in indexes { visit(index, depth: depth + 1) }
     }
 }

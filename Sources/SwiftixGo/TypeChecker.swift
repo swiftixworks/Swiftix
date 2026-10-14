@@ -2018,7 +2018,10 @@ struct FunctionChecker {
                 guard let constant = switchCaseConstant(caseExpression) else { continue }
                 let place = Self.start(of: caseExpression, in: namePositions)
                 if let previous = constants.updateValue(place, forKey: constant) {
-                    throw duplicateCase(caseExpression, of: switchType, at: place, after: previous)
+                    // A constant case of a switch on an interface keeps
+                    // its own type.
+                    let caseType = isInterface(switchType) ? try type(of: caseExpression) : switchType
+                    throw duplicateCase(caseExpression, of: caseType, at: place, after: previous)
                 }
             }
             try checkBlock(switchCase.body)
@@ -2064,6 +2067,9 @@ struct FunctionChecker {
                 || (adoptsConstants(switchType)
                     && isAssignable(caseExpression, ofType: caseType, to: switchType))
                 || (caseType == .nilType && isAssignable(.nilType, to: switchType))
+                || (switched.map {
+                    try comparesAsInterfaces(caseExpression, caseType, $0, switchType)
+                } ?? false)
         guard matches else {
             // Go adds why to a case a slice, a map, or a function cannot
             // be compared with.
@@ -2445,9 +2451,13 @@ struct FunctionChecker {
         guard case .slicing(let base, let low, let high, _) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
+        if let bounds = high?.fullSliceBounds {
+            return try typeOfFullSlice(base: base, low: low, high: bounds.high, max: bounds.max)
+        }
         for bound in [low, high].compactMap({ $0 }) where !isInteger(try type(of: bound)) {
             throw nonIntegerIndex(bound)
         }
+        try checkConstantSliceIndexes(of: base, [low, high])
         switch try indexedType(of: base) {
         case .array(_, let element), .slice(let element): return .slice(element)
         case .string: return .string
@@ -2508,6 +2518,9 @@ struct FunctionChecker {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
         var (leftType, rightType) = try operandTypes(left, right)
+        if let compared = try interfaceComparisonType(expression, leftType, rightType) {
+            return compared
+        }
         if leftType != rightType,
             let common = try commonOperandType(
                 left: left, leftType: leftType, right: right, rightType: rightType)
@@ -3095,7 +3108,7 @@ struct FunctionChecker {
             }
             return binding.type
         case .selector(let base, let name, let position):
-            let baseType = try assignableType(of: base)
+            let baseType = try pointerBaseType(of: base) ?? assignableType(of: base)
             try requireVisible(name, of: base, in: baseType, at: position)
             if let lent = try promotedType(
                 base: base, baseType: baseType, name: name, at: position, assignable: true)

@@ -804,7 +804,8 @@ public enum GoSourceRewriter {
         case .slicing(let base, let low, let high, _):
             return render(base, captures: captures) + "["
                 + (low.map { render($0, captures: captures) } ?? "") + ":"
-                + (high.map { render($0, captures: captures) } ?? "") + "]"
+                + (high?.sliceIndexesAfterLow.map { render($0, captures: captures) }
+                    .joined(separator: ":") ?? "") + "]"
         case .call(let callee, let arguments, _):
             return render(callee, captures: captures) + "("
                 + arguments.map { render($0, captures: captures) }.joined(separator: ", ") + ")"

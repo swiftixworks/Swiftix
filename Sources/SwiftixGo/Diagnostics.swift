@@ -1084,12 +1084,22 @@ extension FunctionChecker {
                 if let failure = conversionFailure(left, ofType: leftType, to: rightType) {
                     return failure
                 }
-                if !isInterface(rightType) { (leftType, leftName) = (rightType, nil) }
+                // Given to an interface, a constant has its default type.
+                if !isInterface(rightType) {
+                    (leftType, leftName) = (rightType, nil)
+                } else {
+                    leftName = nil
+                }
             } else if rightName != nil, leftName == nil, rightType != .nilType {
                 if let failure = conversionFailure(right, ofType: rightType, to: leftType) {
                     return failure
                 }
-                if !isInterface(leftType) { (rightType, rightName) = (leftType, nil) }
+                // Given to an interface, a constant has its default type.
+                if !isInterface(leftType) {
+                    (rightType, rightName) = (leftType, nil)
+                } else {
+                    rightName = nil
+                }
             }
         }
         let spelled = operatorSpelling(operatorText, at: position)

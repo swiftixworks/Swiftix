@@ -66,14 +66,6 @@ struct GoCompoundAssignmentTests: GoTestHarness {
         #expect(goMainDiagnostic("x := 1\nx +=") == "expected expression")
         #expect(
             goMainDiagnostic("x += 1", declarations: "const x = 1") == "cannot assign to x (neither addressable nor a map index expression)")
-        // The target is evaluated twice, so anything with an effect is refused.
-        #expect(
-            goMainDiagnostic(
-                "a := []int{1}\na[next()] += 1", declarations: "func next() int { return 0 }")
-                == "+= target must not contain a call or a channel receive")
-        #expect(
-            goMainDiagnostic("c := make(chan int, 1)\na := []int{1}\na[<-c] |= 1")
-                == "|= target must not contain a call or a channel receive")
     }
 
     @Test func compoundAssignmentIsCheapAndBounded() throws {

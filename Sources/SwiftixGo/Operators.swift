@@ -239,6 +239,7 @@ extension GoExpression {
         case .binary(let left, _, let right, _):
             return left.isRepeatable && right.isRepeatable
         case .call:
+            if let bounds = fullSliceBounds { return bounds.high.isRepeatable && bounds.max.isRepeatable }
             guard let operation = bitwiseOperation else { return false }
             return operation.operands.allSatisfy(\.isRepeatable)
         case .compositeLiteral, .typeAssertion, .functionLiteral:

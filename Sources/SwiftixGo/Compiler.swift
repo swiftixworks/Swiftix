@@ -2079,6 +2079,7 @@ struct IRLowerer {
 
     mutating func lowerAssignment(_ statement: GoStatement) throws {
         guard case .assignment(let target, let expression, _) = statement else { return }
+        if try lowerOnceEvaluatedTarget(statement) { return }
         if target.isBlank {
             _ = try lower(expression)
             return
@@ -2322,6 +2323,7 @@ struct IRLowerer {
 
     mutating func lowerIncrement(_ statement: GoStatement) throws {
         guard case .increment(let target, let incrementOperator, _) = statement else { return }
+        if try lowerOnceEvaluatedTarget(statement) { return }
         if try lowerNumericIncrement(statement) { return }
         let current = try lower(target)
         let one = constant(.int(1))
@@ -2402,7 +2404,7 @@ struct IRLowerer {
                 arguments: registers))
         } else if case .functionLiteral(_, _, _, _, let literalPosition) = callee {
             let name = runtimeLiteralName(literalPosition)
-            let registers = try arguments.map { try lower($0) }
+            let registers = try lowerLiftedLiteralArguments(arguments, of: name)
             operations.append(.deferCall(
                 function: functionSymbolNames[name] ?? name,
                 arguments: registers))
@@ -2507,7 +2509,7 @@ struct IRLowerer {
             let name = runtimeLiteralName(literalPosition)
             operations.append(.spawn(
                 function: functionSymbolNames[name] ?? name,
-                arguments: try arguments.map { try lower($0) }))
+                arguments: try lowerLiftedLiteralArguments(arguments, of: name)))
         } else if case .selector(let base, let member, _) = callee,
             case .identifier(let packageName, _) = base,
             lookup(packageName) == nil,
@@ -2781,7 +2783,8 @@ struct IRLowerer {
 
         for (index, switchCase) in cases.enumerated() where !switchCase.isDefault {
             for caseExpression in switchCase.expressions {
-                let caseRegister = try lower(caseExpression)
+                let caseRegister = interfaceComparand(
+                    try lower(caseExpression), caseExpression, against: expression, by: .equal)
                 let comparison = allocateRegister()
                 if expression.map(isFloatingPoint) == true {
                     // Two floating-point numbers are equal by value: the
@@ -2795,7 +2798,9 @@ struct IRLowerer {
                         .binary(
                             destination: comparison,
                             operator: .equal,
-                            left: switchRegister,
+                            left: interfaceComparand(
+                                switchRegister, expression ?? caseExpression,
+                                against: caseExpression, by: .equal),
                             right: caseRegister))
                 }
                 operations.append(.jumpIfTrue(condition: comparison, target: caseLabels[index]))
@@ -4093,7 +4098,8 @@ struct IRLowerer {
                 operator: binaryOperator,
                 right: right)
         }
-        let leftRegister = try lower(left)
+        let leftRegister = interfaceComparand(
+            try lower(left), left, against: right, by: binaryOperator)
         let rightRegister = comparand(try lower(right), right, against: left, by: binaryOperator)
         let destination = allocateRegister()
         operations.append(
@@ -4312,6 +4318,10 @@ struct IRLowerer {
         }
         if let followed = throughArrayPointer(indexOrSlice: expression) {
             return try lowerSlicingExpression(followed)
+        }
+        if let bounds = high?.fullSliceBounds {
+            return try lowerFullSlice(
+                base: base, low: low, high: bounds.high, max: bounds.max, position: position)
         }
         let baseType = try type(of: base)
         let lowRegister = try low.map { try lower($0) } ?? constant(.int(0))
@@ -5993,6 +6003,8 @@ extension IRLowerer {
         by binaryOperator: GoBinaryOperator
     ) -> Int {
         guard binaryOperator == .equal || binaryOperator == .notEqual else { return register }
+        let boxed = interfaceComparand(register, operand, against: other, by: binaryOperator)
+        if boxed != register { return boxed }
         return renamedStruct(register, from: staticType(of: operand), to: staticType(of: other))
             ?? register
     }

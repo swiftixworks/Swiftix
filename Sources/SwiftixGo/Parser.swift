@@ -1556,11 +1556,6 @@ private struct Parser {
             let compound = GoCompoundAssignment(spelling: spelling)
         {
             let operatorPosition = current.position
-            guard target.isRepeatable else {
-                throw GoDiagnostic(
-                    position: operatorPosition,
-                    message: "\(spelling) target must not contain a call or a channel receive")
-            }
             advance()
             let value = try parseExpression(allowCompositeLiteral: allowCompositeLiteral)
             // A message about the operation writes it as the source does.
@@ -1736,7 +1731,8 @@ private struct Parser {
                 }
                 if check(.colon) {
                     advance()
-                    let high = check(.rightBracket) ? nil : try parseExpression()
+                    var high = check(.rightBracket) || check(.colon) ? nil : try parseExpression()
+                    if check(.colon) { high = try parseFullSliceMax(after: high) }
                     try expect(.rightBracket, message: "expected ']'")
                     expression = .slicing(
                         base: expression,
@@ -2014,5 +2010,19 @@ private struct Parser {
 
     func diagnostic(_ message: String) -> GoDiagnostic {
         GoDiagnostic(position: current.position, message: message)
+    }
+}
+
+extension Parser {
+    /// The `max` of `a[low:high:max]`, at its second colon, and the second
+    /// index that carries `high` and it (see `GoFullSlice`). Both are
+    /// required, as Go says.
+    mutating func parseFullSliceMax(after high: GoExpression?) throws -> GoExpression {
+        guard let high else { throw diagnostic("middle index required in 3-index slice") }
+        advance()
+        guard !check(.rightBracket) else {
+            throw diagnostic("final index required in 3-index slice")
+        }
+        return GoFullSlice.bounds(high: high, max: try parseExpression())
     }
 }

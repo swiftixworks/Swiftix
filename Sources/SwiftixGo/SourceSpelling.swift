@@ -59,7 +59,8 @@ extension GoExpression {
         case .slicing(let base, let low, let high, _):
             return base.spelledAsOperand(in: parentheses) + "["
                 + (low?.spelled(in: parentheses) ?? "") + ":"
-                + (high?.spelled(in: parentheses) ?? "") + "]"
+                + (high?.sliceIndexesAfterLow.map { $0.spelled(in: parentheses) }
+                    .joined(separator: ":") ?? "") + "]"
         case .typeExpression(let type, _):
             return type.sourceSpelling
         case .call(let callee, let arguments, _):

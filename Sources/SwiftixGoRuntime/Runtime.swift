@@ -4756,6 +4756,42 @@ public struct GoVirtualMachine: Sendable {
                 // each time, which lives as long as a pointer reaches it.
                 let cell = try vm.heap.allocate(try pop(&stack))
                 stack.append(.pointer(GoPointer(cell: cell)))
+            case "$slice.full":
+                // `a[low:high:max]`: a slice, or the array a pointer points
+                // to, then the zero value of an array's element and whether
+                // it is an array.
+                guard case .bool(let isArray) = try pop(&stack) else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                let zero = try pop(&stack)
+                guard case .int(let max) = try pop(&stack), case .int(let high) = try pop(&stack),
+                    case .int(let low) = try pop(&stack)
+                else { throw GoRuntimeError.typeMismatch }
+                let base = try pop(&stack)
+                var made: GoSliceValue?
+                switch base {
+                case .nilValue:
+                    if isArray { throw GoRuntimePanic.nilDereference }
+                    try GoFullSliceBounds.check(low, high, max, capacity: 0, isArray: false)
+                case .slice(let slice):
+                    _ = try validatedSliceRange(slice)
+                    try GoFullSliceBounds.check(low, high, max, capacity: slice.capacity, isArray: false)
+                    made = GoSliceValue(
+                        backing: slice.backing, start: slice.start + Int(low),
+                        length: Int(high - low), capacity: Int(max - low), zeroValue: slice.zeroValue)
+                case .pointer(let pointer):
+                    guard case .array(let values) = try read(pointer: pointer, heap: vm.heap) else {
+                        throw GoRuntimeError.typeMismatch
+                    }
+                    try GoFullSliceBounds.check(low, high, max, capacity: values.count, isArray: true)
+                    made = GoSliceValue(
+                        backing: pointer, start: Int(low), length: Int(high - low),
+                        capacity: Int(max - low), zeroValue: zero)
+                default:
+                    throw GoRuntimeError.typeMismatch
+                }
+                // A nil slice sliced to nothing stays nil.
+                stack.append(made.map { .slice($0) } ?? .nilValue)
             case "$clear":
                 // `clear`: a map keeps its identity and loses its entries,
                 // and every element of a slice becomes the zero value that
@@ -5181,9 +5217,15 @@ public struct GoVirtualMachine: Sendable {
                     vm.stack.append(.int(lhs == Int64.min && rhs == -1 ? 0 : lhs % rhs))
                 case .equal:
                     let (left, right) = try popPair(&vm.stack)
+                    if case .interface = left {
+                        try GoInterfaceEquality.requireComparable(left, right)
+                    }
                     vm.stack.append(.bool(left == right))
                 case .notEqual:
                     let (left, right) = try popPair(&vm.stack)
+                    if case .interface = left {
+                        try GoInterfaceEquality.requireComparable(left, right)
+                    }
                     vm.stack.append(.bool(left != right))
                 case .less:
                     try orderedComparison(&vm.stack, integer: <, string: <)
