@@ -262,6 +262,10 @@ public final class HostGoToolContext: GoToolContext {
         let loop = EventLoop()
         let kernel = Kernel(loop: loop)
         Self.attachLoopback(to: kernel)
+        // The program is not PID 1, as a program Go's `go run` starts is
+        // not: the kernel, like Linux, drops a signal PID 1 has no handler
+        // for, so `os.Getpid` and a signal sent to it would differ.
+        kernel.spawn("init") { $0.exit(0) }
         var result: Result<Int32, Error>?
         kernel.spawn(arguments.first ?? "swiftix-go", args: arguments) { context in
             self.installRuntimeStandardIO(on: context)
@@ -282,6 +286,7 @@ public final class HostGoToolContext: GoToolContext {
                 // that loops forever runs until it is interrupted.
                 var machine = GoVirtualMachine(maximumInstructions: .max)
                 machine.tracesPanics = true
+                machine.endsRunOnUnhandledSignal = true
                 let code = try machine.run(
                     executable,
                     eventLoop: loop,

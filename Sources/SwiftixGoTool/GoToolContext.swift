@@ -65,6 +65,7 @@ extension ProcessContext: GoToolContext {
         // that loops forever runs until it is interrupted.
         var machine = GoVirtualMachine(maximumInstructions: .max)
         machine.tracesPanics = true
+        machine.endsRunOnUnhandledSignal = true
         return try machine.run(
             executable,
             eventLoop: eventLoop,

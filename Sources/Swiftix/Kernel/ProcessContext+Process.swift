@@ -347,6 +347,17 @@ extension ProcessContext {
         process.signalHandlers[number] = handler
     }
 
+    /// How the process ended, once it has: an exit status or the signal
+    /// that terminated it. Nil while it runs.
+    public var terminationStatus: ProcessExitStatus? {
+        process.terminalStatus
+    }
+
+    /// Remove the handler of a signal: its default disposition applies again.
+    public func resetSignal(_ number: Int32) {
+        process.signalHandlers[number] = nil
+    }
+
     /// The process's current blocked signal set. SIGKILL and SIGSTOP are never
     /// retained here; SIGCONT may be masked but its resume effect is immediate.
     public var signalMask: Set<Int32> {

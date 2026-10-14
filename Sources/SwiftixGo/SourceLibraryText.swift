@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "encoding", "encoding/base64", "encoding/json", "flag", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "encoding", "encoding/base64", "encoding/json", "flag", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "os/signal", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -176,10 +176,17 @@ enum GoSourceLibraryText {
         ],
         "os": [
             "Create", "ErrClosed", "ErrDeadlineExceeded", "ErrExist", "ErrInvalid", "ErrNotExist",
-            "ErrPermission", "IsExist", "IsNotExist", "IsPermission", "IsTimeout", "LinkError",
-            "Mkdir", "NewSyscallError", "Open", "OpenFile", "PathError", "ReadFile", "Remove",
-            "Rename", "SyscallError", "WriteFile", "deadlineExceededError", "errno", "pathError",
-            "timeout", "underlyingError", "underlyingErrorIs",
+            "ErrPermission", "FindProcess", "Interrupt", "IsExist", "IsNotExist", "IsPermission",
+            "IsTimeout", "Kill", "LinkError", "Mkdir", "NewSyscallError", "Open", "OpenFile",
+            "PathError", "Process", "ReadFile", "Remove", "Rename", "Signal", "SyscallError",
+            "WriteFile", "deadlineExceededError", "errno", "pathError", "timeout",
+            "underlyingError", "underlyingErrorIs",
+        ],
+        "os/signal": [
+            "Ignore", "Ignored", "Notify", "NotifyContext", "Reset", "Stop", "cancel",
+            "disableSignal", "enableSignal", "handler", "handlersM", "handlersMu", "handlersRef",
+            "ignoreSignal", "ignored", "loop", "numSig", "process", "signalCtx", "signalIgnored",
+            "signum", "stringer", "watchSignalLoopOnce",
         ],
         "runtime": [
             "Error",
@@ -225,7 +232,9 @@ enum GoSourceLibraryText {
             "EACCES", "EADDRINUSE", "EADDRNOTAVAIL", "EAGAIN", "EBADF", "ECHILD", "ECONNREFUSED",
             "ECONNRESET", "EEXIST", "EINTR", "EINVAL", "EIO", "EISDIR", "EMFILE", "ENETUNREACH",
             "ENODEV", "ENOENT", "ENOSPC", "ENOSYS", "ENOTCONN", "ENOTDIR", "ENOTEMPTY", "ENOTSUP",
-            "EOPNOTSUPP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "EWOULDBLOCK", "Errno", "itoa",
+            "EOPNOTSUPP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "EWOULDBLOCK", "Errno", "Getpid",
+            "Kill", "SIGALRM", "SIGCHLD", "SIGCONT", "SIGHUP", "SIGINT", "SIGKILL", "SIGPIPE",
+            "SIGQUIT", "SIGSTOP", "SIGTERM", "SIGTSTP", "SIGUSR1", "SIGUSR2", "Signal", "itoa",
         ],
         "time": [
             "ANSIC", "April", "August", "DateOnly", "DateTime", "December", "February", "Friday",
@@ -255,6 +264,7 @@ enum GoSourceLibraryText {
         case "net/http": return netHttp
         case "net/url": return netUrl
         case "os": return os
+        case "os/signal": return osSignal
         case "runtime": return runtime
         case "sort": return sort
         case "strconv": return strconv
@@ -13453,6 +13463,56 @@ func Rename(oldpath, newpath string) error {
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/os/proc.go",
+            text: #"""
+package os
+
+import (
+	"errors"
+	"syscall"
+)
+
+// A Signal represents an operating system signal.
+type Signal interface {
+	String() string
+	Signal() // to distinguish from other Stringers
+}
+
+// The only signal values guaranteed to be present in the os package on all
+// systems are os.Interrupt (send the process an interrupt) and os.Kill
+// (force the process to exit).
+var (
+	Interrupt Signal = syscall.SIGINT
+	Kill      Signal = syscall.SIGKILL
+)
+
+// A Process is a process of the kernel the program runs on.
+type Process struct {
+	Pid int
+}
+
+// FindProcess looks for a running process by its pid. It always succeeds,
+// as on Unix: a process that does not exist is found when it is signalled.
+func FindProcess(pid int) (*Process, error) {
+	return &Process{Pid: pid}, nil
+}
+
+// Signal sends a signal to the Process.
+func (p *Process) Signal(sig Signal) error {
+	s, ok := sig.(syscall.Signal)
+	if !ok {
+		return errors.New("os: unsupported signal type")
+	}
+	return syscall.Kill(p.Pid, s)
+}
+
+// Kill causes the Process to exit immediately.
+func (p *Process) Kill() error {
+	return p.Signal(Kill)
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/os/syscall.go",
             text: #"""
 package os
@@ -13485,6 +13545,334 @@ func NewSyscallError(syscall string, err error) error {
 		return nil
 	}
 	return &SyscallError{syscall, err}
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let osSignal: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/os/signal/signal.go",
+            text: #"""
+// Copyright 2012 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package signal implements access to incoming signals.
+//
+// This is Go's os/signal, written for this run-time library: the VM installs
+// a handler with the kernel for each signal a program asks for and hands
+// what arrives to the goroutine that loop runs, which delivers it to the
+// channels as Go's does, never blocking on one.
+package signal
+
+import (
+	"context"
+	"os"
+	"sync"
+	"syscall"
+)
+
+// numSig is the number of signals a mask has room for.
+const numSig = 65 // max across all systems
+
+var (
+	handlersMu sync.Mutex
+	// Map a channel to the signals that should be sent to it.
+	handlersM map[chan<- os.Signal]*handler
+	// Map a signal to the number of channels receiving it.
+	handlersRef [numSig]int64
+	// Which signals are ignored.
+	ignored [numSig]bool
+)
+
+type handler struct {
+	mask [(numSig + 31) / 32]uint32
+}
+
+func (h *handler) want(sig int) bool {
+	return (h.mask[sig/32]>>uint(sig&31))&1 != 0
+}
+
+func (h *handler) set(sig int) {
+	h.mask[sig/32] |= 1 << uint(sig&31)
+}
+
+func (h *handler) clear(sig int) {
+	h.mask[sig/32] &^= 1 << uint(sig&31)
+}
+
+// Stop relaying the signals, sigs, to any channels previously registered to
+// receive them and either reset the signal handlers to their original values
+// (action=disableSignal) or ignore the signals (action=ignoreSignal).
+func cancel(sigs []os.Signal, action func(int)) {
+	handlersMu.Lock()
+	defer handlersMu.Unlock()
+
+	remove := func(n int) {
+		var zerohandler handler
+
+		for c, h := range handlersM {
+			if h.want(n) {
+				handlersRef[n]--
+				h.clear(n)
+				if h.mask == zerohandler.mask {
+					delete(handlersM, c)
+				}
+			}
+		}
+
+		action(n)
+	}
+
+	if len(sigs) == 0 {
+		for n := 0; n < numSig; n++ {
+			remove(n)
+		}
+	} else {
+		for _, s := range sigs {
+			n := signum(s)
+			if n >= 0 {
+				remove(n)
+			}
+		}
+	}
+}
+
+// Ignore causes the provided signals to be ignored. If they are received by
+// the program, nothing will happen. Ignore undoes the effect of any prior
+// calls to [Notify] for the provided signals.
+// If no signals are provided, all incoming signals will be ignored.
+func Ignore(sig ...os.Signal) {
+	cancel(sig, ignoreSignal)
+}
+
+// Ignored reports whether sig is currently ignored.
+func Ignored(sig os.Signal) bool {
+	sn := signum(sig)
+	return sn >= 0 && signalIgnored(sn)
+}
+
+var watchSignalLoopOnce sync.Once
+
+// Notify causes package signal to relay incoming signals to c.
+// If no signals are provided, all incoming signals will be relayed to c.
+// Otherwise, just the provided signals will.
+//
+// Package signal will not block sending to c: the caller must ensure
+// that c has sufficient buffer space to keep up with the expected
+// signal rate. For a channel used for notification of just one signal value,
+// a buffer of size 1 is sufficient.
+//
+// It is allowed to call Notify multiple times with the same channel:
+// each call expands the set of signals sent to that channel.
+// The only way to remove signals from the set is to call [Stop].
+//
+// It is allowed to call Notify multiple times with different channels
+// and the same signals: each channel receives copies of incoming
+// signals independently.
+func Notify(c chan<- os.Signal, sig ...os.Signal) {
+	if c == nil {
+		panic("os/signal: Notify using nil channel")
+	}
+
+	handlersMu.Lock()
+	defer handlersMu.Unlock()
+
+	h := handlersM[c]
+	if h == nil {
+		if handlersM == nil {
+			handlersM = make(map[chan<- os.Signal]*handler)
+		}
+		h = new(handler)
+		handlersM[c] = h
+	}
+
+	add := func(n int) {
+		if n < 0 {
+			return
+		}
+		if !h.want(n) {
+			h.set(n)
+			if handlersRef[n] == 0 {
+				enableSignal(n)
+
+				// The runtime requires that we enable a
+				// signal before starting the watcher.
+				watchSignalLoopOnce.Do(func() {
+					go loop()
+				})
+			}
+			handlersRef[n]++
+		}
+	}
+
+	if len(sig) == 0 {
+		for n := 0; n < numSig; n++ {
+			add(n)
+		}
+	} else {
+		for _, s := range sig {
+			add(signum(s))
+		}
+	}
+}
+
+// Reset undoes the effect of any prior calls to [Notify] for the provided
+// signals.
+// If no signals are provided, all signal handlers will be reset.
+func Reset(sig ...os.Signal) {
+	cancel(sig, disableSignal)
+}
+
+// Stop causes package signal to stop relaying incoming signals to c.
+// It undoes the effect of all prior calls to [Notify] using c.
+// When Stop returns, it is guaranteed that c will receive no more signals.
+func Stop(c chan<- os.Signal) {
+	handlersMu.Lock()
+	defer handlersMu.Unlock()
+
+	h := handlersM[c]
+	if h == nil {
+		return
+	}
+	delete(handlersM, c)
+
+	for n := 0; n < numSig; n++ {
+		if h.want(n) {
+			handlersRef[n]--
+			if handlersRef[n] == 0 {
+				disableSignal(n)
+			}
+		}
+	}
+}
+
+func process(sig os.Signal) {
+	n := signum(sig)
+	if n < 0 {
+		return
+	}
+
+	handlersMu.Lock()
+	defer handlersMu.Unlock()
+
+	for c, h := range handlersM {
+		if h.want(n) {
+			// send but do not block for it
+			select {
+			case c <- sig:
+			default:
+			}
+		}
+	}
+}
+
+// NotifyContext returns a copy of the parent context that is marked done
+// (its Done channel is closed) when one of the listed signals arrives,
+// when the returned stop function is called, or when the parent context's
+// Done channel is closed, whichever happens first.
+//
+// The stop function unregisters the signal behavior, which, like
+// [signal.Reset], may restore the default behavior for a given signal.
+func NotifyContext(parent context.Context, signals ...os.Signal) (ctx context.Context, stop context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	c := &signalCtx{
+		Context: ctx,
+		cancel:  cancel,
+		signals: signals,
+	}
+	c.ch = make(chan os.Signal, 1)
+	Notify(c.ch, c.signals...)
+	if ctx.Err() == nil {
+		go func() {
+			select {
+			case <-c.ch:
+				c.cancel()
+			case <-c.Done():
+			}
+		}()
+	}
+	return c, c.stop
+}
+
+type signalCtx struct {
+	context.Context
+
+	cancel  context.CancelFunc
+	signals []os.Signal
+	ch      chan os.Signal
+}
+
+func (c *signalCtx) stop() {
+	c.cancel()
+	Stop(c.ch)
+}
+
+type stringer interface {
+	String() string
+}
+
+func (c *signalCtx) String() string {
+	var buf []byte
+	// We know that the type of c.Context is context.cancelCtx, and we know that the
+	// String method of cancelCtx returns a string that ends with ".WithCancel".
+	name := c.Context.(stringer).String()
+	name = name[:len(name)-len(".WithCancel")]
+	buf = append(buf, "signal.NotifyContext("+name...)
+	if len(c.signals) != 0 {
+		buf = append(buf, ", ["...)
+		for i, s := range c.signals {
+			buf = append(buf, s.String()...)
+			if i != len(c.signals)-1 {
+				buf = append(buf, ' ')
+			}
+		}
+		buf = append(buf, ']')
+	}
+	buf = append(buf, ')')
+	return string(buf)
+}
+
+// loop hands each signal the VM receives to process.
+func loop() {
+	for {
+		process(syscall.Signal(native.wait()))
+	}
+}
+
+func signum(sig os.Signal) int {
+	switch sig := sig.(type) {
+	case syscall.Signal:
+		i := int(sig)
+		if i < 0 || i >= numSig {
+			return -1
+		}
+		return i
+	default:
+		return -1
+	}
+}
+
+func enableSignal(sig int) {
+	ignored[sig] = false
+	native.enable(sig)
+}
+
+func disableSignal(sig int) {
+	ignored[sig] = false
+	native.reset(sig)
+}
+
+func ignoreSignal(sig int) {
+	ignored[sig] = true
+	native.ignore(sig)
+}
+
+func signalIgnored(sig int) bool {
+	return ignored[sig]
 }
 
 """#),
@@ -16298,6 +16686,77 @@ func (v *Value) CompareAndSwap(old, val any) bool {
 
 extension GoSourceLibraryText {
     static let syscall: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/syscall/signal.go",
+            text: #"""
+package syscall
+
+// A Signal is a number of a signal the kernel delivers, as Linux numbers
+// them.
+type Signal int
+
+// The signals, with Linux's numbers.
+const (
+	SIGHUP  = Signal(0x1)
+	SIGINT  = Signal(0x2)
+	SIGQUIT = Signal(0x3)
+	SIGKILL = Signal(0x9)
+	SIGUSR1 = Signal(0xa)
+	SIGUSR2 = Signal(0xc)
+	SIGPIPE = Signal(0xd)
+	SIGALRM = Signal(0xe)
+	SIGTERM = Signal(0xf)
+	SIGCHLD = Signal(0x11)
+	SIGCONT = Signal(0x12)
+	SIGSTOP = Signal(0x13)
+	SIGTSTP = Signal(0x14)
+)
+
+// Signal makes a Signal an os.Signal.
+func (s Signal) Signal() {}
+
+func (s Signal) String() string {
+	switch s {
+	case SIGHUP:
+		return "hangup"
+	case SIGINT:
+		return "interrupt"
+	case SIGQUIT:
+		return "quit"
+	case SIGKILL:
+		return "killed"
+	case SIGUSR1:
+		return "user defined signal 1"
+	case SIGUSR2:
+		return "user defined signal 2"
+	case SIGPIPE:
+		return "broken pipe"
+	case SIGALRM:
+		return "alarm clock"
+	case SIGTERM:
+		return "terminated"
+	case SIGCHLD:
+		return "child exited"
+	case SIGCONT:
+		return "continued"
+	case SIGSTOP:
+		return "stopped (signal)"
+	case SIGTSTP:
+		return "stopped"
+	}
+	return "signal " + itoa(int(s))
+}
+
+// Kill sends the signal sig to the process pid.
+func Kill(pid int, sig Signal) error {
+	native.kill(pid, int(sig))
+	return nil
+}
+
+// Getpid returns the number of the calling process.
+func Getpid() int { return native.getpid() }
+
+"""#),
         GoSourceFile(
             path: "$GOROOT/src/syscall/syscall.go",
             text: #"""

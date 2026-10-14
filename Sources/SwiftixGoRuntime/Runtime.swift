@@ -627,6 +627,13 @@ public struct GoVirtualMachine: Sendable {
     /// print it. Off, the error says only what panicked.
     public var tracesPanics = false
 
+    /// Whether a signal the program sends itself, does not handle, and that
+    /// would end its process, ends the run with ``GoSignalTermination``
+    /// rather than reaching the kernel. `go run` sets it: the program runs
+    /// in the process of the tool, which must live to report the signal as
+    /// Go's `go run` reports the end of its child.
+    public var endsRunOnUnhandledSignal = false
+
     public init(
         maximumInstructions: Int = 1_000_000,
         instructionQuantum: Int = 4_096,
@@ -929,6 +936,12 @@ public struct GoVirtualMachine: Sendable {
         var jsonWalks: [Int: GoJSONNatives.Walk] = [:]
         /// `os.Args`: made when first read, replaced when a program assigns it.
         var osArgs: GoValue?
+        /// Signals the kernel delivered that `os/signal` has not yet taken,
+        /// and the goroutine of `os/signal` waiting for the next one.
+        var arrivedSignals: [Int64] = []
+        var signalWaiter: Int?
+        /// The signals the program has a handler or an ignore for.
+        var handledSignals: Set<Int64> = []
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -4208,6 +4221,76 @@ public struct GoVirtualMachine: Sendable {
 
         /// Run a native of the `fmt.State` a `Format` method is given: see
         /// `GoFormatState`. Returns `false` when `name` is not such a function.
+        /// The signals of `os/signal` and `syscall` (see `GoSignals`).
+        func executeSignalNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expected = GoSignals.argumentCounts[name] else { return false }
+            guard argumentCount == expected, vm.stack.count >= argumentCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expected, actual: argumentCount)
+            }
+            let operands = Array(vm.stack.suffix(argumentCount))
+            vm.stack.removeLast(argumentCount)
+            func number(_ value: GoValue) -> Int64 {
+                if case .int(let n) = value { return n }
+                return -1
+            }
+            switch name {
+            case "$signal.enable":
+                let signal = number(operands[0])
+                handledSignals.insert(signal)
+                processContext?.signal(Int32(truncatingIfNeeded: signal)) {
+                    guard executionIsActive, asynchronousError == nil else { return }
+                    if let waiter = signalWaiter {
+                        signalWaiter = nil
+                        defer { endHostWait() }
+                        do {
+                            try wakeGoroutine(waiter, values: [.int(signal)])
+                        } catch {
+                            recordAsynchronousFailure(error)
+                        }
+                    } else {
+                        arrivedSignals.append(signal)
+                    }
+                }
+            case "$signal.ignore":
+                handledSignals.insert(number(operands[0]))
+                processContext?.signal(Int32(truncatingIfNeeded: number(operands[0]))) {}
+            case "$signal.reset":
+                handledSignals.remove(number(operands[0]))
+                processContext?.resetSignal(Int32(truncatingIfNeeded: number(operands[0])))
+            case "$signal.wait":
+                if !arrivedSignals.isEmpty {
+                    vm.stack.append(.int(arrivedSignals.removeFirst()))
+                } else {
+                    // Parked until the kernel delivers one: a wait on the
+                    // host, as a program waiting for a signal waits in Go.
+                    signalWaiter = vm.currentGoroutineID
+                    beginHostWait()
+                    vm.currentBlocked = true
+                }
+            case "$syscall.kill":
+                let target = number(operands[0])
+                let signal = number(operands[1])
+                if endsRunOnUnhandledSignal, let processContext,
+                    target == Int64(processContext.getpid()), !handledSignals.contains(signal),
+                    GoSignalTermination.terminates(signal)
+                {
+                    throw GoSignalTermination(signal: Int32(truncatingIfNeeded: signal))
+                }
+                processContext?.kill(
+                    PID(number(operands[0])), signal: Int32(truncatingIfNeeded: number(operands[1])))
+                // A signal the process sent itself and does not handle ends
+                // it here, as it would end a process of Go's.
+                if case .signaled(let signal) = processContext?.terminationStatus {
+                    throw GoSignalTermination(signal: signal)
+                }
+            default:
+                vm.stack.append(
+                    .int(processContext.map { Int64($0.getpid()) } ?? GoProcess.detachedProcessID))
+            }
+            return true
+        }
+
         /// `$flag.zero`: the zero of a value's dynamic type (see
         /// `GoZeroValues`).
         func executeZeroNative(_ name: String, argumentCount: Int) throws -> Bool {
@@ -5900,6 +5983,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeJSONNative(name, argumentCount: argumentCount)
                                 || executeFormatStateNative(name, argumentCount: argumentCount)
                                 || executeZeroNative(name, argumentCount: argumentCount)
+                                || executeSignalNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }

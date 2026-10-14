@@ -145,6 +145,8 @@ public enum GoToolchain {
                 return
             }
             context.exit(0)
+        } catch let termination as GoSignalTermination {
+            fail(context, termination.description, status: 1)
         } catch let GoRuntimeError.panicError(message) {
             // Go's `go run` reports how the program ended after its trace.
             fail(
