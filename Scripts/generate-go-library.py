@@ -130,7 +130,7 @@ def swift(found):
     out.append("    static func files(ofPackage path: String) -> [GoSourceFile]? {\n")
     out.append("        switch path {\n")
     for path, _ in found:
-        out.append('        case "%s": return %s\n' % (path, property_name(path)))
+        out.append('        case "%s": return Self.%s\n' % (path, property_name(path)))
     out.append("        default: return nil\n")
     out.append("        }\n")
     out.append("    }\n")

@@ -4906,6 +4906,15 @@ public struct GoVirtualMachine: Sendable {
                 guard openFiles.count < resourceLimits.maximumRuntimeHandles else {
                     return [.nilValue, failure("open", path, "too many open files")]
                 }
+                // A directory opens for reading, as in Go: its handle names it
+                // for `Stat` and `ReadDir`, and has no descriptor to read.
+                if flag & GoFiles.accessMask == GoFiles.readOnly, processContext.stat(path)?.isDirectory == true {
+                    let handle = nextFileHandle
+                    nextFileHandle += 1
+                    openFiles[handle] = GoFiles.OpenFile(
+                        name: path, descriptor: GoFiles.directoryDescriptor, appends: false)
+                    return [.int(handle), .nilValue]
+                }
                 do {
                     let creates = mode.flags.contains(.create) && processContext.stat(path) == nil
                     if creates { try requireParentDirectory(of: path, in: processContext) }
@@ -5034,12 +5043,135 @@ public struct GoVirtualMachine: Sendable {
                 } catch {
                     vm.stack.append(failure("mkdir", path, error))
                 }
+            case "$os.stat":
+                let path = try text(operands[0])
+                let follow = operands[1] == .bool(true)
+                let operation = follow ? "stat" : "lstat"
+                guard let processContext else {
+                    vm.stack.append(contentsOf: [.int(0), .int(0), .int(0), failure(operation, path, "no file system")])
+                    break
+                }
+                guard let stat = follow ? processContext.stat(path) : processContext.lstat(path) else {
+                    let why = GoFiles.missing(path) { processContext.stat($0) }
+                    vm.stack.append(contentsOf: [.int(0), .int(0), .int(0), failure(operation, path, why)])
+                    break
+                }
+                vm.stack.append(contentsOf: [
+                    .int(Int64(stat.size)), .int(GoFiles.goMode(stat)),
+                    .int(Int64((stat.mtime * 1_000_000_000).rounded())), .nilValue,
+                ])
+            case "$os.readdir":
+                let path = try text(operands[0])
+                func strings(_ values: [GoValue], zero: GoValue) throws -> GoValue {
+                    try requireCollectionCount(values.count, resource: "slice elements")
+                    let cell = try vm.heap.allocate(.array(values))
+                    return .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell), start: 0, length: values.count,
+                            capacity: values.count, zeroValue: zero))
+                }
+                guard let processContext else {
+                    vm.stack.append(contentsOf: [.nilValue, .nilValue, failure("open", path, "no file system")])
+                    break
+                }
+                guard let node = processContext.stat(path) else {
+                    let why = GoFiles.missing(path) { processContext.stat($0) }
+                    vm.stack.append(contentsOf: [.nilValue, .nilValue, failure("open", path, why)])
+                    break
+                }
+                guard node.isDirectory else {
+                    vm.stack.append(
+                        contentsOf: [.nilValue, .nilValue, failure("readdirent", path, SyscallError.notADirectory)])
+                    break
+                }
+                guard let listed = processContext.listDirectory(path) else {
+                    vm.stack.append(
+                        contentsOf: [.nilValue, .nilValue, failure("open", path, SyscallError.permissionDenied)])
+                    break
+                }
+                var names: [GoValue] = []
+                var modes: [GoValue] = []
+                let base = path.hasSuffix("/") ? path : path + "/"
+                for entry in listed {
+                    let name = entry.hasSuffix("/") ? String(entry.dropLast()) : entry
+                    names.append(.string(name))
+                    let child = processContext.lstat(base + name)
+                    modes.append(.int(child.map(GoFiles.goMode) ?? 0))
+                }
+                vm.stack.append(contentsOf: [
+                    try strings(names, zero: .string("")), try strings(modes, zero: .int(0)), .nilValue,
+                ])
+            case "$os.chmod":
+                let path = try text(operands[0])
+                guard let processContext else {
+                    vm.stack.append(failure("chmod", path, "no file system"))
+                    break
+                }
+                guard processContext.stat(path) != nil else {
+                    vm.stack.append(failure("chmod", path, GoFiles.missing(path) { processContext.stat($0) }))
+                    break
+                }
+                let mode = FileMode(rawValue: UInt16(truncatingIfNeeded: try integer(operands[1]) & 0o7777))
+                vm.stack.append(
+                    processContext.chmod(path, mode: mode)
+                        ? .nilValue : failure("chmod", path, SyscallError.permissionDenied))
+            case "$os.chdir":
+                let path = try text(operands[0])
+                guard let processContext else {
+                    vm.stack.append(failure("chdir", path, "no file system"))
+                    break
+                }
+                guard let node = processContext.stat(path) else {
+                    vm.stack.append(failure("chdir", path, GoFiles.missing(path) { processContext.stat($0) }))
+                    break
+                }
+                guard node.isDirectory else {
+                    vm.stack.append(failure("chdir", path, SyscallError.notADirectory))
+                    break
+                }
+                vm.stack.append(
+                    processContext.chdir(path) ? .nilValue : failure("chdir", path, SyscallError.permissionDenied))
+            case "$os.symlink":
+                let target = try text(operands[0])
+                let path = try text(operands[1])
+                let subject = "\(target) \(path)"
+                guard let processContext else {
+                    vm.stack.append(failure("symlink", subject, "no file system"))
+                    break
+                }
+                if processContext.lstat(path) != nil {
+                    vm.stack.append(failure("symlink", subject, SyscallError.fileExists))
+                } else if processContext.symlink(target, at: path) {
+                    vm.stack.append(.nilValue)
+                } else {
+                    vm.stack.append(failure("symlink", subject, GoFiles.missing(path) { processContext.stat($0) }))
+                }
+            case "$os.readlink":
+                let path = try text(operands[0])
+                guard let processContext else {
+                    vm.stack.append(contentsOf: [.string(""), failure("readlink", path, "no file system")])
+                    break
+                }
+                if let target = processContext.readlink(path) {
+                    vm.stack.append(contentsOf: [.string(target), .nilValue])
+                } else if processContext.lstat(path) != nil {
+                    vm.stack.append(contentsOf: [.string(""), failure("readlink", path, SyscallError.invalidArgument)])
+                } else {
+                    vm.stack.append(
+                        contentsOf: [.string(""), failure("readlink", path, GoFiles.missing(path) { processContext.stat($0) })])
+                }
+            case "$os.File.name":
+                vm.stack.append(.string(try resolveFile(operands[0])?.name ?? ""))
             case "$os.File.Close":
                 guard let (file, processContext) = try receiver("close") else {
                     vm.stack.append(methodFailure)
                     break
                 }
                 if case .int(let handle) = operands[0] { openFiles[handle] = nil }
+                if file.descriptor == GoFiles.directoryDescriptor {
+                    vm.stack.append(.nilValue)
+                    break
+                }
                 do {
                     try processContext.closeFile(file.descriptor)
                     vm.stack.append(.nilValue)

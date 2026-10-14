@@ -546,8 +546,9 @@ struct GoHandleValueTests: GoTestHarness {
             GoLibraryMethods.handleFunctions.keys.sorted() == [
                 "*net.TCPConn.Close", "*net.TCPConn.Read", "*net.TCPConn.Write",
                 "*net.TCPListener.Accept", "*net.TCPListener.Close", "*os.File.Close",
-                "*os.File.Read", "*os.File.ReadAt", "*os.File.Seek", "*os.File.Sync",
-                "*os.File.Write", "*os.File.WriteAt", "*os.File.WriteString",
+                "*os.File.Name", "*os.File.Read", "*os.File.ReadAt", "*os.File.ReadDir",
+                "*os.File.Readdir", "*os.File.Readdirnames", "*os.File.Seek", "*os.File.Stat",
+                "*os.File.Sync", "*os.File.Write", "*os.File.WriteAt", "*os.File.WriteString",
             ])
         let read = try #require(GoLibraryMethods.functions["*net.TCPConn.Read"])
         #expect(read.instructions == [.load(0), .load(1), .netRead, .returnValues(count: 2)])

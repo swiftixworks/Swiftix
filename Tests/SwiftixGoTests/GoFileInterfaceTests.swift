@@ -249,11 +249,11 @@ struct GoFileInterfaceTests: GoTestHarness {
             diagnostic("os.WriteFile(\"/x\", \"text\", 420)") == "cannot use \"text\" (untyped string constant) as []byte value in argument to os.WriteFile")
         #expect(
             diagnostic("os.WriteFile(\"/x\", []byte(\"t\"))")
-                == "not enough arguments in call to os.WriteFile\n\thave (string, []byte)\n\twant (string, []byte, int)")
+                == "not enough arguments in call to os.WriteFile\n\thave (string, []byte)\n\twant (string, []byte, fs.FileMode)")
         #expect(
             diagnostic("var n int = os.WriteFile(\"/x\", []byte(\"t\"), 420)\nfmt.Println(n)")
                 == "cannot use os.WriteFile(\"/x\", []byte(\"t\"), 420) (value of interface type error) as int value in variable declaration")
-        #expect(diagnostic("os.Chdir(\".\")") == "undefined: os.Chdir")
+        #expect(diagnostic("os.Chdirs(\".\")") == "undefined: os.Chdirs")
         #expect(
             goMainDiagnostic("fmt.Fprintln(os.Stdout, 1)") == "undefined: os")
     }

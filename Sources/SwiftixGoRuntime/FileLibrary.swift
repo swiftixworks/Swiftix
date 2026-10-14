@@ -21,7 +21,43 @@ enum GoFiles {
         "$os.File.Seek": 3,
         "$os.File.Close": 1,
         "$os.File.Sync": 1,
+        "$os.stat": 2,
+        "$os.readdir": 1,
+        "$os.chmod": 2,
+        "$os.chdir": 1,
+        "$os.symlink": 2,
+        "$os.readlink": 1,
+        "$os.File.name": 1,
     ]
+
+    /// Go's `fs.FileMode` of a node: its permissions and set-id bits where
+    /// Go keeps them, and the bit of its type.
+    static func goMode(_ stat: FileStat) -> Int64 {
+        let raw = Int64(stat.mode.rawValue)
+        var mode = raw & 0o777
+        if raw & 0o4000 != 0 { mode |= 1 << 23 }  // ModeSetuid
+        if raw & 0o2000 != 0 { mode |= 1 << 22 }  // ModeSetgid
+        if raw & 0o1000 != 0 { mode |= 1 << 20 }  // ModeSticky
+        switch stat.type {
+        case .directory: mode |= 1 << 31  // ModeDir
+        case .symlink: mode |= 1 << 27  // ModeSymlink
+        case .fifo: mode |= 1 << 25  // ModeNamedPipe
+        case .regular: break
+        }
+        return mode
+    }
+
+    /// Why `path` has no node: a component on the way that is no directory,
+    /// or nothing there.
+    static func missing(_ path: String, stat: (String) -> FileStat?) -> SyscallError {
+        var prefix = path.hasPrefix("/") ? "" : "."
+        for component in path.split(separator: "/").dropLast() {
+            prefix += "/" + component
+            guard let node = stat(prefix) else { return .noSuchFileOrDirectory }
+            if !node.isDirectory { return .notADirectory }
+        }
+        return .noSuchFileOrDirectory
+    }
 
     // Go's `os.O_*` values on Linux, which the compiler emits as constants.
     static let accessMask: Int64 = 0o3
@@ -46,6 +82,9 @@ enum GoFiles {
     static let firstHandle: Int64 = 1 << 32
 
     /// What a `*os.File` value denotes.
+    /// The descriptor of a directory a program opened: none.
+    static let directoryDescriptor = -1
+
     struct OpenFile {
         /// Path the file was opened with, for Go's error wording.
         let name: String

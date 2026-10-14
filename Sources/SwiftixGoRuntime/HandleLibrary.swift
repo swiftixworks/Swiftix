@@ -66,6 +66,16 @@ extension GoLibraryMethods {
                 fileTypeName, method, operands: operands, results: results,
                 .call("$os.File." + method, argumentCount: operands))
         }
+        add(fileTypeName, "Name", operands: 1, results: 1, .call("$os.File.name", argumentCount: 1))
+        // The methods that are Go text of `os` (`GoFileTextMethods`), when a
+        // program is linked with them.
+        add(fileTypeName, "Stat", operands: 1, results: 2, .call("os.fileMethodStat", argumentCount: 1))
+        for (method, function) in [
+            ("ReadDir", "os.fileMethodReadDir"), ("Readdir", "os.fileMethodReaddir"),
+            ("Readdirnames", "os.fileMethodReaddirnames"),
+        ] {
+            add(fileTypeName, method, operands: 2, results: 2, .call(function, argumentCount: 2))
+        }
         return functions
     }()
 

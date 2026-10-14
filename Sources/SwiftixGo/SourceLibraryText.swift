@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "encoding", "encoding/base64", "encoding/json", "flag", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "os/signal", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "encoding", "encoding/base64", "encoding/json", "flag", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -91,7 +91,14 @@ enum GoSourceLibraryText {
             "nopCloser",
         ],
         "io/fs": [
-            "ErrClosed", "ErrExist", "ErrInvalid", "ErrNotExist", "ErrPermission", "PathError",
+            "DirEntry", "ErrClosed", "ErrExist", "ErrInvalid", "ErrNotExist", "ErrPermission", "FS",
+            "File", "FileInfo", "FileInfoToDirEntry", "FileMode", "FormatDirEntry",
+            "FormatFileInfo", "Glob", "GlobFS", "ModeAppend", "ModeCharDevice", "ModeDevice",
+            "ModeDir", "ModeExclusive", "ModeIrregular", "ModeNamedPipe", "ModePerm", "ModeSetgid",
+            "ModeSetuid", "ModeSocket", "ModeSticky", "ModeSymlink", "ModeTemporary", "ModeType",
+            "PathError", "ReadDir", "ReadDirFS", "ReadDirFile", "ReadFile", "ReadFileFS", "SkipAll",
+            "SkipDir", "Stat", "StatFS", "Sub", "SubFS", "ValidPath", "WalkDir", "WalkDirFunc",
+            "cleanGlobPath", "dirInfo", "glob", "globWithLimit", "hasMeta", "subFS", "walkDir",
         ],
         "log": [
             "Default", "Fatal", "Fatalf", "Fatalln", "Flags", "LUTC", "Ldate", "Llongfile",
@@ -175,18 +182,43 @@ enum GoSourceLibraryText {
             "resolvePath", "splitHostPort", "unescape", "validOptionalPort", "validUserinfo",
         ],
         "os": [
-            "Create", "ErrClosed", "ErrDeadlineExceeded", "ErrExist", "ErrInvalid", "ErrNotExist",
-            "ErrPermission", "FindProcess", "Interrupt", "IsExist", "IsNotExist", "IsPermission",
-            "IsTimeout", "Kill", "LinkError", "Mkdir", "NewSyscallError", "Open", "OpenFile",
-            "PathError", "Process", "ReadFile", "Remove", "Rename", "Signal", "SyscallError",
-            "WriteFile", "deadlineExceededError", "errno", "pathError", "timeout",
-            "underlyingError", "underlyingErrorIs",
+            "Chdir", "Chmod", "Create", "DirEntry", "ErrClosed", "ErrDeadlineExceeded", "ErrExist",
+            "ErrInvalid", "ErrNotExist", "ErrPermission", "FileInfo", "FileMode", "FindProcess",
+            "Interrupt", "IsExist", "IsNotExist", "IsPathSeparator", "IsPermission", "IsTimeout",
+            "Kill", "LinkError", "Lstat", "Mkdir", "MkdirAll", "MkdirTemp", "ModeAppend",
+            "ModeCharDevice", "ModeDevice", "ModeDir", "ModeExclusive", "ModeIrregular",
+            "ModeNamedPipe", "ModePerm", "ModeSetgid", "ModeSetuid", "ModeSocket", "ModeSticky",
+            "ModeSymlink", "ModeTemporary", "ModeType", "NewSyscallError", "Open", "OpenFile",
+            "PathError", "PathListSeparator", "PathSeparator", "Process", "ReadDir", "ReadFile",
+            "Readlink", "Remove", "RemoveAll", "Rename", "Signal", "Stat", "Symlink",
+            "SyscallError", "TempDir", "WriteFile", "basename", "deadlineExceededError",
+            "dirOffsets", "endsWithDot", "errPatternHasSeparator", "errno", "fileMethodReadDir",
+            "fileMethodReaddir", "fileMethodReaddirnames", "fileMethodStat", "fileStat", "joinPath",
+            "linkErrno", "nextRandom", "pathError", "prefixAndSuffix", "randomState", "readDir",
+            "stat", "syscallMode", "timeout", "underlyingError", "underlyingErrorIs", "unixDirent",
         ],
         "os/signal": [
             "Ignore", "Ignored", "Notify", "NotifyContext", "Reset", "Stop", "cancel",
             "disableSignal", "enableSignal", "handler", "handlersM", "handlersMu", "handlersRef",
             "ignoreSignal", "ignored", "loop", "numSig", "process", "signalCtx", "signalIgnored",
             "signum", "stringer", "watchSignalLoopOnce",
+        ],
+        "path": [
+            "Base", "Clean", "Dir", "ErrBadPattern", "Ext", "IsAbs", "Join", "Match", "Split",
+            "getEsc", "lazybuf", "matchChunk", "scanChunk",
+        ],
+        "path/filepath": [
+            "Abs", "Base", "Clean", "Dir", "ErrBadPattern", "EvalSymlinks", "Ext", "FromSlash",
+            "Glob", "HasPrefix", "IsAbs", "IsLocal", "Join", "ListSeparator", "Localize", "Match",
+            "Rel", "Separator", "SkipAll", "SkipDir", "Split", "SplitList", "ToSlash", "VolumeName",
+            "Walk", "WalkDir", "WalkFunc", "abs", "cleanGlobPath", "cleanGlobPathWindows",
+            "errInvalidPath", "evalSymlinks", "getEsc", "glob", "globWithLimit", "hasMeta",
+            "isLocal", "join", "lazybuf", "liteBase", "liteClean", "liteDir", "liteExt",
+            "liteFromSlash", "liteIsAbs", "liteIsLocal", "liteIsPathSeparator", "liteLocalize",
+            "liteSplit", "liteToSlash", "liteVolumeName", "liteVolumeNameLen", "localize", "lstat",
+            "matchChunk", "postClean", "readDirNames", "replaceStringByte", "sameWord", "scanChunk",
+            "splitList", "unixAbs", "unixIsLocal", "volumeNameLen", "walk", "walkDir",
+            "walkSymlinks",
         ],
         "runtime": [
             "Error",
@@ -249,30 +281,32 @@ enum GoSourceLibraryText {
     /// The files of the package at `path`, in the order of their names.
     static func files(ofPackage path: String) -> [GoSourceFile]? {
         switch path {
-        case "bufio": return bufio
-        case "bytes": return bytes
-        case "context": return context
-        case "encoding": return encoding
-        case "encoding/base64": return encodingBase64
-        case "encoding/json": return encodingJson
-        case "flag": return flag
-        case "fmt": return fmt
-        case "io": return io
-        case "io/fs": return ioFs
-        case "log": return log
-        case "net": return net
-        case "net/http": return netHttp
-        case "net/url": return netUrl
-        case "os": return os
-        case "os/signal": return osSignal
-        case "runtime": return runtime
-        case "sort": return sort
-        case "strconv": return strconv
-        case "strings": return strings
-        case "sync": return sync
-        case "sync/atomic": return syncAtomic
-        case "syscall": return syscall
-        case "time": return time
+        case "bufio": return Self.bufio
+        case "bytes": return Self.bytes
+        case "context": return Self.context
+        case "encoding": return Self.encoding
+        case "encoding/base64": return Self.encodingBase64
+        case "encoding/json": return Self.encodingJson
+        case "flag": return Self.flag
+        case "fmt": return Self.fmt
+        case "io": return Self.io
+        case "io/fs": return Self.ioFs
+        case "log": return Self.log
+        case "net": return Self.net
+        case "net/http": return Self.netHttp
+        case "net/url": return Self.netUrl
+        case "os": return Self.os
+        case "os/signal": return Self.osSignal
+        case "path": return Self.path
+        case "path/filepath": return Self.pathFilepath
+        case "runtime": return Self.runtime
+        case "sort": return Self.sort
+        case "strconv": return Self.strconv
+        case "strings": return Self.strings
+        case "sync": return Self.sync
+        case "sync/atomic": return Self.syncAtomic
+        case "syscall": return Self.syscall
+        case "time": return Self.time
         default: return nil
         }
     }
@@ -5680,6 +5714,87 @@ var Discard Writer = discard{}
 extension GoSourceLibraryText {
     static let ioFs: [GoSourceFile] = [
         GoSourceFile(
+            path: "$GOROOT/src/io/fs/format.go",
+            text: #"""
+// Copyright 2023 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"time"
+)
+
+// FormatFileInfo returns a formatted version of info for human readability.
+// Implementations of [FileInfo] can call this from a String method.
+// The output for a file named "hello.go", 100 bytes, mode 0o644, created
+// January 1, 1970 at noon is
+//
+//	-rw-r--r-- 100 1970-01-01 12:00:00 hello.go
+func FormatFileInfo(info FileInfo) string {
+	name := info.Name()
+	b := make([]byte, 0, 40+len(name))
+	b = append(b, info.Mode().String()...)
+	b = append(b, ' ')
+
+	size := info.Size()
+	var usize uint64
+	if size >= 0 {
+		usize = uint64(size)
+	} else {
+		b = append(b, '-')
+		usize = uint64(-size)
+	}
+	var buf [20]byte
+	i := len(buf) - 1
+	for usize >= 10 {
+		q := usize / 10
+		buf[i] = byte('0' + usize - q*10)
+		i--
+		usize = q
+	}
+	buf[i] = byte('0' + usize)
+	b = append(b, buf[i:]...)
+	b = append(b, ' ')
+
+	b = append(b, info.ModTime().Format(time.DateTime)...)
+	b = append(b, ' ')
+
+	b = append(b, name...)
+	if info.IsDir() {
+		b = append(b, '/')
+	}
+
+	return string(b)
+}
+
+// FormatDirEntry returns a formatted version of dir for human readability.
+// Implementations of [DirEntry] can call this from a String method.
+// The outputs for a directory named subdir and a file named hello.go are:
+//
+//	d subdir/
+//	- hello.go
+func FormatDirEntry(dir DirEntry) string {
+	name := dir.Name()
+	b := make([]byte, 0, 5+len(name))
+
+	// The Type method does not return any permission bits,
+	// so strip them from the string.
+	mode := dir.Type().String()
+	mode = mode[:len(mode)-9]
+
+	b = append(b, mode...)
+	b = append(b, ' ')
+	b = append(b, name...)
+	if dir.IsDir() {
+		b = append(b, '/')
+	}
+	return string(b)
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/io/fs/fs.go",
             text: #"""
 // Package fs is the part of io/fs that the errors of the file system need:
@@ -5716,6 +5831,847 @@ func (e *PathError) Unwrap() error { return e.Err }
 func (e *PathError) Timeout() bool {
 	t, ok := e.Err.(interface{ Timeout() bool })
 	return ok && t.Timeout()
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/glob.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"path"
+)
+
+// A GlobFS is a file system with a Glob method.
+type GlobFS interface {
+	FS
+
+	// Glob returns the names of all files matching pattern,
+	// providing an implementation of the top-level
+	// Glob function.
+	Glob(pattern string) ([]string, error)
+}
+
+// Glob returns the names of all files matching pattern or nil
+// if there is no matching file. The syntax of patterns is the same
+// as in [path.Match]. The pattern may describe hierarchical names such as
+// usr/*/bin/ed.
+//
+// Glob ignores file system errors such as I/O errors reading directories.
+// The only possible returned error is [path.ErrBadPattern], reporting that
+// the pattern is malformed.
+//
+// If fs implements [GlobFS], Glob calls fs.Glob.
+// Otherwise, Glob uses [ReadDir] to traverse the directory tree
+// and look for matches for the pattern.
+func Glob(fsys FS, pattern string) (matches []string, err error) {
+	return globWithLimit(fsys, pattern, 0)
+}
+
+func globWithLimit(fsys FS, pattern string, depth int) (matches []string, err error) {
+	// This limit is added to prevent stack exhaustion issues. See
+	// CVE-2022-30630.
+	const pathSeparatorsLimit = 10000
+	if depth > pathSeparatorsLimit {
+		return nil, path.ErrBadPattern
+	}
+	if fsys, ok := fsys.(GlobFS); ok {
+		return fsys.Glob(pattern)
+	}
+
+	// Check pattern is well-formed.
+	if _, err := path.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if !hasMeta(pattern) {
+		if _, err = Stat(fsys, pattern); err != nil {
+			return nil, nil
+		}
+		return []string{pattern}, nil
+	}
+
+	dir, file := path.Split(pattern)
+	dir = cleanGlobPath(dir)
+
+	if !hasMeta(dir) {
+		return glob(fsys, dir, file, nil)
+	}
+
+	// Prevent infinite recursion. See issue 15879.
+	if dir == pattern {
+		return nil, path.ErrBadPattern
+	}
+
+	var m []string
+	m, err = globWithLimit(fsys, dir, depth+1)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range m {
+		matches, err = glob(fsys, d, file, matches)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+// cleanGlobPath prepares path for glob matching.
+func cleanGlobPath(path string) string {
+	switch path {
+	case "":
+		return "."
+	default:
+		return path[0 : len(path)-1] // chop off trailing separator
+	}
+}
+
+// glob searches for files matching pattern in the directory dir
+// and appends them to matches, returning the updated slice.
+// If the directory cannot be opened, glob returns the existing matches.
+// New matches are added in lexicographical order.
+func glob(fs FS, dir, pattern string, matches []string) (m []string, e error) {
+	m = matches
+	infos, err := ReadDir(fs, dir)
+	if err != nil {
+		return // ignore I/O error
+	}
+
+	for _, info := range infos {
+		n := info.Name()
+		matched, err := path.Match(pattern, n)
+		if err != nil {
+			return m, err
+		}
+		if matched {
+			m = append(m, path.Join(dir, n))
+		}
+	}
+	return
+}
+
+// hasMeta reports whether path contains any of the magic characters
+// recognized by path.Match.
+func hasMeta(path string) bool {
+	for i := 0; i < len(path); i++ {
+		switch path[i] {
+		case '*', '?', '[', '\\':
+			return true
+		}
+	}
+	return false
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/readdir.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"errors"
+	"sort"
+	"strings"
+)
+
+// ReadDirFS is the interface implemented by a file system
+// that provides an optimized implementation of [ReadDir].
+type ReadDirFS interface {
+	FS
+
+	// ReadDir reads the named directory
+	// and returns a list of directory entries sorted by filename.
+	ReadDir(name string) ([]DirEntry, error)
+}
+
+// ReadDir reads the named directory
+// and returns a list of directory entries sorted by filename.
+//
+// If fs implements [ReadDirFS], ReadDir calls fs.ReadDir.
+// Otherwise ReadDir calls fs.Open and uses ReadDir and Close
+// on the returned file.
+func ReadDir(fsys FS, name string) ([]DirEntry, error) {
+	if fsys, ok := fsys.(ReadDirFS); ok {
+		return fsys.ReadDir(name)
+	}
+
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	dir, ok := file.(ReadDirFile)
+	if !ok {
+		return nil, &PathError{Op: "readdir", Path: name, Err: errors.New("not implemented")}
+	}
+
+	list, err := dir.ReadDir(-1)
+	sort.Slice(list, func(i, j int) bool {
+		return strings.Compare(list[i].Name(), list[j].Name()) < 0
+	})
+	return list, err
+}
+
+// dirInfo is a DirEntry based on a FileInfo.
+type dirInfo struct {
+	fileInfo FileInfo
+}
+
+func (di dirInfo) IsDir() bool {
+	return di.fileInfo.IsDir()
+}
+
+func (di dirInfo) Type() FileMode {
+	return di.fileInfo.Mode().Type()
+}
+
+func (di dirInfo) Info() (FileInfo, error) {
+	return di.fileInfo, nil
+}
+
+func (di dirInfo) Name() string {
+	return di.fileInfo.Name()
+}
+
+func (di dirInfo) String() string {
+	return FormatDirEntry(di)
+}
+
+// FileInfoToDirEntry returns a [DirEntry] that returns information from info.
+// If info is nil, FileInfoToDirEntry returns nil.
+func FileInfoToDirEntry(info FileInfo) DirEntry {
+	if info == nil {
+		return nil
+	}
+	return dirInfo{fileInfo: info}
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/readfile.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import "io"
+
+// ReadFileFS is the interface implemented by a file system
+// that provides an optimized implementation of [ReadFile].
+type ReadFileFS interface {
+	FS
+
+	// ReadFile reads the named file and returns its contents.
+	// A successful call returns a nil error, not io.EOF.
+	// (Because ReadFile reads the whole file, the expected EOF
+	// from the final Read is not treated as an error to be reported.)
+	//
+	// The caller is permitted to modify the returned byte slice.
+	// This method should return a copy of the underlying data.
+	ReadFile(name string) ([]byte, error)
+}
+
+// ReadFile reads the named file from the file system fs and returns its contents.
+// A successful call returns a nil error, not [io.EOF].
+// (Because ReadFile reads the whole file, the expected EOF
+// from the final Read is not treated as an error to be reported.)
+//
+// If fs implements [ReadFileFS], ReadFile calls fs.ReadFile.
+// Otherwise ReadFile calls fs.Open and uses Read and Close
+// on the returned [File].
+func ReadFile(fsys FS, name string) ([]byte, error) {
+	if fsys, ok := fsys.(ReadFileFS); ok {
+		return fsys.ReadFile(name)
+	}
+
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var size int
+	if info, err := file.Stat(); err == nil {
+		size64 := info.Size()
+		if int64(int(size64)) == size64 {
+			size = int(size64)
+		}
+	}
+
+	data := make([]byte, 0, size+1)
+	for {
+		if len(data) >= cap(data) {
+			d := append(data[:cap(data)], 0)
+			data = d[:len(data)]
+		}
+		n, err := file.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return data, err
+		}
+	}
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/stat.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+// A StatFS is a file system with a Stat method.
+type StatFS interface {
+	FS
+
+	// Stat returns a FileInfo describing the file.
+	// If there is an error, it should be of type *PathError.
+	Stat(name string) (FileInfo, error)
+}
+
+// Stat returns a [FileInfo] describing the named file from the file system.
+//
+// If fs implements [StatFS], Stat calls fs.Stat.
+// Otherwise, Stat opens the [File] to stat it.
+func Stat(fsys FS, name string) (FileInfo, error) {
+	if fsys, ok := fsys.(StatFS); ok {
+		return fsys.Stat(name)
+	}
+
+	file, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/sub.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"errors"
+	"path"
+)
+
+// A SubFS is a file system with a Sub method.
+type SubFS interface {
+	FS
+
+	// Sub returns an FS corresponding to the subtree rooted at dir.
+	Sub(dir string) (FS, error)
+}
+
+// Sub returns an [FS] corresponding to the subtree rooted at fsys's dir.
+//
+// If dir is ".", Sub returns fsys unchanged.
+// Otherwise, if fs implements [SubFS], Sub returns fsys.Sub(dir).
+// Otherwise, Sub returns a new [FS] implementation sub that,
+// in effect, implements sub.Open(name) as fsys.Open(path.Join(dir, name)).
+// The implementation also translates calls to ReadDir, ReadFile, and Glob appropriately.
+//
+// Note that Sub(os.DirFS("/"), "prefix") is equivalent to os.DirFS("/prefix")
+// and that neither of them guarantees to avoid operating system
+// accesses outside "/prefix", because the implementation of [os.DirFS]
+// does not check for symbolic links inside "/prefix" that point to
+// other directories. That is, [os.DirFS] is not a general substitute for a
+// chroot-style security mechanism, and Sub does not change that fact.
+func Sub(fsys FS, dir string) (FS, error) {
+	if !ValidPath(dir) {
+		return nil, &PathError{Op: "sub", Path: dir, Err: ErrInvalid}
+	}
+	if dir == "." {
+		return fsys, nil
+	}
+	if fsys, ok := fsys.(SubFS); ok {
+		return fsys.Sub(dir)
+	}
+	return &subFS{fsys, dir}, nil
+}
+
+type subFS struct {
+	fsys FS
+	dir  string
+}
+
+// fullName maps name to the fully-qualified name dir/name.
+func (f *subFS) fullName(op string, name string) (string, error) {
+	if !ValidPath(name) {
+		return "", &PathError{Op: op, Path: name, Err: ErrInvalid}
+	}
+	return path.Join(f.dir, name), nil
+}
+
+// shorten maps name, which should start with f.dir, back to the suffix after f.dir.
+func (f *subFS) shorten(name string) (rel string, ok bool) {
+	if name == f.dir {
+		return ".", true
+	}
+	if len(name) >= len(f.dir)+2 && name[len(f.dir)] == '/' && name[:len(f.dir)] == f.dir {
+		return name[len(f.dir)+1:], true
+	}
+	return "", false
+}
+
+// fixErr shortens any reported names in PathErrors by stripping f.dir.
+func (f *subFS) fixErr(err error) error {
+	if e, ok := err.(*PathError); ok {
+		if short, ok := f.shorten(e.Path); ok {
+			e.Path = short
+		}
+	}
+	return err
+}
+
+func (f *subFS) Open(name string) (File, error) {
+	full, err := f.fullName("open", name)
+	if err != nil {
+		return nil, err
+	}
+	file, err := f.fsys.Open(full)
+	return file, f.fixErr(err)
+}
+
+func (f *subFS) ReadDir(name string) ([]DirEntry, error) {
+	full, err := f.fullName("read", name)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := ReadDir(f.fsys, full)
+	return dir, f.fixErr(err)
+}
+
+func (f *subFS) ReadFile(name string) ([]byte, error) {
+	full, err := f.fullName("read", name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := ReadFile(f.fsys, full)
+	return data, f.fixErr(err)
+}
+
+func (f *subFS) Glob(pattern string) ([]string, error) {
+	// Check pattern is well-formed.
+	if _, err := path.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if pattern == "." {
+		return []string{"."}, nil
+	}
+
+	full := f.dir + "/" + pattern
+	list, err := Glob(f.fsys, full)
+	for i, name := range list {
+		name, ok := f.shorten(name)
+		if !ok {
+			return nil, errors.New("invalid result from inner fsys Glob: " + name + " not in " + f.dir) // can't use fmt in this package
+		}
+		list[i] = name
+	}
+	return list, f.fixErr(err)
+}
+
+func (f *subFS) Sub(dir string) (FS, error) {
+	if dir == "." {
+		return f, nil
+	}
+	full, err := f.fullName("sub", dir)
+	if err != nil {
+		return nil, err
+	}
+	return &subFS{f.fsys, full}, nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/types.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"time"
+	"unicode/utf8"
+)
+
+// An FS provides access to a hierarchical file system.
+//
+// The FS interface is the minimum implementation required of the file system.
+// A file system may implement additional interfaces,
+// such as [ReadFileFS], to provide additional or optimized functionality.
+//
+// [testing/fstest.TestFS] may be used to test implementations of an FS for
+// correctness.
+type FS interface {
+	// Open opens the named file.
+	// [File.Close] must be called to release any associated resources.
+	//
+	// When Open returns an error, it should be of type *PathError
+	// with the Op field set to "open", the Path field set to name,
+	// and the Err field describing the problem.
+	//
+	// Open should reject attempts to open names that do not satisfy
+	// ValidPath(name), returning a *PathError with Err set to
+	// ErrInvalid or ErrNotExist.
+	Open(name string) (File, error)
+}
+
+// ValidPath reports whether the given path name
+// is valid for use in a call to Open.
+//
+// Path names passed to open are UTF-8-encoded,
+// unrooted, slash-separated sequences of path elements, like “x/y/z”.
+// Path names must not contain an element that is “.” or “..” or the empty string,
+// except for the special case that the name "." may be used for the root directory.
+// Paths must not start or end with a slash: “/x” and “x/” are invalid.
+//
+// Note that paths are slash-separated on all systems, even Windows.
+// Paths containing other characters such as backslash and colon
+// are accepted as valid, but those characters must never be
+// interpreted by an [FS] implementation as path element separators.
+func ValidPath(name string) bool {
+	if !utf8.ValidString(name) {
+		return false
+	}
+
+	if name == "." {
+		// special case
+		return true
+	}
+
+	// Iterate over elements in name, checking each.
+	for {
+		i := 0
+		for i < len(name) && name[i] != '/' {
+			i++
+		}
+		elem := name[:i]
+		if elem == "" || elem == "." || elem == ".." {
+			return false
+		}
+		if i == len(name) {
+			return true // reached clean ending
+		}
+		name = name[i+1:]
+	}
+}
+
+// A File provides access to a single file.
+// The File interface is the minimum implementation required of the file.
+// Directory files should also implement [ReadDirFile].
+// A file may implement [io.ReaderAt] or [io.Seeker] as optimizations.
+type File interface {
+	Stat() (FileInfo, error)
+	Read([]byte) (int, error)
+	Close() error
+}
+
+// A DirEntry is an entry read from a directory
+// (using the [ReadDir] function or a [ReadDirFile]'s ReadDir method).
+type DirEntry interface {
+	// Name returns the name of the file (or subdirectory) described by the entry.
+	// This name is only the final element of the path (the base name), not the entire path.
+	// For example, Name would return "hello.go" not "home/gopher/hello.go".
+	Name() string
+
+	// IsDir reports whether the entry describes a directory.
+	IsDir() bool
+
+	// Type returns the type bits for the entry.
+	// The type bits are a subset of the usual FileMode bits, those returned by the FileMode.Type method.
+	Type() FileMode
+
+	// Info returns the FileInfo for the file or subdirectory described by the entry.
+	// The returned FileInfo may be from the time of the original directory read
+	// or from the time of the call to Info. If the file has been removed or renamed
+	// since the directory read, Info may return an error satisfying errors.Is(err, ErrNotExist).
+	// If the entry denotes a symbolic link, Info reports the information about the link itself,
+	// not the link's target.
+	Info() (FileInfo, error)
+}
+
+// A ReadDirFile is a directory file whose entries can be read with the ReadDir method.
+// Every directory file should implement this interface.
+// (It is permissible for any file to implement this interface,
+// but if so ReadDir should return an error for non-directories.)
+type ReadDirFile interface {
+	File
+
+	// ReadDir reads the contents of the directory and returns
+	// a slice of up to n DirEntry values in directory order.
+	// Subsequent calls on the same file will yield further DirEntry values.
+	//
+	// If n > 0, ReadDir returns at most n DirEntry structures.
+	// In this case, if ReadDir returns an empty slice, it will return
+	// a non-nil error explaining why.
+	// At the end of a directory, the error is io.EOF.
+	// (ReadDir must return io.EOF itself, not an error wrapping io.EOF.)
+	//
+	// If n <= 0, ReadDir returns all the DirEntry values from the directory
+	// in a single slice. In this case, if ReadDir succeeds (reads all the way
+	// to the end of the directory), it returns the slice and a nil error.
+	// If it encounters an error before the end of the directory,
+	// ReadDir returns the DirEntry list read until that point and a non-nil error.
+	ReadDir(n int) ([]DirEntry, error)
+}
+
+// Generic file system errors.
+// Errors returned by file systems can be tested against these errors
+// using [errors.Is].
+
+// A FileInfo describes a file and is returned by [Stat].
+type FileInfo interface {
+	Name() string       // base name of the file
+	Size() int64        // length in bytes for regular files; system-dependent for others
+	Mode() FileMode     // file mode bits
+	ModTime() time.Time // modification time
+	IsDir() bool        // abbreviation for Mode().IsDir()
+	Sys() any           // underlying data source (can return nil)
+}
+
+// A FileMode represents a file's mode and permission bits.
+// The bits have the same definition on all systems, so that
+// information about files can be moved from one system
+// to another portably. Not all bits apply to all systems.
+// The only required bit is [ModeDir] for directories.
+type FileMode uint32
+
+// The defined file mode bits are the most significant bits of the [FileMode].
+// The nine least-significant bits are the standard Unix rwxrwxrwx permissions.
+// The values of these bits should be considered part of the public API and
+// may be used in wire protocols or disk representations: they must not be
+// changed, although new bits might be added.
+const (
+	// The single letters are the abbreviations
+	// used by the String method's formatting.
+	ModeDir        FileMode = 1 << (32 - 1 - iota) // d: is a directory
+	ModeAppend                                     // a: append-only
+	ModeExclusive                                  // l: exclusive use
+	ModeTemporary                                  // T: temporary file; Plan 9 only
+	ModeSymlink                                    // L: symbolic link
+	ModeDevice                                     // D: device file
+	ModeNamedPipe                                  // p: named pipe (FIFO)
+	ModeSocket                                     // S: Unix domain socket
+	ModeSetuid                                     // u: setuid
+	ModeSetgid                                     // g: setgid
+	ModeCharDevice                                 // c: Unix character device, when ModeDevice is set
+	ModeSticky                                     // t: sticky
+	ModeIrregular                                  // ?: non-regular file; nothing else is known about this file
+
+	// Mask for the type bits. For regular files, none will be set.
+	ModeType = ModeDir | ModeSymlink | ModeNamedPipe | ModeSocket | ModeDevice | ModeCharDevice | ModeIrregular
+
+	ModePerm FileMode = 0777 // Unix permission bits
+)
+
+func (m FileMode) String() string {
+	const str = "dalTLDpSugct?"
+	var buf [32]byte // Mode is uint32.
+	w := 0
+	for i, c := range str {
+		if m&(1<<uint(32-1-i)) != 0 {
+			buf[w] = byte(c)
+			w++
+		}
+	}
+	if w == 0 {
+		buf[w] = '-'
+		w++
+	}
+	const rwx = "rwxrwxrwx"
+	for i, c := range rwx {
+		if m&(1<<uint(9-1-i)) != 0 {
+			buf[w] = byte(c)
+		} else {
+			buf[w] = '-'
+		}
+		w++
+	}
+	return string(buf[:w])
+}
+
+// IsDir reports whether m describes a directory.
+// That is, it tests for the [ModeDir] bit being set in m.
+func (m FileMode) IsDir() bool {
+	return m&ModeDir != 0
+}
+
+// IsRegular reports whether m describes a regular file.
+// That is, it tests that no mode type bits are set.
+func (m FileMode) IsRegular() bool {
+	return m&ModeType == 0
+}
+
+// Perm returns the Unix permission bits in m (m & [ModePerm]).
+func (m FileMode) Perm() FileMode {
+	return m & ModePerm
+}
+
+// Type returns type bits in m (m & [ModeType]).
+func (m FileMode) Type() FileMode {
+	return m & ModeType
+}
+
+// PathError records an error and the operation and file path that caused it.
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/walk.go",
+            text: #"""
+// Copyright 2020 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package fs
+
+import (
+	"errors"
+	"path"
+)
+
+// SkipDir is used as a return value from [WalkDirFunc] to indicate that
+// the directory named in the call is to be skipped. It is not returned
+// as an error by any function.
+var SkipDir = errors.New("skip this directory")
+
+// SkipAll is used as a return value from [WalkDirFunc] to indicate that
+// all remaining files and directories are to be skipped. It is not returned
+// as an error by any function.
+var SkipAll = errors.New("skip everything and stop the walk")
+
+// WalkDirFunc is the type of the function called by [WalkDir] to visit
+// each file or directory.
+//
+// The path argument contains the argument to [WalkDir] as a prefix.
+// That is, if WalkDir is called with root argument "dir" and finds a file
+// named "a" in that directory, the walk function will be called with
+// argument "dir/a".
+//
+// The d argument is the [DirEntry] for the named path.
+//
+// The error result returned by the function controls how [WalkDir]
+// continues. If the function returns the special value [SkipDir], WalkDir
+// skips the current directory (path if d.IsDir() is true, otherwise
+// path's parent directory). If the function returns the special value
+// [SkipAll], WalkDir skips all remaining files and directories. Otherwise,
+// if the function returns a non-nil error, WalkDir stops entirely and
+// returns that error.
+//
+// The err argument reports an error related to path, signaling that
+// [WalkDir] will not walk into that directory. The function can decide how
+// to handle that error; as described earlier, returning the error will
+// cause WalkDir to stop walking the entire tree.
+//
+// [WalkDir] calls the function with a non-nil err argument in two cases.
+//
+// First, if the initial [Stat] on the root directory fails, WalkDir
+// calls the function with path set to root, d set to nil, and err set to
+// the error from [fs.Stat].
+//
+// Second, if a directory's ReadDir method (see [ReadDirFile]) fails, WalkDir calls the
+// function with path set to the directory's path, d set to an
+// [DirEntry] describing the directory, and err set to the error from
+// ReadDir. In this second case, the function is called twice with the
+// path of the directory: the first call is before the directory read is
+// attempted and has err set to nil, giving the function a chance to
+// return [SkipDir] or [SkipAll] and avoid the ReadDir entirely. The second call
+// is after a failed ReadDir and reports the error from ReadDir.
+// (If ReadDir succeeds, there is no second call.)
+//
+// The differences between WalkDirFunc compared to [path/filepath.WalkFunc] are:
+//
+//   - The second argument has type [DirEntry] instead of [FileInfo].
+//   - The function is called before reading a directory, to allow [SkipDir]
+//     or [SkipAll] to bypass the directory read entirely or skip all remaining
+//     files and directories respectively.
+//   - If a directory read fails, the function is called a second time
+//     for that directory to report the error.
+type WalkDirFunc func(path string, d DirEntry, err error) error
+
+// walkDir recursively descends path, calling walkDirFn.
+func walkDir(fsys FS, name string, d DirEntry, walkDirFn WalkDirFunc) error {
+	if err := walkDirFn(name, d, nil); err != nil || !d.IsDir() {
+		if err == SkipDir && d.IsDir() {
+			// Successfully skipped directory.
+			err = nil
+		}
+		return err
+	}
+
+	dirs, err := ReadDir(fsys, name)
+	if err != nil {
+		// Second call, to report ReadDir error.
+		err = walkDirFn(name, d, err)
+		if err != nil {
+			if err == SkipDir && d.IsDir() {
+				err = nil
+			}
+			return err
+		}
+	}
+
+	for _, d1 := range dirs {
+		name1 := path.Join(name, d1.Name())
+		if err := walkDir(fsys, name1, d1, walkDirFn); err != nil {
+			if err == SkipDir {
+				break
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// WalkDir walks the file tree rooted at root, calling fn for each file or
+// directory in the tree, including root.
+//
+// All errors that arise visiting files and directories are filtered by fn:
+// see the [fs.WalkDirFunc] documentation for details.
+//
+// The files are walked in lexical order, which makes the output deterministic
+// but requires WalkDir to read an entire directory into memory before proceeding
+// to walk that directory.
+//
+// WalkDir does not follow symbolic links found in directories,
+// but if root itself is a symbolic link, its target will be walked.
+func WalkDir(fsys FS, root string, fn WalkDirFunc) error {
+	info, err := Stat(fsys, root)
+	if err != nil {
+		err = fn(root, nil, err)
+	} else {
+		err = walkDir(fsys, root, FileInfoToDirEntry(info), fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
 }
 
 """#),
@@ -13421,8 +14377,8 @@ func Create(name string) (*os.File, error) {
 
 // OpenFile opens the named file with the flags (O_RDONLY and the like) and,
 // when it creates the file, the permissions perm.
-func OpenFile(name string, flag int, perm int) (*os.File, error) {
-	f, err := native.OpenFile(name, flag, perm)
+func OpenFile(name string, flag int, perm FileMode) (*os.File, error) {
+	f, err := native.OpenFile(name, flag, int(syscallMode(perm)))
 	return f, pathError(name, err)
 }
 
@@ -13434,8 +14390,8 @@ func ReadFile(name string) ([]byte, error) {
 
 // WriteFile writes data to the named file, creating it with perm if
 // needed and truncating it otherwise.
-func WriteFile(name string, data []byte, perm int) error {
-	return pathError(name, native.WriteFile(name, data, perm))
+func WriteFile(name string, data []byte, perm FileMode) error {
+	return pathError(name, native.WriteFile(name, data, int(syscallMode(perm))))
 }
 
 // Remove removes the named file or empty directory.
@@ -13444,8 +14400,8 @@ func Remove(name string) error {
 }
 
 // Mkdir creates a directory with the permissions perm.
-func Mkdir(name string, perm int) error {
-	return pathError(name, native.Mkdir(name, perm))
+func Mkdir(name string, perm FileMode) error {
+	return pathError(name, native.Mkdir(name, int(syscallMode(perm))))
 }
 
 // Rename renames oldpath to newpath, replacing a file there.
@@ -13459,6 +14415,235 @@ func Rename(oldpath, newpath string) error {
 		return failure
 	}
 	return &LinkError{Op: "rename", Old: oldpath, New: newpath, Err: errno(why)}
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/os/path.go",
+            text: #"""
+package os
+
+import (
+	"errors"
+	"os"
+	"strconv"
+	"syscall"
+)
+
+// MkdirAll creates a directory named path,
+// along with any necessary parents, and returns nil,
+// or else returns an error.
+// The permission bits perm (before umask) are used for all
+// directories that MkdirAll creates.
+// If path is already a directory, MkdirAll does nothing
+// and returns nil.
+func MkdirAll(path string, perm FileMode) error {
+	// Fast path: if we can tell whether path is a directory or file, stop with success or error.
+	dir, err := Stat(path)
+	if err == nil {
+		if dir.IsDir() {
+			return nil
+		}
+		return &PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+	}
+
+	// Slow path: make sure parent exists and then call Mkdir for path.
+
+	// Extract the parent folder from path by first removing any trailing
+	// path separator and then scanning backward until finding a path
+	// separator or reaching the beginning of the string.
+	i := len(path) - 1
+	for i >= 0 && IsPathSeparator(path[i]) {
+		i--
+	}
+	for i >= 0 && !IsPathSeparator(path[i]) {
+		i--
+	}
+	if i < 0 {
+		i = 0
+	}
+
+	// If there is a parent directory, recurse to ensure parent directory exists.
+	if parent := path[:i]; len(parent) > 0 {
+		err = MkdirAll(parent, perm)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Parent now exists; invoke Mkdir and use its result.
+	err = Mkdir(path, perm)
+	if err != nil {
+		// Handle arguments like "foo/." by
+		// double-checking that directory doesn't exist.
+		dir, err1 := Lstat(path)
+		if err1 == nil && dir.IsDir() {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// RemoveAll removes path and any children it contains.
+// It removes everything it can but returns the first error
+// it encounters. If the path does not exist, RemoveAll
+// returns nil (no error).
+// If there is an error, it will be of type [*PathError].
+func RemoveAll(path string) error {
+	if path == "" {
+		// fail silently to retain compatibility with previous behavior
+		// of RemoveAll. See issue 28830.
+		return nil
+	}
+
+	// The rmdir system call permits removing "." on Plan 9,
+	// so we don't permit it to remain consistent with the
+	// "at" implementation of RemoveAll.
+	if endsWithDot(path) {
+		return &PathError{Op: "RemoveAll", Path: path, Err: syscall.EINVAL}
+	}
+
+	// Simple case: if Remove works, we're done.
+	err := Remove(path)
+	if err == nil || IsNotExist(err) {
+		return nil
+	}
+
+	// Otherwise, is this a directory we need to recurse into?
+	dir, serr := Lstat(path)
+	if serr != nil {
+		var pe *PathError
+		if errors.As(serr, &pe) && (IsNotExist(pe.Err) || pe.Err == syscall.ENOTDIR) {
+			return nil
+		}
+		return serr
+	}
+	if !dir.IsDir() {
+		// Not a directory; return the error from Remove.
+		return err
+	}
+
+	// Remove contents & return first error.
+	err = nil
+	entries, _ := readDir(path)
+	for _, entry := range entries {
+		err1 := RemoveAll(path + string(PathSeparator) + entry.Name())
+		if err == nil {
+			err = err1
+		}
+	}
+
+	// Remove directory.
+	err1 := Remove(path)
+	if err1 == nil || IsNotExist(err1) {
+		return nil
+	}
+	if err == nil {
+		err = err1
+	}
+	return err
+}
+
+// endsWithDot reports whether the final component of path is ".".
+func endsWithDot(path string) bool {
+	if path == "." {
+		return true
+	}
+	if len(path) >= 2 && path[len(path)-1] == '.' && IsPathSeparator(path[len(path)-2]) {
+		return true
+	}
+	return false
+}
+
+// TempDir returns the default directory to use for temporary files:
+// $TMPDIR if non-empty, else /tmp.
+func TempDir() string {
+	dir := os.Getenv("TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return dir
+}
+
+var errPatternHasSeparator = errors.New("pattern contains path separator")
+
+// randomState makes the names of temporary files. Go's are random; these
+// follow one from the next, which the existence check makes as safe.
+var randomState uint32 = 1
+
+func nextRandom() string {
+	randomState = randomState*1664525 + 1013904223
+	return strconv.FormatUint(uint64(randomState), 10)
+}
+
+// prefixAndSuffix splits pattern by the last wildcard "*", if applicable,
+// returning prefix as the part before "*" and suffix as the part after "*".
+func prefixAndSuffix(pattern string) (prefix, suffix string, err error) {
+	for i := 0; i < len(pattern); i++ {
+		if IsPathSeparator(pattern[i]) {
+			return "", "", errPatternHasSeparator
+		}
+	}
+	pos := -1
+	for i := len(pattern) - 1; i >= 0; i-- {
+		if pattern[i] == '*' {
+			pos = i
+			break
+		}
+	}
+	if pos != -1 {
+		prefix, suffix = pattern[:pos], pattern[pos+1:]
+	} else {
+		prefix = pattern
+	}
+	return prefix, suffix, nil
+}
+
+func joinPath(dir, name string) string {
+	if len(dir) > 0 && IsPathSeparator(dir[len(dir)-1]) {
+		return dir + name
+	}
+	return dir + string(PathSeparator) + name
+}
+
+// MkdirTemp creates a new temporary directory in the directory dir
+// and returns the pathname of the new directory.
+// The new directory's name is generated by adding a random string to the end of pattern.
+// If pattern includes a "*", the random string replaces the last "*" instead.
+// The directory is created with mode 0o700 (before umask).
+// If dir is the empty string, MkdirTemp uses the default directory for temporary files, as returned by TempDir.
+func MkdirTemp(dir, pattern string) (string, error) {
+	if dir == "" {
+		dir = TempDir()
+	}
+
+	prefix, suffix, err := prefixAndSuffix(pattern)
+	if err != nil {
+		return "", &PathError{Op: "mkdirtemp", Path: pattern, Err: err}
+	}
+	prefix = joinPath(dir, prefix)
+
+	try := 0
+	for {
+		name := prefix + nextRandom() + suffix
+		err := Mkdir(name, 0700)
+		if err == nil {
+			return name, nil
+		}
+		if IsExist(err) {
+			if try++; try < 10000 {
+				continue
+			}
+			return "", &PathError{Op: "mkdirtemp", Path: dir + string(PathSeparator) + prefix + "*" + suffix, Err: ErrExist}
+		}
+		if IsNotExist(err) {
+			if _, err := Stat(dir); IsNotExist(err) {
+				return "", err
+			}
+		}
+		return "", err
+	}
 }
 
 """#),
@@ -13509,6 +14694,293 @@ func (p *Process) Signal(sig Signal) error {
 // Kill causes the Process to exit immediately.
 func (p *Process) Kill() error {
 	return p.Signal(Kill)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/os/stat.go",
+            text: #"""
+package os
+
+import (
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"time"
+)
+
+// The metadata of the file system are read by natives of the run-time
+// library: the size, Go's FileMode, and the modification time of a node,
+// and the names and types of a directory's entries. These types and
+// functions are Go's around them.
+
+// A FileInfo describes a file and is returned by [Stat] and [Lstat].
+type FileInfo = fs.FileInfo
+
+// A FileMode represents a file's mode and permission bits.
+type FileMode = fs.FileMode
+
+// A DirEntry is an entry read from a directory
+// (using the [ReadDir] function or a [File.ReadDir] method).
+type DirEntry = fs.DirEntry
+
+// The defined file mode bits are the most significant bits of the [FileMode].
+const (
+	// The single letters are the abbreviations
+	// used by the String method's formatting.
+	ModeDir        = fs.ModeDir        // d: is a directory
+	ModeAppend     = fs.ModeAppend     // a: append-only
+	ModeExclusive  = fs.ModeExclusive  // l: exclusive use
+	ModeTemporary  = fs.ModeTemporary  // T: temporary file; Plan 9 only
+	ModeSymlink    = fs.ModeSymlink    // L: symbolic link
+	ModeDevice     = fs.ModeDevice     // D: device file
+	ModeNamedPipe  = fs.ModeNamedPipe  // p: named pipe (FIFO)
+	ModeSocket     = fs.ModeSocket     // S: Unix domain socket
+	ModeSetuid     = fs.ModeSetuid     // u: setuid
+	ModeSetgid     = fs.ModeSetgid     // g: setgid
+	ModeCharDevice = fs.ModeCharDevice // c: Unix character device, when ModeDevice is set
+	ModeSticky     = fs.ModeSticky     // t: sticky
+	ModeIrregular  = fs.ModeIrregular  // ?: non-regular file; nothing else is known about this file
+
+	// Mask for the type bits. For regular files, none will be set.
+	ModeType = fs.ModeType
+
+	ModePerm = fs.ModePerm // Unix permission bits, 0o777
+)
+
+const (
+	PathSeparator     = '/' // OS-specific path separator
+	PathListSeparator = ':' // OS-specific path list separator
+)
+
+// IsPathSeparator reports whether c is a directory separator character.
+func IsPathSeparator(c uint8) bool {
+	return PathSeparator == c
+}
+
+// fileStat is what Stat and Lstat find of a node.
+type fileStat struct {
+	name    string
+	size    int64
+	mode    FileMode
+	modTime time.Time
+}
+
+func (fs *fileStat) Name() string       { return fs.name }
+func (fs *fileStat) IsDir() bool        { return fs.Mode().IsDir() }
+func (fs *fileStat) Size() int64        { return fs.size }
+func (fs *fileStat) Mode() FileMode     { return fs.mode }
+func (fs *fileStat) ModTime() time.Time { return fs.modTime }
+
+// Sys has nothing for this library: Go gives a *syscall.Stat_t.
+func (fs *fileStat) Sys() any { return nil }
+
+// basename removes trailing slashes and the leading directory name from path name.
+func basename(name string) string {
+	i := len(name) - 1
+	// Remove trailing slashes
+	for ; i > 0 && name[i] == '/'; i-- {
+		name = name[:i]
+	}
+	// Remove leading directory name
+	for i--; i >= 0; i-- {
+		if name[i] == '/' {
+			name = name[i+1:]
+			break
+		}
+	}
+	return name
+}
+
+func stat(name string, follow bool) (FileInfo, error) {
+	size, mode, mtime, err := native.stat(name, follow)
+	if err != nil {
+		return nil, pathError(name, err)
+	}
+	return &fileStat{name: basename(name), size: int64(size), mode: FileMode(mode), modTime: time.Unix(0, int64(mtime))}, nil
+}
+
+// Stat returns a [FileInfo] describing the named file.
+// If there is an error, it will be of type [*PathError].
+func Stat(name string) (FileInfo, error) {
+	return stat(name, true)
+}
+
+// Lstat returns a [FileInfo] describing the named file.
+// If the file is a symbolic link, the returned FileInfo
+// describes the symbolic link. Lstat makes no attempt to follow the link.
+// If there is an error, it will be of type [*PathError].
+func Lstat(name string) (FileInfo, error) {
+	return stat(name, false)
+}
+
+// unixDirent is an entry of a directory.
+type unixDirent struct {
+	parent string
+	name   string
+	typ    FileMode
+}
+
+func (d *unixDirent) Name() string   { return d.name }
+func (d *unixDirent) IsDir() bool    { return d.typ.IsDir() }
+func (d *unixDirent) Type() FileMode { return d.typ }
+
+func (d *unixDirent) Info() (FileInfo, error) {
+	return Lstat(d.parent + "/" + d.name)
+}
+
+func (d *unixDirent) String() string {
+	return fs.FormatDirEntry(d)
+}
+
+// readDir is the entries of the directory name, in the order of their names.
+func readDir(name string) ([]DirEntry, error) {
+	names, modes, err := native.readdir(name)
+	if err != nil {
+		return nil, pathError(name, err)
+	}
+	dirs := make([]DirEntry, len(names))
+	for i := range names {
+		dirs[i] = &unixDirent{parent: name, name: names[i], typ: FileMode(modes[i]).Type()}
+	}
+	return dirs, nil
+}
+
+// ReadDir reads the named directory,
+// returning all its directory entries sorted by filename.
+// If an error occurs reading the directory,
+// ReadDir returns the entries it was able to read before the error,
+// along with the error.
+func ReadDir(name string) ([]DirEntry, error) {
+	dirs, err := readDir(name)
+	if dirs == nil {
+		dirs = []DirEntry{}
+	}
+	return dirs, err
+}
+
+// Chmod changes the mode of the named file to mode.
+// If the file is a symbolic link, it changes the mode of the link's target.
+// If there is an error, it will be of type [*PathError].
+func Chmod(name string, mode FileMode) error {
+	return pathError(name, native.chmod(name, int(syscallMode(mode))))
+}
+
+// syscallMode returns the syscall-specific mode bits from Go's portable mode bits.
+func syscallMode(i FileMode) (o uint32) {
+	o |= uint32(i.Perm())
+	if i&ModeSetuid != 0 {
+		o |= 0o4000
+	}
+	if i&ModeSetgid != 0 {
+		o |= 0o2000
+	}
+	if i&ModeSticky != 0 {
+		o |= 0o1000
+	}
+	return
+}
+
+// Chdir changes the current working directory to the named directory.
+// If there is an error, it will be of type [*PathError].
+func Chdir(dir string) error {
+	return pathError(dir, native.chdir(dir))
+}
+
+// Symlink creates newname as a symbolic link to oldname.
+// If there is an error, it will be of type [*LinkError].
+func Symlink(oldname, newname string) error {
+	failure := native.symlink(oldname, newname)
+	if failure == nil {
+		return nil
+	}
+	return &LinkError{Op: "symlink", Old: oldname, New: newname, Err: linkErrno(failure, "symlink "+oldname+" "+newname+": ")}
+}
+
+// Readlink returns the destination of the named symbolic link.
+// If there is an error, it will be of type [*PathError].
+func Readlink(name string) (string, error) {
+	target, err := native.readlink(name)
+	return target, pathError(name, err)
+}
+
+func linkErrno(failure error, prefix string) error {
+	text := failure.Error()
+	if len(text) > len(prefix) && text[:len(prefix)] == prefix {
+		return errno(text[len(prefix):])
+	}
+	return failure
+}
+
+// The methods of *File that are Go: the compiler calls these for
+// f.Stat(), f.ReadDir(n), f.Readdir(n), and f.Readdirnames(n).
+
+// dirOffsets is how far ReadDir and the like have read each directory.
+var dirOffsets = map[*os.File]int{}
+
+func fileMethodStat(f *os.File) (FileInfo, error) {
+	if f == nil {
+		return nil, ErrInvalid
+	}
+	return Stat(f.Name())
+}
+
+// fileMethodReadDir is f.ReadDir(n): the entries in directory order, all of them
+// when n <= 0, else at most n, with io.EOF at the end.
+func fileMethodReadDir(f *os.File, n int) ([]DirEntry, error) {
+	if f == nil {
+		return nil, ErrInvalid
+	}
+	all, err := readDir(f.Name())
+	if err != nil {
+		if pe, ok := err.(*PathError); ok && pe.Op == "open" {
+			pe.Op = "readdirent"
+		}
+		return []DirEntry{}, err
+	}
+	start := dirOffsets[f]
+	if start > len(all) {
+		start = len(all)
+	}
+	rest := all[start:]
+	if n <= 0 {
+		dirOffsets[f] = len(all)
+		return rest, nil
+	}
+	if len(rest) == 0 {
+		return []DirEntry{}, io.EOF
+	}
+	if n > len(rest) {
+		n = len(rest)
+	}
+	dirOffsets[f] = start + n
+	return rest[:n], nil
+}
+
+func fileMethodReaddirnames(f *os.File, n int) ([]string, error) {
+	entries, err := fileMethodReadDir(f, n)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names, err
+}
+
+func fileMethodReaddir(f *os.File, n int) ([]FileInfo, error) {
+	entries, err := fileMethodReadDir(f, n)
+	infos := make([]FileInfo, 0, len(entries))
+	for _, e := range entries {
+		info, ierr := e.Info()
+		if ierr != nil {
+			if errors.Is(ierr, ErrNotExist) {
+				continue
+			}
+			return infos, ierr
+		}
+		infos = append(infos, info)
+	}
+	return infos, err
 }
 
 """#),
@@ -13873,6 +15345,1866 @@ func ignoreSignal(sig int) {
 
 func signalIgnored(sig int) bool {
 	return ignored[sig]
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let path: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/path/match.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package path
+
+import (
+	"errors"
+	"strings"
+	"unicode/utf8"
+)
+
+// ErrBadPattern indicates a pattern was malformed.
+var ErrBadPattern = errors.New("syntax error in pattern")
+
+// Match reports whether name matches the shell pattern.
+// The pattern syntax is:
+//
+//	pattern:
+//		{ term }
+//	term:
+//		'*'         matches any sequence of non-/ characters
+//		'?'         matches any single non-/ character
+//		'[' [ '^' ] { character-range } ']'
+//		            character class (must be non-empty)
+//		c           matches character c (c != '*', '?', '\\', '[')
+//		'\\' c      matches character c
+//
+//	character-range:
+//		c           matches character c (c != '\\', '-', ']')
+//		'\\' c      matches character c
+//		lo '-' hi   matches character c for lo <= c <= hi
+//
+// Match requires pattern to match all of name, not just a substring.
+// The only possible returned error is [ErrBadPattern], when pattern
+// is malformed.
+func Match(pattern, name string) (matched bool, err error) {
+Pattern:
+	for len(pattern) > 0 {
+		var star bool
+		var chunk string
+		star, chunk, pattern = scanChunk(pattern)
+		if star && chunk == "" {
+			// Trailing * matches rest of string unless it has a /.
+			return strings.IndexByte(name, '/') < 0, nil
+		}
+		// Look for match at current position.
+		t, ok, err := matchChunk(chunk, name)
+		// if we're the last chunk, make sure we've exhausted the name
+		// otherwise we'll give a false result even if we could still match
+		// using the star
+		if ok && (len(t) == 0 || len(pattern) > 0) {
+			name = t
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if star {
+			// Look for match skipping i+1 bytes.
+			// Cannot skip /.
+			for i := 0; i < len(name) && name[i] != '/'; i++ {
+				t, ok, err := matchChunk(chunk, name[i+1:])
+				if ok {
+					// if we're the last chunk, make sure we exhausted the name
+					if len(pattern) == 0 && len(t) > 0 {
+						continue
+					}
+					name = t
+					continue Pattern
+				}
+				if err != nil {
+					return false, err
+				}
+			}
+		}
+		// Before returning false with no error,
+		// check that the remainder of the pattern is syntactically valid.
+		for len(pattern) > 0 {
+			_, chunk, pattern = scanChunk(pattern)
+			if _, _, err := matchChunk(chunk, ""); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	return len(name) == 0, nil
+}
+
+// scanChunk gets the next segment of pattern, which is a non-star string
+// possibly preceded by a star.
+func scanChunk(pattern string) (star bool, chunk, rest string) {
+	for len(pattern) > 0 && pattern[0] == '*' {
+		pattern = pattern[1:]
+		star = true
+	}
+	inrange := false
+	var i int
+Scan:
+	for i = 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			// error check handled in matchChunk: bad pattern.
+			if i+1 < len(pattern) {
+				i++
+			}
+		case '[':
+			inrange = true
+		case ']':
+			inrange = false
+		case '*':
+			if !inrange {
+				break Scan
+			}
+		}
+	}
+	return star, pattern[0:i], pattern[i:]
+}
+
+// matchChunk checks whether chunk matches the beginning of s.
+// If so, it returns the remainder of s (after the match).
+// Chunk is all single-character operators: literals, char classes, and ?.
+func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+	// failed records whether the match has failed.
+	// After the match fails, the loop continues on processing chunk,
+	// checking that the pattern is well-formed but no longer reading s.
+	failed := false
+	for len(chunk) > 0 {
+		if !failed && len(s) == 0 {
+			failed = true
+		}
+		switch chunk[0] {
+		case '[':
+			// character class
+			var r rune
+			if !failed {
+				var n int
+				r, n = utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			chunk = chunk[1:]
+			// possibly negated
+			negated := false
+			if len(chunk) > 0 && chunk[0] == '^' {
+				negated = true
+				chunk = chunk[1:]
+			}
+			// parse all ranges
+			match := false
+			nrange := 0
+			for {
+				if len(chunk) > 0 && chunk[0] == ']' && nrange > 0 {
+					chunk = chunk[1:]
+					break
+				}
+				var lo, hi rune
+				if lo, chunk, err = getEsc(chunk); err != nil {
+					return "", false, err
+				}
+				hi = lo
+				if chunk[0] == '-' {
+					if hi, chunk, err = getEsc(chunk[1:]); err != nil {
+						return "", false, err
+					}
+				}
+				if lo <= r && r <= hi {
+					match = true
+				}
+				nrange++
+			}
+			if match == negated {
+				failed = true
+			}
+
+		case '?':
+			if !failed {
+				if s[0] == '/' {
+					failed = true
+				}
+				_, n := utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			chunk = chunk[1:]
+
+		case '\\':
+			chunk = chunk[1:]
+			if len(chunk) == 0 {
+				return "", false, ErrBadPattern
+			}
+			fallthrough
+
+		default:
+			if !failed {
+				if chunk[0] != s[0] {
+					failed = true
+				}
+				s = s[1:]
+			}
+			chunk = chunk[1:]
+		}
+	}
+	if failed {
+		return "", false, nil
+	}
+	return s, true, nil
+}
+
+// getEsc gets a possibly-escaped character from chunk, for a character class.
+func getEsc(chunk string) (r rune, nchunk string, err error) {
+	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
+		err = ErrBadPattern
+		return
+	}
+	if chunk[0] == '\\' {
+		chunk = chunk[1:]
+		if len(chunk) == 0 {
+			err = ErrBadPattern
+			return
+		}
+	}
+	r, n := utf8.DecodeRuneInString(chunk)
+	if r == utf8.RuneError && n == 1 {
+		err = ErrBadPattern
+	}
+	nchunk = chunk[n:]
+	if len(nchunk) == 0 {
+		err = ErrBadPattern
+	}
+	return
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/path.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package path implements utility routines for manipulating slash-separated
+// paths.
+//
+// The path package should only be used for paths separated by forward
+// slashes, such as the paths in URLs. This package does not deal with
+// Windows paths with drive letters or backslashes; to manipulate
+// operating system paths, use the [path/filepath] package.
+package path
+
+import "strings"
+
+// A lazybuf is a lazily constructed path buffer.
+// It supports append, reading previously appended bytes,
+// and retrieving the final string. It does not allocate a buffer
+// to hold the output until that output diverges from s.
+type lazybuf struct {
+	s   string
+	buf []byte
+	w   int
+}
+
+func (b *lazybuf) index(i int) byte {
+	if b.buf != nil {
+		return b.buf[i]
+	}
+	return b.s[i]
+}
+
+func (b *lazybuf) append(c byte) {
+	if b.buf == nil {
+		if b.w < len(b.s) && b.s[b.w] == c {
+			b.w++
+			return
+		}
+		b.buf = make([]byte, len(b.s))
+		copy(b.buf, b.s[:b.w])
+	}
+	b.buf[b.w] = c
+	b.w++
+}
+
+func (b *lazybuf) string() string {
+	if b.buf == nil {
+		return b.s[:b.w]
+	}
+	return string(b.buf[:b.w])
+}
+
+// Clean returns the shortest path name equivalent to path
+// by purely lexical processing. It applies the following rules
+// iteratively until no further processing can be done:
+//
+//  1. Replace multiple slashes with a single slash.
+//  2. Eliminate each . path name element (the current directory).
+//  3. Eliminate each inner .. path name element (the parent directory)
+//     along with the non-.. element that precedes it.
+//  4. Eliminate .. elements that begin a rooted path:
+//     that is, replace "/.." by "/" at the beginning of a path.
+//
+// The returned path ends in a slash only if it is the root "/".
+//
+// If the result of this process is an empty string, Clean
+// returns the string ".".
+//
+// See also Rob Pike, “Lexical File Names in Plan 9 or
+// Getting Dot-Dot Right,”
+// https://9p.io/sys/doc/lexnames.html
+func Clean(path string) string {
+	if path == "" {
+		return "."
+	}
+
+	rooted := path[0] == '/'
+	n := len(path)
+
+	// Invariants:
+	//	reading from path; r is index of next byte to process.
+	//	writing to buf; w is index of next byte to write.
+	//	dotdot is index in buf where .. must stop, either because
+	//		it is the leading slash or it is a leading ../../.. prefix.
+	out := lazybuf{s: path}
+	r, dotdot := 0, 0
+	if rooted {
+		out.append('/')
+		r, dotdot = 1, 1
+	}
+
+	for r < n {
+		switch {
+		case path[r] == '/':
+			// empty path element
+			r++
+		case path[r] == '.' && (r+1 == n || path[r+1] == '/'):
+			// . element
+			r++
+		case path[r] == '.' && path[r+1] == '.' && (r+2 == n || path[r+2] == '/'):
+			// .. element: remove to last /
+			r += 2
+			switch {
+			case out.w > dotdot:
+				// can backtrack
+				out.w--
+				for out.w > dotdot && out.index(out.w) != '/' {
+					out.w--
+				}
+			case !rooted:
+				// cannot backtrack, but not rooted, so append .. element.
+				if out.w > 0 {
+					out.append('/')
+				}
+				out.append('.')
+				out.append('.')
+				dotdot = out.w
+			}
+		default:
+			// real path element.
+			// add slash if needed
+			if rooted && out.w != 1 || !rooted && out.w != 0 {
+				out.append('/')
+			}
+			// copy element
+			for ; r < n && path[r] != '/'; r++ {
+				out.append(path[r])
+			}
+		}
+	}
+
+	// Turn empty string into "."
+	if out.w == 0 {
+		return "."
+	}
+
+	return out.string()
+}
+
+// Split splits path immediately following the final slash,
+// separating it into a directory and file name component.
+// If there is no slash in path, Split returns an empty dir and
+// file set to path.
+// The returned values have the property that path = dir+file.
+func Split(path string) (dir, file string) {
+	i := strings.LastIndexByte(path, '/')
+	return path[:i+1], path[i+1:]
+}
+
+// Join joins any number of path elements into a single path,
+// separating them with slashes. Empty elements are ignored.
+// The result is Cleaned. However, if the argument list is
+// empty or all its elements are empty, Join returns
+// an empty string.
+func Join(elem ...string) string {
+	size := 0
+	for _, e := range elem {
+		size += len(e)
+	}
+	if size == 0 {
+		return ""
+	}
+	buf := make([]byte, 0, size+len(elem)-1)
+	for _, e := range elem {
+		if len(buf) > 0 || e != "" {
+			if len(buf) > 0 {
+				buf = append(buf, '/')
+			}
+			buf = append(buf, e...)
+		}
+	}
+	return Clean(string(buf))
+}
+
+// Ext returns the file name extension used by path.
+// The extension is the suffix beginning at the final dot
+// in the final slash-separated element of path;
+// it is empty if there is no dot.
+func Ext(path string) string {
+	for i := len(path) - 1; i >= 0 && path[i] != '/'; i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+	}
+	return ""
+}
+
+// Base returns the last element of path.
+// Trailing slashes are removed before extracting the last element.
+// If the path is empty, Base returns ".".
+// If the path consists entirely of slashes, Base returns "/".
+func Base(path string) string {
+	if path == "" {
+		return "."
+	}
+	// Strip trailing slashes.
+	for len(path) > 0 && path[len(path)-1] == '/' {
+		path = path[0 : len(path)-1]
+	}
+	// Find the last element
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		path = path[i+1:]
+	}
+	// If empty now, it had only slashes.
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+// IsAbs reports whether the path is absolute.
+func IsAbs(path string) bool {
+	return len(path) > 0 && path[0] == '/'
+}
+
+// Dir returns all but the last element of path, typically the path's directory.
+// After dropping the final element using [Split], the path is Cleaned and trailing
+// slashes are removed.
+// If the path is empty, Dir returns ".".
+// If the path consists entirely of slashes followed by non-slash bytes, Dir
+// returns a single slash. In any other case, the returned path does not end in a
+// slash.
+func Dir(path string) string {
+	dir, _ := Split(path)
+	return Clean(dir)
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let pathFilepath: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/lite.go",
+            text: #"""
+// Copyright 2024 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package filepathlite implements a subset of path/filepath,
+// only using packages which may be imported by "os".
+//
+// Tests for these functions are in path/filepath.
+package filepath
+
+import (
+	"errors"
+	"io/fs"
+	"strings"
+)
+
+var errInvalidPath = errors.New("invalid path")
+
+// A lazybuf is a lazily constructed path buffer.
+// It supports append, reading previously appended bytes,
+// and retrieving the final string. It does not allocate a buffer
+// to hold the output until that output diverges from s.
+type lazybuf struct {
+	path       string
+	buf        []byte
+	w          int
+	volAndPath string
+	volLen     int
+}
+
+func (b *lazybuf) index(i int) byte {
+	if b.buf != nil {
+		return b.buf[i]
+	}
+	return b.path[i]
+}
+
+func (b *lazybuf) append(c byte) {
+	if b.buf == nil {
+		if b.w < len(b.path) && b.path[b.w] == c {
+			b.w++
+			return
+		}
+		b.buf = make([]byte, len(b.path))
+		copy(b.buf, b.path[:b.w])
+	}
+	b.buf[b.w] = c
+	b.w++
+}
+
+func (b *lazybuf) prepend(prefix ...byte) {
+	b.buf = append(append([]byte{}, prefix...), b.buf...)
+	b.w += len(prefix)
+}
+
+func (b *lazybuf) string() string {
+	if b.buf == nil {
+		return b.volAndPath[:b.volLen+b.w]
+	}
+	return b.volAndPath[:b.volLen] + string(b.buf[:b.w])
+}
+
+// Clean is filepath.Clean.
+func liteClean(path string) string {
+	originalPath := path
+	volLen := volumeNameLen(path)
+	path = path[volLen:]
+	if path == "" {
+		if volLen > 1 && liteIsPathSeparator(originalPath[0]) && liteIsPathSeparator(originalPath[1]) {
+			// should be UNC
+			return liteFromSlash(originalPath)
+		}
+		return originalPath + "."
+	}
+	rooted := liteIsPathSeparator(path[0])
+
+	// Invariants:
+	//	reading from path; r is index of next byte to process.
+	//	writing to buf; w is index of next byte to write.
+	//	dotdot is index in buf where .. must stop, either because
+	//		it is the leading slash or it is a leading ../../.. prefix.
+	n := len(path)
+	out := lazybuf{path: path, volAndPath: originalPath, volLen: volLen}
+	r, dotdot := 0, 0
+	if rooted {
+		out.append(Separator)
+		r, dotdot = 1, 1
+	}
+
+	for r < n {
+		switch {
+		case liteIsPathSeparator(path[r]):
+			// empty path element
+			r++
+		case path[r] == '.' && (r+1 == n || liteIsPathSeparator(path[r+1])):
+			// . element
+			r++
+		case path[r] == '.' && path[r+1] == '.' && (r+2 == n || liteIsPathSeparator(path[r+2])):
+			// .. element: remove to last separator
+			r += 2
+			switch {
+			case out.w > dotdot:
+				// can backtrack
+				out.w--
+				for out.w > dotdot && !liteIsPathSeparator(out.index(out.w)) {
+					out.w--
+				}
+			case !rooted:
+				// cannot backtrack, but not rooted, so append .. element.
+				if out.w > 0 {
+					out.append(Separator)
+				}
+				out.append('.')
+				out.append('.')
+				dotdot = out.w
+			}
+		default:
+			// real path element.
+			// add slash if needed
+			if rooted && out.w != 1 || !rooted && out.w != 0 {
+				out.append(Separator)
+			}
+			// copy element
+			for ; r < n && !liteIsPathSeparator(path[r]); r++ {
+				out.append(path[r])
+			}
+		}
+	}
+
+	// Turn empty string into "."
+	if out.w == 0 {
+		out.append('.')
+	}
+
+	postClean(&out) // avoid creating absolute paths on Windows
+	return liteFromSlash(out.string())
+}
+
+// IsLocal is filepath.IsLocal.
+func liteIsLocal(path string) bool {
+	return isLocal(path)
+}
+
+func unixIsLocal(path string) bool {
+	if liteIsAbs(path) || path == "" {
+		return false
+	}
+	hasDots := false
+	for p := path; p != ""; {
+		var part string
+		part, p, _ = strings.Cut(p, "/")
+		if part == "." || part == ".." {
+			hasDots = true
+			break
+		}
+	}
+	if hasDots {
+		path = liteClean(path)
+	}
+	if path == ".." || strings.HasPrefix(path, "../") {
+		return false
+	}
+	return true
+}
+
+// Localize is filepath.Localize.
+func liteLocalize(path string) (string, error) {
+	if !fs.ValidPath(path) {
+		return "", errInvalidPath
+	}
+	return localize(path)
+}
+
+// ToSlash is filepath.ToSlash.
+func liteToSlash(path string) string {
+	if Separator == '/' {
+		return path
+	}
+	return replaceStringByte(path, Separator, '/')
+}
+
+// FromSlash is filepath.ToSlash.
+func liteFromSlash(path string) string {
+	if Separator == '/' {
+		return path
+	}
+	return replaceStringByte(path, '/', Separator)
+}
+
+func replaceStringByte(s string, old, new byte) string {
+	if strings.IndexByte(s, old) == -1 {
+		return s
+	}
+	n := []byte(s)
+	for i := range n {
+		if n[i] == old {
+			n[i] = new
+		}
+	}
+	return string(n)
+}
+
+// Split is filepath.Split.
+func liteSplit(path string) (dir, file string) {
+	vol := liteVolumeName(path)
+	i := len(path) - 1
+	for i >= len(vol) && !liteIsPathSeparator(path[i]) {
+		i--
+	}
+	return path[:i+1], path[i+1:]
+}
+
+// Ext is filepath.Ext.
+func liteExt(path string) string {
+	for i := len(path) - 1; i >= 0 && !liteIsPathSeparator(path[i]); i-- {
+		if path[i] == '.' {
+			return path[i:]
+		}
+	}
+	return ""
+}
+
+// Base is filepath.Base.
+func liteBase(path string) string {
+	if path == "" {
+		return "."
+	}
+	// Strip trailing slashes.
+	for len(path) > 0 && liteIsPathSeparator(path[len(path)-1]) {
+		path = path[0 : len(path)-1]
+	}
+	// Throw away volume name
+	path = path[len(liteVolumeName(path)):]
+	// Find the last element
+	i := len(path) - 1
+	for i >= 0 && !liteIsPathSeparator(path[i]) {
+		i--
+	}
+	if i >= 0 {
+		path = path[i+1:]
+	}
+	// If empty now, it had only slashes.
+	if path == "" {
+		return string(Separator)
+	}
+	return path
+}
+
+// Dir is filepath.Dir.
+func liteDir(path string) string {
+	vol := liteVolumeName(path)
+	i := len(path) - 1
+	for i >= len(vol) && !liteIsPathSeparator(path[i]) {
+		i--
+	}
+	dir := liteClean(path[len(vol) : i+1])
+	if dir == "." && len(vol) > 2 {
+		// must be UNC
+		return vol
+	}
+	return vol + dir
+}
+
+// VolumeName is filepath.VolumeName.
+func liteVolumeName(path string) string {
+	return liteFromSlash(path[:volumeNameLen(path)])
+}
+
+// VolumeNameLen returns the length of the leading volume name on Windows.
+// It returns 0 elsewhere.
+func liteVolumeNameLen(path string) int {
+	return volumeNameLen(path)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/lite_unix.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package filepath
+
+import "strings"
+
+func liteIsPathSeparator(c uint8) bool {
+	return Separator == c
+}
+
+func isLocal(path string) bool {
+	return unixIsLocal(path)
+}
+
+func localize(path string) (string, error) {
+	if strings.IndexByte(path, 0) >= 0 {
+		return "", errInvalidPath
+	}
+	return path, nil
+}
+
+// IsAbs reports whether the path is absolute.
+func liteIsAbs(path string) bool {
+	return strings.HasPrefix(path, "/")
+}
+
+// volumeNameLen returns length of the leading volume name on Windows.
+// It returns 0 elsewhere.
+func volumeNameLen(path string) int {
+	return 0
+}
+
+func postClean(out *lazybuf) {}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/match.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package filepath
+
+import (
+	"errors"
+	"os"
+	"sort"
+	"strings"
+	"unicode/utf8"
+)
+
+// ErrBadPattern indicates a pattern was malformed.
+var ErrBadPattern = errors.New("syntax error in pattern")
+
+// Match reports whether name matches the shell file name pattern.
+// The pattern syntax is:
+//
+//	pattern:
+//		{ term }
+//	term:
+//		'*'         matches any sequence of non-Separator characters
+//		'?'         matches any single non-Separator character
+//		'[' [ '^' ] { character-range } ']'
+//		            character class (must be non-empty)
+//		c           matches character c (c != '*', '?', '\\', '[')
+//		'\\' c      matches character c
+//
+//	character-range:
+//		c           matches character c (c != '\\', '-', ']')
+//		'\\' c      matches character c
+//		lo '-' hi   matches character c for lo <= c <= hi
+//
+// Match requires pattern to match all of name, not just a substring.
+// The only possible returned error is [ErrBadPattern], when pattern
+// is malformed.
+//
+// On Windows, escaping is disabled. Instead, '\\' is treated as
+// path separator.
+func Match(pattern, name string) (matched bool, err error) {
+Pattern:
+	for len(pattern) > 0 {
+		var star bool
+		var chunk string
+		star, chunk, pattern = scanChunk(pattern)
+		if star && chunk == "" {
+			// Trailing * matches rest of string unless it has a /.
+			return !strings.Contains(name, string(Separator)), nil
+		}
+		// Look for match at current position.
+		t, ok, err := matchChunk(chunk, name)
+		// if we're the last chunk, make sure we've exhausted the name
+		// otherwise we'll give a false result even if we could still match
+		// using the star
+		if ok && (len(t) == 0 || len(pattern) > 0) {
+			name = t
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if star {
+			// Look for match skipping i+1 bytes.
+			// Cannot skip /.
+			for i := 0; i < len(name) && name[i] != Separator; i++ {
+				t, ok, err := matchChunk(chunk, name[i+1:])
+				if ok {
+					// if we're the last chunk, make sure we exhausted the name
+					if len(pattern) == 0 && len(t) > 0 {
+						continue
+					}
+					name = t
+					continue Pattern
+				}
+				if err != nil {
+					return false, err
+				}
+			}
+		}
+		return false, nil
+	}
+	return len(name) == 0, nil
+}
+
+// scanChunk gets the next segment of pattern, which is a non-star string
+// possibly preceded by a star.
+func scanChunk(pattern string) (star bool, chunk, rest string) {
+	for len(pattern) > 0 && pattern[0] == '*' {
+		pattern = pattern[1:]
+		star = true
+	}
+	inrange := false
+	var i int
+Scan:
+	for i = 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			if true {
+				// error check handled in matchChunk: bad pattern.
+				if i+1 < len(pattern) {
+					i++
+				}
+			}
+		case '[':
+			inrange = true
+		case ']':
+			inrange = false
+		case '*':
+			if !inrange {
+				break Scan
+			}
+		}
+	}
+	return star, pattern[0:i], pattern[i:]
+}
+
+// matchChunk checks whether chunk matches the beginning of s.
+// If so, it returns the remainder of s (after the match).
+// Chunk is all single-character operators: literals, char classes, and ?.
+func matchChunk(chunk, s string) (rest string, ok bool, err error) {
+	// failed records whether the match has failed.
+	// After the match fails, the loop continues on processing chunk,
+	// checking that the pattern is well-formed but no longer reading s.
+	failed := false
+	for len(chunk) > 0 {
+		if !failed && len(s) == 0 {
+			failed = true
+		}
+		switch chunk[0] {
+		case '[':
+			// character class
+			var r rune
+			if !failed {
+				var n int
+				r, n = utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			chunk = chunk[1:]
+			// possibly negated
+			negated := false
+			if len(chunk) > 0 && chunk[0] == '^' {
+				negated = true
+				chunk = chunk[1:]
+			}
+			// parse all ranges
+			match := false
+			nrange := 0
+			for {
+				if len(chunk) > 0 && chunk[0] == ']' && nrange > 0 {
+					chunk = chunk[1:]
+					break
+				}
+				var lo, hi rune
+				if lo, chunk, err = getEsc(chunk); err != nil {
+					return "", false, err
+				}
+				hi = lo
+				if chunk[0] == '-' {
+					if hi, chunk, err = getEsc(chunk[1:]); err != nil {
+						return "", false, err
+					}
+				}
+				if lo <= r && r <= hi {
+					match = true
+				}
+				nrange++
+			}
+			if match == negated {
+				failed = true
+			}
+
+		case '?':
+			if !failed {
+				if s[0] == Separator {
+					failed = true
+				}
+				_, n := utf8.DecodeRuneInString(s)
+				s = s[n:]
+			}
+			chunk = chunk[1:]
+
+		case '\\':
+			if true {
+				chunk = chunk[1:]
+				if len(chunk) == 0 {
+					return "", false, ErrBadPattern
+				}
+			}
+			fallthrough
+
+		default:
+			if !failed {
+				if chunk[0] != s[0] {
+					failed = true
+				}
+				s = s[1:]
+			}
+			chunk = chunk[1:]
+		}
+	}
+	if failed {
+		return "", false, nil
+	}
+	return s, true, nil
+}
+
+// getEsc gets a possibly-escaped character from chunk, for a character class.
+func getEsc(chunk string) (r rune, nchunk string, err error) {
+	if len(chunk) == 0 || chunk[0] == '-' || chunk[0] == ']' {
+		err = ErrBadPattern
+		return
+	}
+	if chunk[0] == '\\' && true {
+		chunk = chunk[1:]
+		if len(chunk) == 0 {
+			err = ErrBadPattern
+			return
+		}
+	}
+	r, n := utf8.DecodeRuneInString(chunk)
+	if r == utf8.RuneError && n == 1 {
+		err = ErrBadPattern
+	}
+	nchunk = chunk[n:]
+	if len(nchunk) == 0 {
+		err = ErrBadPattern
+	}
+	return
+}
+
+// Glob returns the names of all files matching pattern or nil
+// if there is no matching file. The syntax of patterns is the same
+// as in [Match]. The pattern may describe hierarchical names such as
+// /usr/*/bin/ed (assuming the [Separator] is '/').
+//
+// Glob ignores file system errors such as I/O errors reading directories.
+// The only possible returned error is [ErrBadPattern], when pattern
+// is malformed.
+func Glob(pattern string) (matches []string, err error) {
+	return globWithLimit(pattern, 0)
+}
+
+func globWithLimit(pattern string, depth int) (matches []string, err error) {
+	// This limit is used prevent stack exhaustion issues. See CVE-2022-30632.
+	const pathSeparatorsLimit = 10000
+	if depth == pathSeparatorsLimit {
+		return nil, ErrBadPattern
+	}
+
+	// Check pattern is well-formed.
+	if _, err := Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	if !hasMeta(pattern) {
+		if _, err = os.Lstat(pattern); err != nil {
+			return nil, nil
+		}
+		return []string{pattern}, nil
+	}
+
+	dir, file := Split(pattern)
+	volumeLen := 0
+	if false {
+		volumeLen, dir = cleanGlobPathWindows(dir)
+	} else {
+		dir = cleanGlobPath(dir)
+	}
+
+	if !hasMeta(dir[volumeLen:]) {
+		return glob(dir, file, nil)
+	}
+
+	// Prevent infinite recursion. See issue 15879.
+	if dir == pattern {
+		return nil, ErrBadPattern
+	}
+
+	var m []string
+	m, err = globWithLimit(dir, depth+1)
+	if err != nil {
+		return
+	}
+	for _, d := range m {
+		matches, err = glob(d, file, matches)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+// cleanGlobPath prepares path for glob matching.
+func cleanGlobPath(path string) string {
+	switch path {
+	case "":
+		return "."
+	case string(Separator):
+		// do nothing to the path
+		return path
+	default:
+		return path[0 : len(path)-1] // chop off trailing separator
+	}
+}
+
+// cleanGlobPathWindows is windows version of cleanGlobPath.
+func cleanGlobPathWindows(path string) (prefixLen int, cleaned string) {
+	vollen := liteVolumeNameLen(path)
+	switch {
+	case path == "":
+		return 0, "."
+	case vollen+1 == len(path) && os.IsPathSeparator(path[len(path)-1]): // /, \, C:\ and C:/
+		// do nothing to the path
+		return vollen + 1, path
+	case vollen == len(path) && len(path) == 2: // C:
+		return vollen, path + "." // convert C: into C:.
+	default:
+		if vollen >= len(path) {
+			vollen = len(path) - 1
+		}
+		return vollen, path[0 : len(path)-1] // chop off trailing separator
+	}
+}
+
+// glob searches for files matching pattern in the directory dir
+// and appends them to matches. If the directory cannot be
+// opened, it returns the existing matches. New matches are
+// added in lexicographical order.
+func glob(dir, pattern string, matches []string) (m []string, e error) {
+	m = matches
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return // ignore I/O error
+	}
+	if !fi.IsDir() {
+		return // ignore I/O error
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return // ignore I/O error
+	}
+	defer d.Close()
+
+	names, _ := d.Readdirnames(-1)
+	sort.Strings(names)
+
+	for _, n := range names {
+		matched, err := Match(pattern, n)
+		if err != nil {
+			return m, err
+		}
+		if matched {
+			m = append(m, Join(dir, n))
+		}
+	}
+	return
+}
+
+// hasMeta reports whether path contains any of the magic characters
+// recognized by Match.
+func hasMeta(path string) bool {
+	magicChars := `*?[`
+	if true {
+		magicChars = `*?[\`
+	}
+	return strings.ContainsAny(path, magicChars)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/path.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package filepath implements utility routines for manipulating filename paths
+// in a way compatible with the target operating system-defined file paths.
+//
+// The filepath package uses either forward slashes or backslashes,
+// depending on the operating system. To process paths such as URLs
+// that always use forward slashes regardless of the operating
+// system, see the [path] package.
+package filepath
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"sort"
+	"strings"
+)
+
+const (
+	Separator     = os.PathSeparator
+	ListSeparator = os.PathListSeparator
+)
+
+// Clean returns the shortest path name equivalent to path
+// by purely lexical processing. It applies the following rules
+// iteratively until no further processing can be done:
+//
+//  1. Replace multiple [Separator] elements with a single one.
+//  2. Eliminate each . path name element (the current directory).
+//  3. Eliminate each inner .. path name element (the parent directory)
+//     along with the non-.. element that precedes it.
+//  4. Eliminate .. elements that begin a rooted path:
+//     that is, replace "/.." by "/" at the beginning of a path,
+//     assuming Separator is '/'.
+//
+// The returned path ends in a slash only if it represents a root directory,
+// such as "/" on Unix or `C:\` on Windows.
+//
+// Finally, any occurrences of slash are replaced by Separator.
+//
+// If the result of this process is an empty string, Clean
+// returns the string ".".
+//
+// On Windows, Clean does not modify the volume name other than to replace
+// occurrences of "/" with `\`.
+// For example, Clean("//host/share/../x") returns `\\host\share\x`.
+//
+// See also Rob Pike, “Lexical File Names in Plan 9 or
+// Getting Dot-Dot Right,”
+// https://9p.io/sys/doc/lexnames.html
+func Clean(path string) string {
+	return liteClean(path)
+}
+
+// IsLocal reports whether path, using lexical analysis only, has all of these properties:
+//
+//   - is within the subtree rooted at the directory in which path is evaluated
+//   - is not an absolute path
+//   - is not empty
+//   - on Windows, is not a reserved name such as "NUL"
+//
+// If IsLocal(path) returns true, then
+// Join(base, path) will always produce a path contained within base and
+// Clean(path) will always produce an unrooted path with no ".." path elements.
+//
+// IsLocal is a purely lexical operation.
+// In particular, it does not account for the effect of any symbolic links
+// that may exist in the filesystem.
+func IsLocal(path string) bool {
+	return liteIsLocal(path)
+}
+
+// Localize converts a slash-separated path into an operating system path.
+// The input path must be a valid path as reported by [io/fs.ValidPath].
+//
+// Localize returns an error if the path cannot be represented by the operating system.
+// For example, the path a\b is rejected on Windows, on which \ is a separator
+// character and cannot be part of a filename.
+//
+// The path returned by Localize will always be local, as reported by IsLocal.
+func Localize(path string) (string, error) {
+	return liteLocalize(path)
+}
+
+// ToSlash returns the result of replacing each separator character
+// in path with a slash ('/') character. Multiple separators are
+// replaced by multiple slashes.
+func ToSlash(path string) string {
+	return liteToSlash(path)
+}
+
+// FromSlash returns the result of replacing each slash ('/') character
+// in path with a separator character. Multiple slashes are replaced
+// by multiple separators.
+//
+// See also the Localize function, which converts a slash-separated path
+// as used by the io/fs package to an operating system path.
+func FromSlash(path string) string {
+	return liteFromSlash(path)
+}
+
+// SplitList splits a list of paths joined by the OS-specific [ListSeparator],
+// usually found in PATH or GOPATH environment variables.
+// Unlike strings.Split, SplitList returns an empty slice when passed an empty
+// string.
+func SplitList(path string) []string {
+	return splitList(path)
+}
+
+// Split splits path immediately following the final [Separator],
+// separating it into a directory and file name component.
+// If there is no Separator in path, Split returns an empty dir
+// and file set to path.
+// The returned values have the property that path = dir+file.
+func Split(path string) (dir, file string) {
+	return liteSplit(path)
+}
+
+// Join joins any number of path elements into a single path,
+// separating them with an OS specific [Separator]. Empty elements
+// are ignored. The result is Cleaned. However, if the argument
+// list is empty or all its elements are empty, Join returns
+// an empty string.
+// On Windows, the result will only be a UNC path if the first
+// non-empty element is a UNC path.
+func Join(elem ...string) string {
+	return join(elem)
+}
+
+// Ext returns the file name extension used by path.
+// The extension is the suffix beginning at the final dot
+// in the final element of path; it is empty if there is
+// no dot.
+func Ext(path string) string {
+	return liteExt(path)
+}
+
+// EvalSymlinks returns the path name after the evaluation of any symbolic
+// links.
+// If path is relative the result will be relative to the current directory,
+// unless one of the components is an absolute symbolic link.
+// EvalSymlinks calls [Clean] on the result.
+func EvalSymlinks(path string) (string, error) {
+	return evalSymlinks(path)
+}
+
+// IsAbs reports whether the path is absolute.
+func IsAbs(path string) bool {
+	return liteIsAbs(path)
+}
+
+// Abs returns an absolute representation of path.
+// If the path is not absolute it will be joined with the current
+// working directory to turn it into an absolute path. The absolute
+// path name for a given file is not guaranteed to be unique.
+// Abs calls [Clean] on the result.
+func Abs(path string) (string, error) {
+	return abs(path)
+}
+
+func unixAbs(path string) (string, error) {
+	if IsAbs(path) {
+		return Clean(path), nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return Join(wd, path), nil
+}
+
+// Rel returns a relative path that is lexically equivalent to targpath when
+// joined to basepath with an intervening separator. That is,
+// [Join](basepath, Rel(basepath, targpath)) is equivalent to targpath itself.
+// On success, the returned path will always be relative to basepath,
+// even if basepath and targpath share no elements.
+// An error is returned if targpath can't be made relative to basepath or if
+// knowing the current working directory would be necessary to compute it.
+// Rel calls [Clean] on the result.
+func Rel(basepath, targpath string) (string, error) {
+	baseVol := VolumeName(basepath)
+	targVol := VolumeName(targpath)
+	base := Clean(basepath)
+	targ := Clean(targpath)
+	if sameWord(targ, base) {
+		return ".", nil
+	}
+	base = base[len(baseVol):]
+	targ = targ[len(targVol):]
+	if base == "." {
+		base = ""
+	} else if base == "" && liteVolumeNameLen(baseVol) > 2 /* isUNC */ {
+		// Treat any targetpath matching `\\host\share` basepath as absolute path.
+		base = string(Separator)
+	}
+
+	// Can't use IsAbs - `\a` and `a` are both relative in Windows.
+	baseSlashed := len(base) > 0 && base[0] == Separator
+	targSlashed := len(targ) > 0 && targ[0] == Separator
+	if baseSlashed != targSlashed || !sameWord(baseVol, targVol) {
+		return "", errors.New("Rel: can't make " + targpath + " relative to " + basepath)
+	}
+	// Position base[b0:bi] and targ[t0:ti] at the first differing elements.
+	bl := len(base)
+	tl := len(targ)
+	var b0, bi, t0, ti int
+	for {
+		for bi < bl && base[bi] != Separator {
+			bi++
+		}
+		for ti < tl && targ[ti] != Separator {
+			ti++
+		}
+		if !sameWord(targ[t0:ti], base[b0:bi]) {
+			break
+		}
+		if bi < bl {
+			bi++
+		}
+		if ti < tl {
+			ti++
+		}
+		b0 = bi
+		t0 = ti
+	}
+	if base[b0:bi] == ".." {
+		return "", errors.New("Rel: can't make " + targpath + " relative to " + basepath)
+	}
+	if b0 != bl {
+		// Base elements left. Must go up before going down.
+		seps := strings.Count(base[b0:bl], string(Separator))
+		size := 2 + seps*3
+		if tl != t0 {
+			size += 1 + tl - t0
+		}
+		buf := make([]byte, size)
+		n := copy(buf, "..")
+		for i := 0; i < seps; i++ {
+			buf[n] = Separator
+			copy(buf[n+1:], "..")
+			n += 3
+		}
+		if t0 != tl {
+			buf[n] = Separator
+			copy(buf[n+1:], targ[t0:])
+		}
+		return string(buf), nil
+	}
+	return targ[t0:], nil
+}
+
+// SkipDir is used as a return value from [WalkFunc] to indicate that
+// the directory named in the call is to be skipped. It is not returned
+// as an error by any function.
+var SkipDir error = fs.SkipDir
+
+// SkipAll is used as a return value from [WalkFunc] to indicate that
+// all remaining files and directories are to be skipped. It is not returned
+// as an error by any function.
+var SkipAll error = fs.SkipAll
+
+// WalkFunc is the type of the function called by [Walk] to visit each
+// file or directory.
+//
+// The path argument contains the argument to Walk as a prefix.
+// That is, if Walk is called with root argument "dir" and finds a file
+// named "a" in that directory, the walk function will be called with
+// argument "dir/a".
+//
+// The directory and file are joined with Join, which may clean the
+// directory name: if Walk is called with the root argument "x/../dir"
+// and finds a file named "a" in that directory, the walk function will
+// be called with argument "dir/a", not "x/../dir/a".
+//
+// The info argument is the fs.FileInfo for the named path.
+//
+// The error result returned by the function controls how Walk continues.
+// If the function returns the special value [SkipDir], Walk skips the
+// current directory (path if info.IsDir() is true, otherwise path's
+// parent directory). If the function returns the special value [SkipAll],
+// Walk skips all remaining files and directories. Otherwise, if the function
+// returns a non-nil error, Walk stops entirely and returns that error.
+//
+// The err argument reports an error related to path, signaling that Walk
+// will not walk into that directory. The function can decide how to
+// handle that error; as described earlier, returning the error will
+// cause Walk to stop walking the entire tree.
+//
+// Walk calls the function with a non-nil err argument in two cases.
+//
+// First, if an [os.Lstat] on the root directory or any directory or file
+// in the tree fails, Walk calls the function with path set to that
+// directory or file's path, info set to nil, and err set to the error
+// from os.Lstat.
+//
+// Second, if a directory's Readdirnames method fails, Walk calls the
+// function with path set to the directory's path, info, set to an
+// [fs.FileInfo] describing the directory, and err set to the error from
+// Readdirnames.
+type WalkFunc func(path string, info fs.FileInfo, err error) error
+
+var lstat = os.Lstat // for testing
+
+// walkDir recursively descends path, calling walkDirFn.
+func walkDir(path string, d fs.DirEntry, walkDirFn fs.WalkDirFunc) error {
+	if err := walkDirFn(path, d, nil); err != nil || !d.IsDir() {
+		if err == SkipDir && d.IsDir() {
+			// Successfully skipped directory.
+			err = nil
+		}
+		return err
+	}
+
+	dirs, err := os.ReadDir(path)
+	if err != nil {
+		// Second call, to report ReadDir error.
+		err = walkDirFn(path, d, err)
+		if err != nil {
+			if err == SkipDir && d.IsDir() {
+				err = nil
+			}
+			return err
+		}
+	}
+
+	for _, d1 := range dirs {
+		path1 := Join(path, d1.Name())
+		if err := walkDir(path1, d1, walkDirFn); err != nil {
+			if err == SkipDir {
+				break
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// walk recursively descends path, calling walkFn.
+func walk(path string, info fs.FileInfo, walkFn WalkFunc) error {
+	if !info.IsDir() {
+		return walkFn(path, info, nil)
+	}
+
+	names, err := readDirNames(path)
+	err1 := walkFn(path, info, err)
+	// If err != nil, walk can't walk into this directory.
+	// err1 != nil means walkFn want walk to skip this directory or stop walking.
+	// Therefore, if one of err and err1 isn't nil, walk will return.
+	if err != nil || err1 != nil {
+		// The caller's behavior is controlled by the return value, which is decided
+		// by walkFn. walkFn may ignore err and return nil.
+		// If walkFn returns SkipDir or SkipAll, it will be handled by the caller.
+		// So walk should return whatever walkFn returns.
+		return err1
+	}
+
+	for _, name := range names {
+		filename := Join(path, name)
+		fileInfo, err := lstat(filename)
+		if err != nil {
+			if err := walkFn(filename, fileInfo, err); err != nil && err != SkipDir {
+				return err
+			}
+		} else {
+			err = walk(filename, fileInfo, walkFn)
+			if err != nil {
+				if !fileInfo.IsDir() || err != SkipDir {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// WalkDir walks the file tree rooted at root, calling fn for each file or
+// directory in the tree, including root.
+//
+// All errors that arise visiting files and directories are filtered by fn:
+// see the [fs.WalkDirFunc] documentation for details.
+//
+// The files are walked in lexical order, which makes the output deterministic
+// but requires WalkDir to read an entire directory into memory before proceeding
+// to walk that directory.
+//
+// WalkDir does not follow symbolic links.
+//
+// WalkDir calls fn with paths that use the separator character appropriate
+// for the operating system. This is unlike [io/fs.WalkDir], which always
+// uses slash separated paths.
+func WalkDir(root string, fn fs.WalkDirFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		err = fn(root, nil, err)
+	} else {
+		err = walkDir(root, fs.FileInfoToDirEntry(info), fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
+}
+
+// Walk walks the file tree rooted at root, calling fn for each file or
+// directory in the tree, including root.
+//
+// All errors that arise visiting files and directories are filtered by fn:
+// see the [WalkFunc] documentation for details.
+//
+// The files are walked in lexical order, which makes the output deterministic
+// but requires Walk to read an entire directory into memory before proceeding
+// to walk that directory.
+//
+// Walk does not follow symbolic links.
+//
+// Walk is less efficient than [WalkDir], introduced in Go 1.16,
+// which avoids calling os.Lstat on every visited file or directory.
+func Walk(root string, fn WalkFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		err = fn(root, nil, err)
+	} else {
+		err = walk(root, info, fn)
+	}
+	if err == SkipDir || err == SkipAll {
+		return nil
+	}
+	return err
+}
+
+// readDirNames reads the directory named by dirname and returns
+// a sorted list of directory entry names.
+func readDirNames(dirname string) ([]string, error) {
+	f, err := os.Open(dirname)
+	if err != nil {
+		return nil, err
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Base returns the last element of path.
+// Trailing path separators are removed before extracting the last element.
+// If the path is empty, Base returns ".".
+// If the path consists entirely of separators, Base returns a single separator.
+func Base(path string) string {
+	return liteBase(path)
+}
+
+// Dir returns all but the last element of path, typically the path's directory.
+// After dropping the final element, Dir calls [Clean] on the path and trailing
+// slashes are removed.
+// If the path is empty, Dir returns ".".
+// If the path consists entirely of separators, Dir returns a single separator.
+// The returned path does not end in a separator unless it is the root directory.
+func Dir(path string) string {
+	return liteDir(path)
+}
+
+// VolumeName returns leading volume name.
+// Given "C:\foo\bar" it returns "C:" on Windows.
+// Given "\\host\share\foo" it returns "\\host\share".
+// On other platforms it returns "".
+func VolumeName(path string) string {
+	return liteVolumeName(path)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/path_unix.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package filepath
+
+import (
+	"strings"
+)
+
+// HasPrefix exists for historical compatibility and should not be used.
+//
+// Deprecated: HasPrefix does not respect path boundaries and
+// does not ignore case when required.
+func HasPrefix(p, prefix string) bool {
+	return strings.HasPrefix(p, prefix)
+}
+
+func splitList(path string) []string {
+	if path == "" {
+		return []string{}
+	}
+	return strings.Split(path, string(ListSeparator))
+}
+
+func abs(path string) (string, error) {
+	return unixAbs(path)
+}
+
+func join(elem []string) string {
+	// If there's a bug here, fix the logic in ./path_plan9.go too.
+	for i, e := range elem {
+		if e != "" {
+			return Clean(strings.Join(elem[i:], string(Separator)))
+		}
+	}
+	return ""
+}
+
+func sameWord(a, b string) bool {
+	return a == b
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/symlink.go",
+            text: #"""
+// Copyright 2012 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package filepath
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"syscall"
+)
+
+func walkSymlinks(path string) (string, error) {
+	volLen := liteVolumeNameLen(path)
+	pathSeparator := string(os.PathSeparator)
+
+	if volLen < len(path) && os.IsPathSeparator(path[volLen]) {
+		volLen++
+	}
+	vol := path[:volLen]
+	dest := vol
+	linksWalked := 0
+	for start, end := volLen, volLen; start < len(path); start = end {
+		for start < len(path) && os.IsPathSeparator(path[start]) {
+			start++
+		}
+		end = start
+		for end < len(path) && !os.IsPathSeparator(path[end]) {
+			end++
+		}
+
+		// On Windows, "." can be a symlink.
+		// We look it up, and use the value if it is absolute.
+		// If not, we just return ".".
+		isWindowsDot := false && path[liteVolumeNameLen(path):] == "."
+
+		// The next path component is in path[start:end].
+		if end == start {
+			// No more path components.
+			break
+		} else if path[start:end] == "." && !isWindowsDot {
+			// Ignore path component ".".
+			continue
+		} else if path[start:end] == ".." {
+			// Back up to previous component if possible.
+			// Note that volLen includes any leading slash.
+
+			// Set r to the index of the last slash in dest,
+			// after the volume.
+			var r int
+			for r = len(dest) - 1; r >= volLen; r-- {
+				if os.IsPathSeparator(dest[r]) {
+					break
+				}
+			}
+			if r < volLen || dest[r+1:] == ".." {
+				// Either path has no slashes
+				// (it's empty or just "C:")
+				// or it ends in a ".." we had to keep.
+				// Either way, keep this "..".
+				if len(dest) > volLen {
+					dest += pathSeparator
+				}
+				dest += ".."
+			} else {
+				// Discard everything since the last slash.
+				dest = dest[:r]
+			}
+			continue
+		}
+
+		// Ordinary path component. Add it to result.
+
+		if len(dest) > liteVolumeNameLen(dest) && !os.IsPathSeparator(dest[len(dest)-1]) {
+			dest += pathSeparator
+		}
+
+		dest += path[start:end]
+
+		// Resolve symlink.
+
+		fi, err := os.Lstat(dest)
+		if err != nil {
+			return "", err
+		}
+
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			if !fi.Mode().IsDir() && end < len(path) {
+				return "", syscall.ENOTDIR
+			}
+			continue
+		}
+
+		// Found symlink.
+
+		linksWalked++
+		if linksWalked > 255 {
+			return "", errors.New("EvalSymlinks: too many links")
+		}
+
+		link, err := os.Readlink(dest)
+		if err != nil {
+			return "", err
+		}
+
+		if isWindowsDot && !IsAbs(link) {
+			// On Windows, if "." is a relative symlink,
+			// just return ".".
+			break
+		}
+
+		path = link + path[end:]
+
+		v := liteVolumeNameLen(link)
+		if v > 0 {
+			// Symlink to drive name is an absolute path.
+			if v < len(link) && os.IsPathSeparator(link[v]) {
+				v++
+			}
+			vol = link[:v]
+			dest = vol
+			end = len(vol)
+		} else if len(link) > 0 && os.IsPathSeparator(link[0]) {
+			// Symlink to absolute path.
+			dest = link[:1]
+			end = 1
+			vol = link[:1]
+			volLen = 1
+		} else {
+			// Symlink to relative path; replace last
+			// path component in dest.
+			var r int
+			for r = len(dest) - 1; r >= volLen; r-- {
+				if os.IsPathSeparator(dest[r]) {
+					break
+				}
+			}
+			if r < volLen {
+				dest = vol
+			} else {
+				dest = dest[:r]
+			}
+			end = 0
+		}
+	}
+	return Clean(dest), nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/path/filepath/symlink_unix.go",
+            text: #"""
+// Copyright 2014 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package filepath
+
+func evalSymlinks(path string) (string, error) {
+	return walkSymlinks(path)
 }
 
 """#),

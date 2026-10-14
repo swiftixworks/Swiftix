@@ -39,8 +39,8 @@ func Create(name string) (*os.File, error) {
 
 // OpenFile opens the named file with the flags (O_RDONLY and the like) and,
 // when it creates the file, the permissions perm.
-func OpenFile(name string, flag int, perm int) (*os.File, error) {
-	f, err := native.OpenFile(name, flag, perm)
+func OpenFile(name string, flag int, perm FileMode) (*os.File, error) {
+	f, err := native.OpenFile(name, flag, int(syscallMode(perm)))
 	return f, pathError(name, err)
 }
 
@@ -52,8 +52,8 @@ func ReadFile(name string) ([]byte, error) {
 
 // WriteFile writes data to the named file, creating it with perm if
 // needed and truncating it otherwise.
-func WriteFile(name string, data []byte, perm int) error {
-	return pathError(name, native.WriteFile(name, data, perm))
+func WriteFile(name string, data []byte, perm FileMode) error {
+	return pathError(name, native.WriteFile(name, data, int(syscallMode(perm))))
 }
 
 // Remove removes the named file or empty directory.
@@ -62,8 +62,8 @@ func Remove(name string) error {
 }
 
 // Mkdir creates a directory with the permissions perm.
-func Mkdir(name string, perm int) error {
-	return pathError(name, native.Mkdir(name, perm))
+func Mkdir(name string, perm FileMode) error {
+	return pathError(name, native.Mkdir(name, int(syscallMode(perm))))
 }
 
 // Rename renames oldpath to newpath, replacing a file there.

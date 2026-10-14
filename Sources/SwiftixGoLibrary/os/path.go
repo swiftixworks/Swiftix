@@ -1,0 +1,224 @@
+package os
+
+import (
+	"errors"
+	"os"
+	"strconv"
+	"syscall"
+)
+
+// MkdirAll creates a directory named path,
+// along with any necessary parents, and returns nil,
+// or else returns an error.
+// The permission bits perm (before umask) are used for all
+// directories that MkdirAll creates.
+// If path is already a directory, MkdirAll does nothing
+// and returns nil.
+func MkdirAll(path string, perm FileMode) error {
+	// Fast path: if we can tell whether path is a directory or file, stop with success or error.
+	dir, err := Stat(path)
+	if err == nil {
+		if dir.IsDir() {
+			return nil
+		}
+		return &PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+	}
+
+	// Slow path: make sure parent exists and then call Mkdir for path.
+
+	// Extract the parent folder from path by first removing any trailing
+	// path separator and then scanning backward until finding a path
+	// separator or reaching the beginning of the string.
+	i := len(path) - 1
+	for i >= 0 && IsPathSeparator(path[i]) {
+		i--
+	}
+	for i >= 0 && !IsPathSeparator(path[i]) {
+		i--
+	}
+	if i < 0 {
+		i = 0
+	}
+
+	// If there is a parent directory, recurse to ensure parent directory exists.
+	if parent := path[:i]; len(parent) > 0 {
+		err = MkdirAll(parent, perm)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Parent now exists; invoke Mkdir and use its result.
+	err = Mkdir(path, perm)
+	if err != nil {
+		// Handle arguments like "foo/." by
+		// double-checking that directory doesn't exist.
+		dir, err1 := Lstat(path)
+		if err1 == nil && dir.IsDir() {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// RemoveAll removes path and any children it contains.
+// It removes everything it can but returns the first error
+// it encounters. If the path does not exist, RemoveAll
+// returns nil (no error).
+// If there is an error, it will be of type [*PathError].
+func RemoveAll(path string) error {
+	if path == "" {
+		// fail silently to retain compatibility with previous behavior
+		// of RemoveAll. See issue 28830.
+		return nil
+	}
+
+	// The rmdir system call permits removing "." on Plan 9,
+	// so we don't permit it to remain consistent with the
+	// "at" implementation of RemoveAll.
+	if endsWithDot(path) {
+		return &PathError{Op: "RemoveAll", Path: path, Err: syscall.EINVAL}
+	}
+
+	// Simple case: if Remove works, we're done.
+	err := Remove(path)
+	if err == nil || IsNotExist(err) {
+		return nil
+	}
+
+	// Otherwise, is this a directory we need to recurse into?
+	dir, serr := Lstat(path)
+	if serr != nil {
+		var pe *PathError
+		if errors.As(serr, &pe) && (IsNotExist(pe.Err) || pe.Err == syscall.ENOTDIR) {
+			return nil
+		}
+		return serr
+	}
+	if !dir.IsDir() {
+		// Not a directory; return the error from Remove.
+		return err
+	}
+
+	// Remove contents & return first error.
+	err = nil
+	entries, _ := readDir(path)
+	for _, entry := range entries {
+		err1 := RemoveAll(path + string(PathSeparator) + entry.Name())
+		if err == nil {
+			err = err1
+		}
+	}
+
+	// Remove directory.
+	err1 := Remove(path)
+	if err1 == nil || IsNotExist(err1) {
+		return nil
+	}
+	if err == nil {
+		err = err1
+	}
+	return err
+}
+
+// endsWithDot reports whether the final component of path is ".".
+func endsWithDot(path string) bool {
+	if path == "." {
+		return true
+	}
+	if len(path) >= 2 && path[len(path)-1] == '.' && IsPathSeparator(path[len(path)-2]) {
+		return true
+	}
+	return false
+}
+
+// TempDir returns the default directory to use for temporary files:
+// $TMPDIR if non-empty, else /tmp.
+func TempDir() string {
+	dir := os.Getenv("TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return dir
+}
+
+var errPatternHasSeparator = errors.New("pattern contains path separator")
+
+// randomState makes the names of temporary files. Go's are random; these
+// follow one from the next, which the existence check makes as safe.
+var randomState uint32 = 1
+
+func nextRandom() string {
+	randomState = randomState*1664525 + 1013904223
+	return strconv.FormatUint(uint64(randomState), 10)
+}
+
+// prefixAndSuffix splits pattern by the last wildcard "*", if applicable,
+// returning prefix as the part before "*" and suffix as the part after "*".
+func prefixAndSuffix(pattern string) (prefix, suffix string, err error) {
+	for i := 0; i < len(pattern); i++ {
+		if IsPathSeparator(pattern[i]) {
+			return "", "", errPatternHasSeparator
+		}
+	}
+	pos := -1
+	for i := len(pattern) - 1; i >= 0; i-- {
+		if pattern[i] == '*' {
+			pos = i
+			break
+		}
+	}
+	if pos != -1 {
+		prefix, suffix = pattern[:pos], pattern[pos+1:]
+	} else {
+		prefix = pattern
+	}
+	return prefix, suffix, nil
+}
+
+func joinPath(dir, name string) string {
+	if len(dir) > 0 && IsPathSeparator(dir[len(dir)-1]) {
+		return dir + name
+	}
+	return dir + string(PathSeparator) + name
+}
+
+// MkdirTemp creates a new temporary directory in the directory dir
+// and returns the pathname of the new directory.
+// The new directory's name is generated by adding a random string to the end of pattern.
+// If pattern includes a "*", the random string replaces the last "*" instead.
+// The directory is created with mode 0o700 (before umask).
+// If dir is the empty string, MkdirTemp uses the default directory for temporary files, as returned by TempDir.
+func MkdirTemp(dir, pattern string) (string, error) {
+	if dir == "" {
+		dir = TempDir()
+	}
+
+	prefix, suffix, err := prefixAndSuffix(pattern)
+	if err != nil {
+		return "", &PathError{Op: "mkdirtemp", Path: pattern, Err: err}
+	}
+	prefix = joinPath(dir, prefix)
+
+	try := 0
+	for {
+		name := prefix + nextRandom() + suffix
+		err := Mkdir(name, 0700)
+		if err == nil {
+			return name, nil
+		}
+		if IsExist(err) {
+			if try++; try < 10000 {
+				continue
+			}
+			return "", &PathError{Op: "mkdirtemp", Path: dir + string(PathSeparator) + prefix + "*" + suffix, Err: ErrExist}
+		}
+		if IsNotExist(err) {
+			if _, err := Stat(dir); IsNotExist(err) {
+				return "", err
+			}
+		}
+		return "", err
+	}
+}

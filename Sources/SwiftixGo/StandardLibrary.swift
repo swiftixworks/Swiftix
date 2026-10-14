@@ -36,7 +36,7 @@ enum GoStandardLibrary {
         "bufio", "bytes",
         "io/fs", "syscall",
         "encoding", "encoding/base64", "encoding/json",
-        "flag", "os/signal",
+        "flag", "os/signal", "path", "path/filepath",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -332,8 +332,11 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$os.File.Sync", goName: "os.File.Sync",
                 parameters: [file], results: [GoPredeclared.errorType])
+        case "Name":
+            return GoNativeFunction(
+                symbol: "$os.File.name", goName: "os.File.Name", parameters: [file], results: [.string])
         default:
-            return nil
+            return GoFileTextMethods.method(member)
         }
     }
 

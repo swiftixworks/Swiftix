@@ -513,7 +513,7 @@ extension GoEmbedding {
         "Unix", "UnixMilli", "UnixNano", "Sub", "Add", "Before", "After", "Equal",
     ] + GoTimeLibrary.addedTimeMethods
     static let fileMethods = [
-        "Write", "WriteString", "Read", "ReadAt", "WriteAt", "Seek", "Close", "Sync",
+        "Write", "WriteString", "Read", "ReadAt", "WriteAt", "Seek", "Close", "Sync", "Name",
     ]
 
     /// What `name` is of a struct with the shape `root` that the struct

@@ -342,7 +342,7 @@ struct GoFileSystemTests: GoTestHarness {
                 open /plain/file: not a directory
                 open /plain: file exists
                 open /: is a directory
-                true open /: is a directory
+                false ok
                 invalid argument invalid argument
                 0 invalid argument
                 0 invalid argument
@@ -625,7 +625,7 @@ struct GoFileSystemTests: GoTestHarness {
                 == "assignment mismatch: 1 variable but os.Open returns 2 values")
         #expect(
             diagnostic("f, err = os.OpenFile(\"/x\", os.O_RDONLY)\nfmt.Println(f, err)")
-                == "not enough arguments in call to os.OpenFile\n\thave (string, int)\n\twant (string, int, int)")
+                == "not enough arguments in call to os.OpenFile\n\thave (string, int)\n\twant (string, int, fs.FileMode)")
         #expect(
             diagnostic("fmt.Println(os.Stdout.Seek(0))")
                 == "not enough arguments in call to os.Stdout.Seek\n\thave (number)\n\twant (int, int)")

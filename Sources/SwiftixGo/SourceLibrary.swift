@@ -155,6 +155,7 @@ enum GoSourceLibrary {
         ["$sort.length", "$sort.swap"] + GoStandardLibrary.httpNativeCallNames
         + GoStandardLibrary.bytesNativeCallNames + GoNetLibrary.nativeCallNames
         + GoJSONLibrary.nativeCallNames + ["$flag.zero"] + GoSignalNatives.nativeCallNames
+        + GoStandardLibrary.fileMetadataCallNames
 
     // MARK: What the text declares
 
@@ -193,6 +194,11 @@ enum GoSourceLibrary {
                 let rewritten = try rewriter.rewrite(file)
                 files.append(rewriter.uses.isEmpty ? file : rewritten)
                 wanted.append(contentsOf: rewriter.uses)
+                if importedPackages(of: file).values.contains("os") {
+                    wanted += GoFileTextMethods.functions(neededBy: file).map {
+                        Member(package: "os", name: $0)
+                    }
+                }
             }
             linked.append(
                 GoLinkedUnit(
@@ -355,6 +361,13 @@ private struct Package {
                 // A method goes where its type goes.
                 let owner = Self.receiverTypeName(of: function) ?? function.name
                 references[owner, default: []].formUnion(rewriter.references)
+                // What `*os.File` methods that are Go the function calls.
+                if path != "os", file.imports.contains(where: { $0.path == "os" }) {
+                    references[owner, default: []].formUnion(
+                        GoFileTextMethods.functions(neededBy: function.body).map {
+                            GoSourceLibrary.Member(package: "os", name: $0)
+                        })
+                }
                 functions.append(
                     function.receiver != nil
                         ? rewritten
