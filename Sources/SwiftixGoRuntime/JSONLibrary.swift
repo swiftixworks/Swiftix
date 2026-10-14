@@ -3,7 +3,7 @@
 /// `Marshal` and `Unmarshal` each start a walk, which the VM keeps under a
 /// handle until the text releases it. A walk runs until it is done, fails,
 /// or needs a method of the program called; while the text calls it, what
-/// the walk holds is a root of the collector, under the handle. Reference
+/// the walk holds is a root of the collector. Reference
 /// state of one run; no process state.
 enum GoJSONNatives {
     /// Reserved call names, with the number of operands each pops.
@@ -37,10 +37,8 @@ enum GoJSONNatives {
         let heap: GoJSONHeap
         let bytes: (GoValue) throws -> [UInt8]
         let makeBytes: ([UInt8]) throws -> GoValue
-        /// A new handle, rooted.
+        /// A new handle, counted against the limit of runtime handles.
         let retain: () throws -> Int
-        /// Sets what a handle keeps alive.
-        let root: (Int, GoValue) -> Void
         let release: (Int) -> Void
     }
 
@@ -62,16 +60,10 @@ enum GoJSONNatives {
             guard let found = walks[try integer(0)] else { throw GoRuntimeError.typeMismatch }
             return found
         }
-        /// Runs a walk to its next stop, rooting what it holds while it
-        /// waits for a method.
+        /// The results of a walk's stop. What the walk holds is a root of
+        /// the collector while it waits (`heldValues`, read at collection).
         func stopped(_ stop: GoJSONStop, _ handle: Int, _ walk: Walk) -> [GoValue] {
-            let waits: Bool
-            switch walk {
-            case .encoder: waits = stop.code >= GoJSONCode.encodeCallMarshalJSON
-            case .decoder: waits = stop.code >= GoJSONCode.decodeCallUnmarshalJSON
-            }
-            host.root(handle, waits ? .array(walk.heldValues + [stop.value]) : .nilValue)
-            return [.int(Int64(stop.code)), stop.value, .string(stop.text)]
+            [.int(Int64(stop.code)), stop.value, .string(stop.text)]
         }
         switch name {
         case "$json.encodeStart":

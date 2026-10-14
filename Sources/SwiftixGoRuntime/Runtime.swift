@@ -4329,7 +4329,6 @@ public struct GoVirtualMachine: Sendable {
             let host = GoJSONNatives.Host(
                 heap: heap, bytes: { try sliceBytes($0) }, makeBytes: { try makeByteSlice($0) },
                 retain: { try retainRuntimeHandle(.nilValue) },
-                root: { runtimeHandleRoots[$0] = $1 },
                 release: { runtimeHandleRoots.removeValue(forKey: $0) })
             vm.stack.append(contentsOf: try GoJSONNatives.call(name, operands, walks: &jsonWalks, host: host))
             return true
@@ -5078,6 +5077,9 @@ public struct GoVirtualMachine: Sendable {
                 }
             }
             rootValues.append(contentsOf: runtimeHandleRoots.values)
+            // What a walk of `encoding/json` holds while a method it stopped
+            // for runs.
+            for walk in jsonWalks.values { rootValues.append(contentsOf: walk.heldValues) }
             vm.heap.collect(rootCells: rootCells, rootValues: rootValues)
         }
 
