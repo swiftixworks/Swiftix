@@ -182,20 +182,21 @@ enum GoSourceLibraryText {
             "resolvePath", "splitHostPort", "unescape", "validOptionalPort", "validUserinfo",
         ],
         "os": [
-            "Chdir", "Chmod", "Create", "DirEntry", "ErrClosed", "ErrDeadlineExceeded", "ErrExist",
-            "ErrInvalid", "ErrNotExist", "ErrPermission", "FileInfo", "FileMode", "FindProcess",
-            "Interrupt", "IsExist", "IsNotExist", "IsPathSeparator", "IsPermission", "IsTimeout",
-            "Kill", "LinkError", "Lstat", "Mkdir", "MkdirAll", "MkdirTemp", "ModeAppend",
-            "ModeCharDevice", "ModeDevice", "ModeDir", "ModeExclusive", "ModeIrregular",
-            "ModeNamedPipe", "ModePerm", "ModeSetgid", "ModeSetuid", "ModeSocket", "ModeSticky",
-            "ModeSymlink", "ModeTemporary", "ModeType", "NewSyscallError", "Open", "OpenFile",
-            "PathError", "PathListSeparator", "PathSeparator", "Process", "ReadDir", "ReadFile",
-            "Readlink", "Remove", "RemoveAll", "Rename", "Signal", "Stat", "Symlink",
-            "SyscallError", "TempDir", "WriteFile", "basename", "deadlineExceededError",
-            "dirOffsets", "endsWithDot", "errPatternHasSeparator", "errno", "fileMethodReadDir",
-            "fileMethodReaddir", "fileMethodReaddirnames", "fileMethodStat", "fileStat", "joinPath",
-            "linkErrno", "nextRandom", "pathError", "prefixAndSuffix", "randomState", "readDir",
-            "stat", "syscallMode", "timeout", "underlyingError", "underlyingErrorIs", "unixDirent",
+            "Chdir", "Chmod", "Create", "CreateTemp", "DirEntry", "DirFS", "ErrClosed",
+            "ErrDeadlineExceeded", "ErrExist", "ErrInvalid", "ErrNotExist", "ErrPermission",
+            "FileInfo", "FileMode", "FindProcess", "Interrupt", "IsExist", "IsNotExist",
+            "IsPathSeparator", "IsPermission", "IsTimeout", "Kill", "LinkError", "Lstat", "Mkdir",
+            "MkdirAll", "MkdirTemp", "ModeAppend", "ModeCharDevice", "ModeDevice", "ModeDir",
+            "ModeExclusive", "ModeIrregular", "ModeNamedPipe", "ModePerm", "ModeSetgid",
+            "ModeSetuid", "ModeSocket", "ModeSticky", "ModeSymlink", "ModeTemporary", "ModeType",
+            "NewSyscallError", "Open", "OpenFile", "PathError", "PathListSeparator",
+            "PathSeparator", "Process", "ReadDir", "ReadFile", "Readlink", "Remove", "RemoveAll",
+            "Rename", "Signal", "Stat", "Symlink", "SyscallError", "TempDir", "WriteFile",
+            "basename", "deadlineExceededError", "dirFS", "dirOffsets", "endsWithDot",
+            "errPatternHasSeparator", "errno", "fileMethodReadDir", "fileMethodReaddir",
+            "fileMethodReaddirnames", "fileMethodStat", "fileStat", "joinPath", "linkErrno",
+            "nextRandom", "pathError", "prefixAndSuffix", "randomState", "readDir", "stat",
+            "syscallMode", "timeout", "underlyingError", "underlyingErrorIs", "unixDirent",
         ],
         "os/signal": [
             "Ignore", "Ignored", "Notify", "NotifyContext", "Reset", "Stop", "cancel",
@@ -14241,6 +14242,145 @@ type deadlineExceededError struct{}
 func (e *deadlineExceededError) Error() string   { return "i/o timeout" }
 func (e *deadlineExceededError) Timeout() bool   { return true }
 func (e *deadlineExceededError) Temporary() bool { return true }
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/os/dirfs.go",
+            text: #"""
+package os
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+)
+
+// DirFS returns a file system (an fs.FS) for the tree of files rooted at the directory dir.
+//
+// Note that DirFS("/prefix") only guarantees that the Open calls it makes to the
+// operating system will begin with "/prefix": DirFS("/prefix").Open("file") is the
+// same as os.Open("/prefix/file").
+func DirFS(dir string) fs.FS {
+	// The files it opens are values of fs.File, whose Stat is Go.
+	_ = fileMethodStat
+	_ = fileMethodReadDir
+	return dirFS(dir)
+}
+
+type dirFS string
+
+func (dir dirFS) Open(name string) (fs.File, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &PathError{Op: "open", Path: name, Err: err}
+	}
+	f, err := Open(fullname)
+	if err != nil {
+		// DirFS takes a string appropriate for GOOS,
+		// while the name argument here is always slash separated.
+		// dir.join will have mixed the two; undo that for
+		// error reporting.
+		err.(*PathError).Path = name
+		return nil, err
+	}
+	return f, nil
+}
+
+// The ReadFile method calls the [ReadFile] function for the file
+// with the given name in the directory.
+func (dir dirFS) ReadFile(name string) ([]byte, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &PathError{Op: "readfile", Path: name, Err: err}
+	}
+	b, err := ReadFile(fullname)
+	if err != nil {
+		if e, ok := err.(*PathError); ok {
+			// See comment in dirFS.Open.
+			e.Path = name
+		}
+		return nil, err
+	}
+	return b, nil
+}
+
+// ReadDir reads the named directory, returning all its directory entries sorted
+// by filename. Through this method, dirFS implements [io/fs.ReadDirFS].
+func (dir dirFS) ReadDir(name string) ([]DirEntry, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &PathError{Op: "readdir", Path: name, Err: err}
+	}
+	entries, err := ReadDir(fullname)
+	if err != nil {
+		if e, ok := err.(*PathError); ok {
+			// See comment in dirFS.Open.
+			e.Path = name
+		}
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (dir dirFS) Stat(name string) (fs.FileInfo, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &PathError{Op: "stat", Path: name, Err: err}
+	}
+	f, err := Stat(fullname)
+	if err != nil {
+		// See comment in dirFS.Open.
+		err.(*PathError).Path = name
+		return nil, err
+	}
+	return f, nil
+}
+
+// join returns the path for name in dir.
+func (dir dirFS) join(name string) (string, error) {
+	if dir == "" {
+		return "", errors.New("os: DirFS with empty root")
+	}
+	if !fs.ValidPath(name) || strings.IndexByte(name, 0) >= 0 {
+		return "", ErrInvalid
+	}
+	if IsPathSeparator(dir[len(dir)-1]) {
+		return string(dir) + name, nil
+	}
+	return string(dir) + string(PathSeparator) + name, nil
+}
+
+// CreateTemp creates a new temporary file in the directory dir,
+// opens the file for reading and writing, and returns the resulting file.
+// The filename is generated by taking pattern and adding a random string to the end.
+// If pattern includes a "*", the random string replaces the last "*".
+// The file is created with mode 0o600 (before umask).
+// If dir is the empty string, CreateTemp uses the default directory for temporary files, as returned by [TempDir].
+func CreateTemp(dir, pattern string) (*os.File, error) {
+	if dir == "" {
+		dir = TempDir()
+	}
+
+	prefix, suffix, err := prefixAndSuffix(pattern)
+	if err != nil {
+		return nil, &PathError{Op: "createtemp", Path: pattern, Err: err}
+	}
+	prefix = joinPath(dir, prefix)
+
+	try := 0
+	for {
+		name := prefix + nextRandom() + suffix
+		f, err := OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if IsExist(err) {
+			if try++; try < 10000 {
+				continue
+			}
+			return nil, &PathError{Op: "createtemp", Path: prefix + "*" + suffix, Err: ErrExist}
+		}
+		return f, err
+	}
+}
 
 """#),
         GoSourceFile(

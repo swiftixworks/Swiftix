@@ -40,6 +40,13 @@ struct GoFileSystemTreeTests: GoTestHarness {
         let output = run(fp1Source)
         #expect(output.contains(fp1Expected))
     }
+
+    /// `os.DirFS` as an `fs.FS` that `fs.ReadFile`, `WalkDir`, `Glob`,
+    /// `Sub`, and `Stat` read, and `os.CreateTemp` and `MkdirTemp`.
+    @Test func aDirectoryIsAFileSystem() {
+        let output = run(dirfsSource)
+        #expect(output.contains(dirfsExpected))
+    }
 }
 
 private let path1Source = #"""
@@ -353,5 +360,72 @@ lstat tree/missing: no such file or directory true
 /tree/a <nil>
 tree/a/one.go <nil>
 lstat tree/nope: no such file or directory
+
+"""#
+
+private let dirfsSource = #"""
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+)
+
+func main() {
+	os.MkdirAll("site/css", 0o755)
+	os.WriteFile("site/index.html", []byte("<h1>hi</h1>"), 0o644)
+	os.WriteFile("site/css/a.css", []byte("body{}"), 0o644)
+	fsys := os.DirFS("site")
+	b, err := fs.ReadFile(fsys, "index.html")
+	fmt.Println(string(b), err)
+	_, err = fs.ReadFile(fsys, "nope.html")
+	fmt.Println(err)
+	_, err = fsys.Open("../etc")
+	fmt.Println(err)
+	f, err := fsys.Open("css/a.css")
+	st, _ := f.Stat()
+	fmt.Println(st.Name(), st.Size(), err)
+	f.Close()
+	fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		fmt.Println("walk", p, d.IsDir())
+		return nil
+	})
+	m, err := fs.Glob(fsys, "*/*.css")
+	fmt.Println(m, err)
+	sub, _ := fs.Sub(fsys, "css")
+	es, err := fs.ReadDir(sub, ".")
+	fmt.Println(len(es), es[0].Name(), err)
+	info, err := fs.Stat(fsys, "css")
+	fmt.Println(info.IsDir(), err, fs.ValidPath("a/../b"), fs.ValidPath("a/b"))
+	tf, err := os.CreateTemp("site", "up-*.tmp")
+	fmt.Println(err, strings.HasPrefix(tf.Name(), "site/up-"), strings.HasSuffix(tf.Name(), ".tmp"))
+	tf.Close()
+	_, err = os.CreateTemp("site", "a/b")
+	fmt.Println(err)
+	dir, err := os.MkdirTemp("site", "d")
+	fmt.Println(err, strings.HasPrefix(dir, "site/d"))
+	fmt.Println(fs.FormatFileInfo(info)[:2])
+	os.RemoveAll("site")
+}
+"""#
+
+private let dirfsExpected = #"""
+<h1>hi</h1> <nil>
+open nope.html: no such file or directory
+open ../etc: invalid argument
+a.css 6 <nil>
+walk . true
+walk css true
+walk css/a.css false
+walk index.html false
+[css/a.css] <nil>
+1 a.css <nil>
+true <nil> false true
+<nil> true true
+createtemp a/b: pattern contains path separator
+<nil> true
+dr
 
 """#
