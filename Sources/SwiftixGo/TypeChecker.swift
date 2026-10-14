@@ -294,9 +294,10 @@ public enum GoTypeChecker {
         var methodSignatures: [String: FunctionSignature] = [:]
         var methodPositions: [String: GoSourcePosition] = [:]
         for (file, function) in files.flatMap({ file in file.functions.map { (file, $0) } }) {
-            if function.name == "init" {
-                guard function.receiver == nil,
-                    function.parameters.isEmpty,
+            // A method may be named init; only a function of the package
+            // is the special one.
+            if function.name == "init", function.receiver == nil {
+                guard function.parameters.isEmpty,
                     function.resultTypes.isEmpty
                 else {
                     throw GoDiagnostic(
