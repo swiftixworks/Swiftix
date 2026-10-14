@@ -5849,7 +5849,8 @@ extension IRLowerer {
     /// `clear` and the program has given the name no other meaning.
     func predeclaredFunction(_ callee: GoExpression) -> String? {
         guard case .identifier(let name, _) = callee,
-            name == "new" || name == "min" || name == "max" || name == "clear",
+            name == "new" || name == "min" || name == "max" || name == "clear"
+                || name == "print" || name == "println",
             isPredeclared(name)
         else { return nil }
         return name
@@ -5864,7 +5865,7 @@ extension IRLowerer {
         case "new":
             guard case .typeExpression(let type, _)? = arguments.first else { return nil }
             return .pointer(resolve(type))
-        case "clear":
+        case "clear", "print", "println":
             return .void
         default:
             // The checker made the operands agree: one that is not an `int`
@@ -5890,6 +5891,14 @@ extension IRLowerer {
         }
         guard let name = predeclaredFunction(callee) else { return nil }
         switch name {
+        case "print", "println":
+            // The operands boxed with their types, as for fmt, for the VM to
+            // print as Go's runtime prints them, on standard error.
+            operations.append(
+                .call(
+                    function: GoBuiltinPrint.native(newline: name == "println"),
+                    arguments: try lowerFormatOperands(arguments), destinations: []))
+            return []
         case "new":
             // A pointer to a new variable that holds the zero value, made
             // as `&T{}` makes one.

@@ -4294,6 +4294,32 @@ public struct GoVirtualMachine: Sendable {
         /// `$flag.zero`: the zero of a value's dynamic type (see
         /// `GoZeroValues`).
         func executeZeroNative(_ name: String, argumentCount: Int) throws -> Bool {
+            if name == "$print" || name == "$println" {
+                // The builtins: each operand as Go's runtime prints it, on
+                // standard error.
+                guard argumentCount >= 0, vm.stack.count >= argumentCount else {
+                    throw GoRuntimeError.stackUnderflow
+                }
+                let operands = Array(vm.stack.suffix(argumentCount))
+                vm.stack.removeLast(argumentCount)
+                var types = GoJSONTypes()
+                let parts = operands.map { operand -> String in
+                    guard case .interface(let boxed) = operand else {
+                        return GoRuntimePrint.text(of: operand, type: nil) { $0 }
+                    }
+                    var type: GoRuntimeType?
+                    if let descriptor = typeDescriptor(named: boxed.typeName) {
+                        types.adopt(descriptor)
+                        type = descriptor.type
+                    } else {
+                        type = GoTypeDescriptor.dynamicType(named: boxed.typeName)
+                    }
+                    return GoRuntimePrint.text(of: boxed.value, type: type) { types.underlying($0) }
+                }
+                let newline = name == "$println"
+                try writeDescriptor(2, parts.joined(separator: newline ? " " : "") + (newline ? "\n" : ""))
+                return true
+            }
             if name == "$rand.random" {
                 // The run-time random numbers `math/rand` draws from when it
                 // was given no seed, as Go's runtime gives them.

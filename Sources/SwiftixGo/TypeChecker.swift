@@ -5189,6 +5189,9 @@ extension FunctionChecker {
                         + ": argument must be (or constrained by) map or slice")
             }
             return .void
+        case "print", "println":
+            try checkPrintOperands(name, arguments: arguments, position: position)
+            return .void
         default:
             return nil
         }

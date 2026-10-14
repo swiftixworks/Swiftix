@@ -374,6 +374,7 @@ extension GoStandardLibrary {
             || GoProcessLibrary.nativeCallNames.contains(name)
             || GoNumberLibrary.isCallName(name)
             || GoTimeLibrary.nativeCallNames.contains(name)
+            || GoBuiltinPrint.nativeCallNames.contains(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(
