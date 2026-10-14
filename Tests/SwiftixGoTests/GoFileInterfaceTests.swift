@@ -247,7 +247,7 @@ struct GoFileInterfaceTests: GoTestHarness {
         #expect(
             diagnostic("var n int = os.WriteFile(\"/x\", []byte(\"t\"), 420)\nfmt.Println(n)")
                 == "cannot use os.WriteFile(\"/x\", []byte(\"t\"), 420) (value of interface type error) as int value in variable declaration")
-        #expect(diagnostic("os.Getwd()") == "undefined: os.Getwd")
+        #expect(diagnostic("os.Chdir(\".\")") == "undefined: os.Chdir")
         #expect(
             goMainDiagnostic("fmt.Fprintln(os.Stdout, 1)") == "undefined: os")
     }

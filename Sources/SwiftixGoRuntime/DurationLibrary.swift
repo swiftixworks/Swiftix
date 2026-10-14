@@ -329,6 +329,7 @@ enum GoLibraryMethods {
     /// Whether the dynamic type `owner` (`T` or `*T`) is a library type
     /// that implements `target`.
     static func implements(_ owner: String, _ target: GoErrors.InterfaceTarget) -> Bool {
+        if GoLibraryStructMethods.implements(owner, target) { return true }
         guard isLibraryType(owner), !target.methods.isEmpty else { return false }
         // A handle type is an interface with one type that implements it.
         if let only = handleInterfaces[target.typeName] { return owner == only }

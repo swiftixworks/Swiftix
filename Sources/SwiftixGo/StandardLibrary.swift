@@ -120,6 +120,9 @@ struct GoNativeFunction: Sendable, Equatable {
     /// The variadic arguments are `fmt` operands, which are boxed with their
     /// type when the VM could not tell it from the value.
     var formatsOperands = false
+    /// The type of each further argument when the function says one:
+    /// `errors.Join(errs ...error)`. Nil for `...any`.
+    var variadicElement: GoType? = nil
 }
 
 extension GoStandardLibrary {
@@ -251,6 +254,8 @@ extension GoStandardLibrary {
                 results: [GoPredeclared.time])
         default:
             return GoNumberLibrary.nativeFunction(package: package, member: member)
+                ?? GoLibraryStructs.nativeFunction(package: package, member: member)
+                ?? GoProcessLibrary.nativeFunction(package: package, member: member)
         }
     }
 
@@ -260,7 +265,7 @@ extension GoStandardLibrary {
         if receiver == GoPredeclared.filePointer { return fileMethod(member) }
         if receiver == GoPredeclared.time { return timeMethod(member) }
         if receiver == GoLibraryTypes.duration { return GoLibraryTypes.durationMethod(member) }
-        return nil
+        return GoLibraryStructs.method(of: receiver, named: member)
     }
 
     /// Native methods of `time.Time`.
@@ -350,6 +355,7 @@ extension GoStandardLibrary {
             || name == GoPredeclared.requireValue
             || name.hasPrefix(GoPredeclared.liveResults)
             || GoLibraryTypes.nativeCallNames.contains(name)
+            || GoProcessLibrary.nativeCallNames.contains(name)
             || GoNumberLibrary.isCallName(name)
     }
 

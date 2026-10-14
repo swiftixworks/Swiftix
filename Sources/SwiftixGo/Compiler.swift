@@ -4772,7 +4772,7 @@ struct IRLowerer {
             if methods.allSatisfy({ has($0, throughPointer: false) }) { owners.append(base) }
             if methods.allSatisfy({ has($0, throughPointer: true) }) { owners.append("*" + base) }
         }
-        return owners + GoLibraryTypes.refusals(of: methods)
+        return owners + GoLibraryTypes.refusals(ofAll: methods)
     }
 
     func concreteTypeName(_ type: GoType) -> String? {
@@ -5263,7 +5263,7 @@ struct IRLowerer {
                     converted(
                         register, from: staticType(of: argument),
                         to: parameter < function.parameters.count
-                            ? function.parameters[parameter] : nil))
+                            ? function.parameters[parameter] : function.variadicElement))
             }
         }
         if function.symbol == GoPredeclared.errorsAs {

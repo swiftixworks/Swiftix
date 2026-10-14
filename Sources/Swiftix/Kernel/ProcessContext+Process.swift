@@ -66,6 +66,10 @@ extension ProcessContext {
     /// spawned afterwards inherit it.
     public func setenv(_ name: String, _ value: String) { process.environment[name] = value }
 
+    /// Remove an environment variable from this process (POSIX `unsetenv`).
+    /// Children spawned afterwards do not inherit it.
+    public func unsetenv(_ name: String) { process.environment[name] = nil }
+
     /// This process's current working directory.
     public var currentDirectory: String { process.cwd }
 

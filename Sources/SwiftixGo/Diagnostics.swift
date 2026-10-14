@@ -645,6 +645,21 @@ extension FunctionChecker {
             guard let method = methods.first(where: { $0.name == name }) else { return .missing }
             return .found(FunctionSignature(parameters: method.parameters, results: method.results))
         }
+        if let lent = GoLibraryStructs.lends(type, GoInterfaceMethod(name: name)) {
+            // A struct of the library, or `sync.Mutex`: its methods take a
+            // pointer, and the value alone has none of them.
+            var owner = type
+            if case .pointer(let pointee) = type { owner = pointee }
+            guard case .named(let typeName) = owner,
+                let method = GoLibraryStructs.interfaceMethod(name, of: typeName)
+            else { return .missing }
+            _ = lent
+            if case .pointer = type {
+                return .found(
+                    FunctionSignature(parameters: method.parameters, results: method.results))
+            }
+            return .pointerReceiver
+        }
         if let library = GoLibraryTypes.method(of: type, named: name) {
             return .found(FunctionSignature(parameters: library.parameters, results: library.results))
         }
@@ -951,7 +966,8 @@ extension GoNativeFunction {
             declared[0] = .named("io.Writer")
         }
         if isVariadic {
-            declared.append(.array(length: GoSpread.variadicLength, element: .interface([])))
+            declared.append(
+                .array(length: GoSpread.variadicLength, element: variadicElement ?? .interface([])))
         }
         return declared
     }

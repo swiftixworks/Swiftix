@@ -175,6 +175,11 @@ struct GoTypeDescriptor: Equatable, Sendable {
                 return String(Unicode.Scalar(kind.rawValue))
             }
             if name.hasPrefix("*") { return "*" + encoded(name.dropFirst()) }
+            // A lock of the library is boxed as a type that only has a
+            // name, and an assertion names it the older way.
+            if GoLibraryStructMethods.handleNames.contains(String(name)) {
+                return "O\(name.utf8.count):" + name
+            }
             // A type of the library without a definition is boxed as one
             // known by name only.
             let kind = GoLibraryMethods.opaqueTypeNames.contains(String(name)) ? "O" : "N"
@@ -208,6 +213,9 @@ struct GoTypeDescriptor: Equatable, Sendable {
         case .named(let symbol): return symbol
         case .pointer(.named(let symbol)): return "*" + symbol
         case .pointer(.other("os.File")): return GoLibraryMethods.fileTypeName
+        // A pointer to a mutex, which has no definition and has methods.
+        case .pointer(.other(let name)) where GoLibraryStructMethods.owners.contains(name):
+            return "*" + name
         default: return nil
         }
     }

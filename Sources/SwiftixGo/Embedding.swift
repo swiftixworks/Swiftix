@@ -485,7 +485,7 @@ extension GoEmbedding {
             shape.kind = .interface
             shape.methods = ["Error": false]
         case "sync.Mutex":
-            shape.methods = ["Lock": true, "Unlock": true]
+            shape.methods = ["Lock": true, "Unlock": true, "TryLock": true]
         case "sync.WaitGroup":
             shape.methods = ["Add": true, "Done": true, "Wait": true]
         case "time.Time":
@@ -502,7 +502,7 @@ extension GoEmbedding {
             shape.kind = .interface
             for method in methods { shape.methods[method.name] = false }
         default:
-            return nil
+            guard GoLibraryStructs.lend(name, to: &shape) else { return nil }
         }
         return shape
     }
@@ -748,6 +748,7 @@ extension GoEmbedding {
             if promotion.holder == "error" {
                 return ([], [.named("string", position: position)])
             }
+            if promotion.holder == GoLibraryStructs.lockerName { return ([], []) }
             if case .interface(let lent)? = GoLibraryTypes.handleInterface(of: promotion.holder) {
                 // A handle of the library, whose methods the library knows.
                 guard let method = lent.first(where: { $0.name == name }) else { return nil }
@@ -777,12 +778,20 @@ extension GoEmbedding {
         of name: String, holder: String, position: GoSourcePosition
     ) -> (parameters: [GoTypeExpression], results: [GoTypeExpression])? {
         switch (holder, name) {
+        case ("sync.Mutex", "TryLock"):
+            // Declared for no struct: a program that embeds a mutex and
+            // never tries it is the image it was. Called or selected, it
+            // is the method of the field.
+            return nil
         case ("sync.Mutex", _), ("sync.WaitGroup", "Done"), ("sync.WaitGroup", "Wait"):
             return ([], [])
         case ("sync.WaitGroup", "Add"):
             return ([.named("int", position: position)], [])
         default:
-            let receiver = holder == "os.File" ? GoPredeclared.filePointer : GoType.named(holder)
+            let receiver =
+                holder == "os.File"
+                ? GoPredeclared.filePointer
+                : GoLibraryStructs.methodOwner(.named(holder)) ?? GoType.named(holder)
             guard let native = GoStandardLibrary.method(of: receiver, named: name) else {
                 return nil
             }

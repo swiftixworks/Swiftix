@@ -40,8 +40,11 @@ enum GoLibraryValue {
         guard !member.hasPrefix("$") else { return nil }
         if let native = GoStandardLibrary.nativeFunction(package: package, member: member) {
             guard native.symbol != GoPredeclared.errorsAs else { return nil }
+            let variadic = native.variadicElement.map {
+                GoType.array(length: GoSpread.variadicLength, element: $0)
+            }
             return GoLibrarySignature(
-                parameters: native.parameters + (native.isVariadic ? [operands] : []),
+                parameters: native.parameters + (native.isVariadic ? [variadic ?? operands] : []),
                 results: native.results)
         }
         guard let builtin = GoStandardLibrary.resolve(package: package, member: member) else {

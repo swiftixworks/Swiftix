@@ -598,6 +598,7 @@ public enum GoTypeChecker {
                 "time.Time", "os.File":
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
+            case _ where GoLibraryStructs.isTypeName(name): return .named(name)
             default:
                 if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
@@ -3555,6 +3556,7 @@ struct FunctionChecker {
                 "time.Time", "os.File":
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
+            case _ where GoLibraryStructs.isTypeName(name): return .named(name)
             default:
                 if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
@@ -3878,6 +3880,41 @@ struct FunctionChecker {
         return (try? declaredType(named)) == nil ? nil : name
     }
 
+    /// A method of a library struct takes a pointer, so a value it is
+    /// called on must have an address, as Go asks: a variable, a field of
+    /// one, an element of a slice. A map element and a result have none.
+    mutating func requireAddressableReceiver(
+        _ base: GoExpression, ofType type: GoType, method: String, at position: GoSourcePosition
+    ) throws {
+        guard case .named(let name) = type, GoLibraryStructs.isStruct(name),
+            !hasAddress(base)
+        else { return }
+        throw GoDiagnostic(
+            position: position, message: "cannot call pointer method \(method) on \(type)")
+    }
+
+    /// Whether `expression` names a variable, as Go's `&` asks: a variable,
+    /// a field of one or of what a pointer points to, an element of a slice
+    /// or of an array that has an address, or what a pointer points to.
+    mutating func hasAddress(_ expression: GoExpression) -> Bool {
+        switch expression {
+        // A name of a struct type is a variable: no constant is a struct.
+        case .identifier, .unary(.dereference, _, _): return true
+        case .selector(let base, _, _):
+            guard let baseType = try? type(of: base) else { return false }
+            return isPointer(baseType) || hasAddress(base)
+        case .index(let base, _, _):
+            guard let baseType = try? type(of: base) else { return false }
+            switch underlying(baseType) {
+            case .slice: return true
+            case .array: return hasAddress(base)
+            case .pointer: return true
+            default: return false
+            }
+        default: return false
+        }
+    }
+
     /// Checks a call to a native library function or `*os.File` method and
     /// returns it, or nil when `callee` is not one.
     mutating func nativeCall(
@@ -3899,10 +3936,18 @@ struct FunctionChecker {
             let native = GoStandardLibrary.method(
                 of: GoLibraryTypes.methodOwner(receiver) ?? receiver, named: name)
         {
+            try requireAddressableReceiver(base, ofType: receiver, method: name, at: callee.position)
             function = native
             parameters = native.parameters.dropFirst()
         } else {
             return try promotedNativeCall(callee, arguments: arguments, position: position)
+        }
+        if function.variadicElement != nil {
+            // `errors.Join(errs ...error)`: its arguments are checked as
+            // those of a variadic function of the program are.
+            try checkArguments(
+                arguments, of: callee, declared: function.declared(parameters), position: position)
+            return function
         }
         guard function.isVariadic
             ? arguments.count >= parameters.count
@@ -4095,6 +4140,11 @@ struct FunctionChecker {
             return methods.allSatisfy(own.contains)
         }
         for method in methods {
+            if let lent = GoLibraryStructs.lends(type, method) {
+                // A method of a library type that takes a pointer.
+                guard lent else { return false }
+                continue
+            }
             if let library = GoLibraryTypes.interfaceMethod(of: type, named: method.name) {
                 // A method of a library type, which the VM provides.
                 guard library.parameters == method.parameters, library.results == method.results
@@ -4758,6 +4808,8 @@ extension FunctionChecker {
         // its type was lent, whichever package that is from.
         guard lookup(GoEmbedding.receiverName) == nil else { return false }
         let owner = type.pointee(in: typeDefinitions) ?? type
+        // What a struct of the library keeps to itself, it keeps from all.
+        if case .named(let typeName) = owner, GoLibraryStructs.isStruct(typeName) { return true }
         guard case .named(let typeName) = owner, typeDefinitions[typeName] != nil else {
             return false
         }

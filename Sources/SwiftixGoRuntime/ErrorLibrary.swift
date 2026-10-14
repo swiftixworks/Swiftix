@@ -26,6 +26,19 @@ enum GoErrors {
     static let plainType = "*errors.errorString"
     static let wrappingType = "*fmt.wrapError"
     static let joiningType = "*fmt.wrapErrors"
+    /// What `errors.Join` makes. Go's has the errors alone and makes its
+    /// text when asked; here the text is made once, when they are joined,
+    /// and kept after them, in a field the type does not declare.
+    static let joinedType = "*errors.joinError"
+
+    /// Call name of `errors.Join`, which takes any number of errors.
+    static let join = "$errors.Join"
+
+    /// Whether an error of this type wraps several: its `Unwrap` gives a
+    /// slice.
+    static func wrapsSeveral(_ typeName: String) -> Bool {
+        typeName == joiningType || typeName == joinedType
+    }
 
     /// The struct behind each error type, for `fmt`.
     static let definitions: [String: GoRuntimeType] = [
@@ -36,6 +49,7 @@ enum GoErrors {
         "fmt.wrapErrors": .structure([
             .init(name: "msg", type: .string), .init(name: "errs", type: .slice(.error)),
         ]),
+        "errors.joinError": .structure([.init(name: "errs", type: .slice(.error))]),
     ]
 
     /// Types of the errors the runtime panics with, whose value is the
@@ -56,6 +70,7 @@ enum GoErrors {
     /// Whether `typeName` is one of the pointer types above.
     static func isLibraryType(_ typeName: String) -> Bool {
         typeName == plainType || typeName == wrappingType || typeName == joiningType
+            || typeName == joinedType
     }
 
     /// Prefix of the third operand of `$errors.As`, and of the target of a

@@ -24,13 +24,15 @@ enum GoLibraryTypes {
     /// library type with an underlying type. `time.Time` and `os.File` are
     /// opaque and have none.
     static func underlying(of name: String) -> GoType? {
-        name == durationName ? GoNumericKind.int64.type : nil
+        name == durationName ? GoNumericKind.int64.type : GoLibraryStructs.underlying(of: name)
     }
 
     /// The library type `package.member` names when it is one a value
     /// converts to, `time.Duration(n)`.
     static func convertible(package: String, member: String) -> GoType? {
         let name = package + "." + member
+        // A type behind a value of the library has no name to convert to.
+        guard GoModuleLinker.isExported(member) else { return nil }
         return underlying(of: name) == nil ? nil : .named(name)
     }
 
@@ -42,7 +44,7 @@ enum GoLibraryTypes {
     static func methodOwner(_ type: GoType) -> GoType? {
         switch type {
         case duration, .pointer(duration): return duration
-        default: return nil
+        default: return GoLibraryStructs.methodOwner(type)
         }
     }
 
@@ -51,6 +53,7 @@ enum GoLibraryTypes {
     /// when it is a pointer to a type that has the method. Following a nil
     /// pointer panics, as the call does in Go.
     static func receiver(_ base: GoExpression, of type: GoType) -> GoExpression {
+        if let receiver = GoLibraryStructs.receiver(base, of: type) { return receiver }
         // A `*os.File` is itself what its methods take.
         guard case .pointer = type, let owner = methodOwner(type), owner != type else {
             return base
@@ -79,13 +82,10 @@ enum GoLibraryTypes {
         guard let owner = methodOwner(type),
             let native = GoStandardLibrary.method(of: owner, named: member)
         else { return nil }
-        let name: String
-        switch owner {
-        case .named(let symbol): name = symbol
-        case .pointer(.named(let symbol)): name = "*" + symbol
-        default: return nil
-        }
-        return Method(native: native, symbol: name + "." + member, receiver: owner)
+        // `time.Duration.String`, and `*sync.RWMutex.Lock` for a method
+        // that takes a pointer.
+        return Method(
+            native: native, symbol: owner.legacyDescription + "." + member, receiver: owner)
     }
 
     /// Mark of a line among the implementers of an interface target that
@@ -231,9 +231,16 @@ enum GoLibraryTypes {
         }
     }
 
+    /// Those lines for every library type: the durations, then the struct
+    /// types whose methods take a pointer.
+    static func refusals(ofAll methods: [GoInterfaceMethod]) -> [String] {
+        refusals(of: methods) + GoLibraryStructs.refusals(of: methods)
+    }
+
     /// Reserved call names of the natives this file declares.
     static let nativeCallNames: Set<String> = Set(
-        durationMethods.map { "$time.Duration." + $0 } + ["$time.Until", "$time.ParseDuration"])
+        durationMethods.map { "$time.Duration." + $0 } + ["$time.Until", "$time.ParseDuration"]
+    ).union(GoLibraryStructs.nativeCallNames)
 
     /// The methods of `time.Duration`. Each is a name here, a row in
     /// `durationMethod`, and in the runtime an entry of

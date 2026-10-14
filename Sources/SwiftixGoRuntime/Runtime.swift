@@ -835,6 +835,9 @@ public struct GoVirtualMachine: Sendable {
         for (name, function) in GoLibraryMethods.functions where functions[name] == nil {
             functions[name] = function
         }
+        for (name, function) in GoLibraryStructMethods.functions where functions[name] == nil {
+            functions[name] = function
+        }
         guard functions[executable.entryPoint] != nil else {
             throw GoRuntimeError.missingEntryPoint(executable.entryPoint)
         }
@@ -879,6 +882,15 @@ public struct GoVirtualMachine: Sendable {
         // is handed to a later open.
         var openFiles: [Int64: GoFiles.OpenFile] = [:]
         var nextFileHandle = GoFiles.firstHandle
+        // Who is parked on each `sync.RWMutex` and `sync.Cond`, by where
+        // the struct is.
+        var lockWaiters: [GoAddress: GoLockWaiters] = [:]
+        var conditionWaiters: [GoAddress: GoConditionWaiters] = [:]
+        // The timers and tickers that are running, by where the struct is.
+        var runningTimers: [GoAddress: GoRunningTimer] = [:]
+        var nextTimerSequence: UInt64 = 0
+        // The environment as the program has it, once it has asked.
+        var environment: GoEnvironment?
         // Decoded type descriptors, by the type name that carries them.
         var typeDescriptors: [String: GoTypeDescriptor] = [:]
         // The results the native call being executed has from guest
@@ -2524,9 +2536,18 @@ public struct GoVirtualMachine: Sendable {
                     return try pointerLike(formatAddress(of: value) ?? 0)
                 }
                 var fieldTypes = [GoRuntimeType?](repeating: nil, count: structure.fields.count)
+                var fieldCount = structure.fields.count
                 if case .structure(let declaredFields)? = kind,
                     declaredFields.count == structure.fields.count
                 {
+                    fieldTypes = declaredFields.map(\.type)
+                } else if case .structure(let declaredFields)? = kind,
+                    declaredFields.count < fieldCount
+                {
+                    // What the VM keeps after the fields Go has is not
+                    // shown: the function of `time.AfterFunc`, the text of
+                    // an `errors.Join`.
+                    fieldCount = declaredFields.count
                     fieldTypes = declaredFields.map(\.type)
                 }
                 let labelled = directive.labelsFields || directive.goSyntax
@@ -2535,7 +2556,7 @@ public struct GoVirtualMachine: Sendable {
                 var hidden = scope
                 hidden.accessible = false
                 return try aggregate(
-                    (directive.goSyntax ? typeName() : "") + "{", structure.fields.count, "}"
+                    (directive.goSyntax ? typeName() : "") + "{", fieldCount, "}"
                 ) { index in
                     let field = structure.fields[index]
                     let exported = field.name.unicodeScalars.first.map {
@@ -2787,8 +2808,10 @@ public struct GoVirtualMachine: Sendable {
         func makeError(
             _ message: String,
             wrapping wrapped: [GoValue] = [],
-            joins: Bool = false
+            joins: Bool = false,
+            joined: Bool = false
         ) throws -> GoValue {
+            if joined { return try makeJoinedError(message, of: wrapped) }
             let typeName: String
             var fields = [GoStructFieldValue(name: "s", value: .string(message))]
             if joins == false, wrapped.isEmpty {
@@ -2819,12 +2842,44 @@ public struct GoVirtualMachine: Sendable {
                 GoInterfaceValue(typeName: typeName, value: .pointer(GoPointer(cell: cell))))
         }
 
+        /// What `errors.Join` gives for `errors`, none of which is nil, and
+        /// `message`, their texts on a line each.
+        func makeJoinedError(_ message: String, of errors: [GoValue]) throws -> GoValue {
+            let backing = try heap.allocate(.array(errors))
+            let cell = try heap.allocate(
+                .structure(
+                    GoStructValue(
+                        typeName: String(GoErrors.joinedType.dropFirst()),
+                        fields: [
+                            GoStructFieldValue(
+                                name: "errs",
+                                value: .slice(
+                                    GoSliceValue(
+                                        backing: GoPointer(cell: backing), start: 0,
+                                        length: errors.count, capacity: errors.count,
+                                        zeroValue: .nilValue))),
+                            GoStructFieldValue(name: "msg", value: .string(message)),
+                        ])))
+            return .interface(
+                GoInterfaceValue(
+                    typeName: GoErrors.joinedType, value: .pointer(GoPointer(cell: cell))))
+        }
+
         /// The message of an error the library made and the errors it wraps,
         /// or nil for any other value.
         func libraryError(_ value: GoValue) throws -> (message: String, wrapped: [GoValue])? {
             guard case .interface(let boxed) = value else { return nil }
             if GoErrors.isMessageType(boxed.typeName), case .string(let message) = boxed.value {
                 return (message, [])
+            }
+            if boxed.typeName == GoErrors.joinedType {
+                // The errors, then their text.
+                guard case .pointer(let pointer) = boxed.value,
+                    case .structure(let structure) = try read(pointer: pointer, heap: heap),
+                    structure.fields.count == 2,
+                    case .string(let message) = structure.fields[1].value
+                else { return nil }
+                return (message, Array(try sliceElements(structure.fields[0].value)))
             }
             guard GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
                 case .structure(let structure) = try read(pointer: pointer, heap: heap),
@@ -2871,6 +2926,11 @@ public struct GoVirtualMachine: Sendable {
             for target: GoErrors.InterfaceTarget
         ) throws -> String? {
             if case .interface(let boxed) = value, try libraryError(value) != nil {
+                // The compiler wrote that the types of its `Unwrap` are
+                // not what the interface asks for.
+                if target.implementers.contains(GoLibraryMethods.refusalMark + boxed.typeName) {
+                    return "Unwrap"
+                }
                 let provided = GoErrors.methods(ofLibraryType: boxed.typeName)
                 return target.methods.first {
                     !provided.contains($0.name) || $0.parameterCount != 0 || $0.resultCount != 1
@@ -2894,11 +2954,25 @@ public struct GoVirtualMachine: Sendable {
             return (absent ?? first).name
         }
 
+        /// What the `Unwrap` method of an error the library made returns:
+        /// the error one `%w` wrapped, or the slice of those several did or
+        /// `errors.Join` joined. Nil for a value that has no such method.
+        func libraryUnwrapResult(_ err: GoValue) throws -> GoValue? {
+            guard case .interface(let boxed) = err, boxed.typeName != GoErrors.plainType,
+                GoErrors.isLibraryType(boxed.typeName), case .pointer(let pointer) = boxed.value,
+                case .structure(let structure) = try read(pointer: pointer, heap: heap)
+            else { return nil }
+            // The slice is the error's own, as in Go; it comes first in
+            // what `errors.Join` made and second in the others.
+            let index = boxed.typeName == GoErrors.joinedType ? 0 : 1
+            return structure.fields.indices.contains(index) ? structure.fields[index].value : nil
+        }
+
         /// What `err` wraps: what Go's `Unwrap() error` returns as one error,
         /// and what `Unwrap() []error` returns as several.
         func unwrapped(_ err: GoValue) throws -> (single: GoValue?, several: [GoValue]) {
             if let library = try libraryError(err) {
-                guard case .interface(let boxed) = err, boxed.typeName == GoErrors.joiningType
+                guard case .interface(let boxed) = err, GoErrors.wrapsSeveral(boxed.typeName)
                 else { return (library.wrapped.first, []) }
                 return (nil, library.wrapped)
             }
@@ -2914,9 +2988,62 @@ public struct GoVirtualMachine: Sendable {
             }
         }
 
+        /// The text of the error `err`: the message of one the library
+        /// made, or what the `Error` method of its type returns, which
+        /// runs first when it has not yet.
+        func errorText(_ err: GoValue) throws -> String {
+            if let library = try libraryError(err) { return library.message }
+            guard let target = methodTarget(err),
+                let function = method("Error", of: target.owner),
+                case .string(let text)? = try guestCall(
+                    function, [try methodReceiver(target.receiver, for: function)])
+            else { throw GoRuntimeError.typeMismatch }
+            return text
+        }
+
+        /// Run `errors.Join`: an error that wraps every operand that is
+        /// not nil and reads as their texts, a line each, or nil when all
+        /// of them are nil. The operands are errors, or one slice of them
+        /// given with `...`.
+        func executeJoinNative(argumentCount: Int) throws {
+            try resumeGuestCalls()
+            guard argumentCount >= 0, stack.count >= argumentCount else {
+                throw GoRuntimeError.stackUnderflow
+            }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            let errors = try variadicOperands(operands).filter { $0 != .nilValue }
+            guard !errors.isEmpty else {
+                stack.append(.nilValue)
+                return
+            }
+            let text = try replayingGuestCalls(operands: operands) { () -> String in
+                var lines: [String] = []
+                var byteCount = 0
+                for error in errors {
+                    let line = try errorText(error)
+                    byteCount = try checkedAdd(
+                        byteCount, line.utf8.count + 1, resource: "string bytes")
+                    guard byteCount <= resourceLimits.maximumStringBytes else {
+                        throw GoRuntimeError.resourceLimitExceeded("string bytes")
+                    }
+                    lines.append(line)
+                }
+                return lines.joined(separator: "\n")
+            }
+            // An `Error` method is running first; this call executes again.
+            guard let text else { return }
+            stack.append(try makeError(text, wrapping: errors, joined: true))
+        }
+
         /// Run `errors.Unwrap`, `errors.Is`, or `errors.As`. Returns `false`
         /// when `name` is not such a function.
         func executeErrorNative(_ name: String, argumentCount: Int) throws -> Bool {
+            if name == GoErrors.join {
+                try executeJoinNative(argumentCount: argumentCount)
+                return true
+            }
             guard let expectedCount = GoErrors.argumentCounts[name] else { return false }
             guard argumentCount == expectedCount else {
                 throw GoRuntimeError.argumentCountMismatch(
@@ -3322,6 +3449,497 @@ public struct GoVirtualMachine: Sendable {
                 return false
             }
             stack.append(result)
+            return true
+        }
+
+        // MARK: Locks and condition variables
+
+        /// The struct a pointer operand of a `sync` native points to. A nil
+        /// pointer panics, as the method does in Go.
+        func structOperand(_ value: GoValue) throws -> (pointer: GoPointer, value: GoValue) {
+            guard case .pointer(let pointer) = value else {
+                if value == .nilValue { throw GoRuntimePanic.nilDereference }
+                throw GoRuntimeError.typeMismatch
+            }
+            return (pointer, try read(pointer: pointer, heap: heap))
+        }
+
+        /// Run a `sync` native: `TryLock` of a mutex, a method of a
+        /// `sync.RWMutex`, or what a `sync.Cond` needs. See `GoSync`.
+        /// Returns `false` when `name` is not such a function.
+        func executeSyncNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoSync.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            switch name {
+            case "$sync.Mutex.TryLock":
+                guard case .mutex(let mutex) = operands[0],
+                    case .mutexStorage(var storage) = try read(
+                        pointer: mutex.storage, heap: heap)
+                else { throw GoRuntimeError.typeMismatch }
+                stack.append(.bool(!storage.locked))
+                if !storage.locked {
+                    storage.locked = true
+                    try writePointer(
+                        .mutexStorage(storage), through: mutex.storage, heap: &heap)
+                }
+            case "$sync.RWMutex.RLocker":
+                // The same lock under the type whose `Lock` reads.
+                stack.append(
+                    .interface(
+                        GoInterfaceValue(
+                            typeName: GoSync.readLockerTypeName, value: operands[0])))
+            case "$sync.NewCond":
+                let cell = try heap.allocate(GoSync.condition(locker: operands[0]))
+                stack.append(.pointer(GoPointer(cell: cell)))
+            case GoSync.condAdd, GoSync.condWait, "$sync.Cond.Signal", "$sync.Cond.Broadcast":
+                try executeConditionNative(name, operands)
+            default:
+                try executeReadWriteLockNative(name, receiver: operands[0])
+            }
+            return true
+        }
+
+        /// A method of `sync.RWMutex`, done to the struct `receiver` points
+        /// to as Go's method does it. A goroutine that has to wait is
+        /// parked under the struct's address and woken by the method that
+        /// lets it go on.
+        func executeReadWriteLockNative(_ name: String, receiver: GoValue) throws {
+            let lock = try structOperand(receiver)
+            guard var state = GoSync.ReadWriteState(lock.value) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            let address = GoAddress(lock.pointer)
+            var waiters = lockWaiters[address]
+
+            /// The queues of this lock, made when the first goroutine waits.
+            func park(_ place: (inout GoLockWaiters) -> Void) throws {
+                var queues =
+                    try waiters ?? GoLockWaiters(root: retainRuntimeHandle(receiver))
+                place(&queues)
+                waiters = queues
+            }
+            /// A writer that holds the lock inside tells the readers: none
+            /// may begin, and it waits for those that have. Whether it has
+            /// to wait.
+            func announceWriter() -> Bool {
+                let readers = state.readerCount
+                state.readerCount -= GoSync.maxReaders
+                guard readers != 0 else { return false }
+                state.readerWait += readers
+                return state.readerWait != 0
+            }
+
+            switch name {
+            case "$sync.RWMutex.RLock":
+                state.readerCount += 1
+                if state.readerCount < 0 {
+                    // A writer holds the lock or waits for it.
+                    try park { $0.readers.append(currentGoroutineID) }
+                    currentBlocked = true
+                }
+            case "$sync.RWMutex.TryRLock":
+                stack.append(.bool(state.readerCount >= 0))
+                if state.readerCount >= 0 { state.readerCount += 1 }
+            case "$sync.RWMutex.RUnlock":
+                state.readerCount -= 1
+                if state.readerCount < 0 {
+                    let before = state.readerCount + 1
+                    guard before != 0, before != -GoSync.maxReaders else {
+                        throw GoFatalError.readUnlockOfUnlocked
+                    }
+                    // A writer waits: the last reader to leave lets it in.
+                    state.readerWait -= 1
+                    if state.readerWait == 0, let writer = waiters?.pendingWriter {
+                        waiters?.pendingWriter = nil
+                        try wakeGoroutine(writer)
+                    }
+                }
+            case "$sync.RWMutex.Lock":
+                if state.isLocked {
+                    try park { $0.writers.append(currentGoroutineID) }
+                    currentBlocked = true
+                } else {
+                    state.isLocked = true
+                    if announceWriter() {
+                        try park { $0.pendingWriter = currentGoroutineID }
+                        currentBlocked = true
+                    }
+                }
+            case "$sync.RWMutex.TryLock":
+                let free = !state.isLocked && state.readerCount == 0
+                stack.append(.bool(free))
+                if free {
+                    state.isLocked = true
+                    state.readerCount = -GoSync.maxReaders
+                }
+            case "$sync.RWMutex.Unlock":
+                state.readerCount += GoSync.maxReaders
+                guard state.readerCount < GoSync.maxReaders else {
+                    throw GoFatalError.unlockOfUnlocked
+                }
+                // Every reader that came while the writer had the lock goes
+                // on, and then the lock inside passes to the next writer,
+                // which waits for those readers in its turn.
+                let readers = waiters?.readers ?? []
+                waiters?.readers = []
+                for reader in readers { try wakeGoroutine(reader) }
+                if let next = waiters?.writers.first {
+                    waiters?.writers.removeFirst()
+                    if announceWriter() {
+                        waiters?.pendingWriter = next
+                    } else {
+                        try wakeGoroutine(next)
+                    }
+                } else {
+                    state.isLocked = false
+                }
+            default:
+                throw GoRuntimeError.missingFunction(name)
+            }
+            try writePointer(state.stored(in: lock.value), through: lock.pointer, heap: &heap)
+            if let queues = waiters, queues.isEmpty {
+                runtimeHandleRoots.removeValue(forKey: queues.root)
+                lockWaiters[address] = nil
+            } else {
+                lockWaiters[address] = waiters
+            }
+        }
+
+        /// What a `sync.Cond` asks of the VM: Go's notification list. `Wait`
+        /// draws a ticket before it unlocks and parks after, so a `Signal`
+        /// between the two is not lost; `Signal` calls the oldest ticket
+        /// and `Broadcast` all of them.
+        func executeConditionNative(_ name: String, _ operands: [GoValue]) throws {
+            let condition = try structOperand(operands[0])
+            guard var state = GoSync.ConditionState(condition.value) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            let address = GoAddress(condition.pointer)
+            var parked = conditionWaiters[address]
+            switch name {
+            case GoSync.condAdd:
+                stack.append(.int(state.wait))
+                state.wait = (state.wait + 1) & 0xFFFF_FFFF
+            case GoSync.condWait:
+                guard case .int(let ticket) = operands[1] else { throw GoRuntimeError.typeMismatch }
+                // A ticket that was called meanwhile does not wait.
+                guard !GoSync.ConditionState.isBefore(ticket, state.notify) else { return }
+                var queue =
+                    try parked ?? GoConditionWaiters(root: retainRuntimeHandle(operands[0]))
+                queue.waiters.append((ticket, currentGoroutineID))
+                conditionWaiters[address] = queue
+                currentBlocked = true
+                return
+            case "$sync.Cond.Signal":
+                guard state.wait != state.notify else { return }
+                let ticket = state.notify
+                state.notify = (state.notify + 1) & 0xFFFF_FFFF
+                // Its goroutine may not have parked yet; it will not.
+                if let index = parked?.waiters.firstIndex(where: { $0.ticket == ticket }),
+                    let waiter = parked?.waiters.remove(at: index)
+                {
+                    try wakeGoroutine(waiter.goroutineID)
+                }
+            default:
+                state.notify = state.wait
+                for waiter in parked?.waiters ?? [] { try wakeGoroutine(waiter.goroutineID) }
+                parked?.waiters = []
+            }
+            try writePointer(
+                state.stored(in: condition.value), through: condition.pointer, heap: &heap)
+            if let queue = parked, queue.waiters.isEmpty {
+                runtimeHandleRoots.removeValue(forKey: queue.root)
+                conditionWaiters[address] = nil
+            } else {
+                conditionWaiters[address] = parked
+            }
+        }
+
+        // MARK: The process
+
+        /// The variables of the program's environment: those of its
+        /// process when it first asks, and what it has set since.
+        func withEnvironment<Result>(_ body: (inout GoEnvironment) -> Result) -> Result {
+            var current = environment ?? GoEnvironment(processContext?.environment ?? [:])
+            defer { environment = current }
+            return body(&current)
+        }
+
+        /// Run a native of `os` that asks the process about itself or
+        /// changes its environment. See `GoProcess`.
+        /// Returns `false` when `name` is not such a function.
+        func executeProcessNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoProcess.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = try stack[start...].map { value -> String in
+                guard case .string(let text) = value else { throw GoRuntimeError.typeMismatch }
+                return text
+            }
+            stack.removeSubrange(start...)
+            switch name {
+            case "$os.Getenv":
+                stack.append(.string(withEnvironment { $0.value(of: operands[0]) } ?? ""))
+            case "$os.LookupEnv":
+                let value = withEnvironment { $0.value(of: operands[0]) }
+                stack.append(.string(value ?? ""))
+                stack.append(.bool(value != nil))
+            case "$os.Setenv":
+                guard GoProcess.isSettable(name: operands[0], value: operands[1]) else {
+                    stack.append(errorValue(GoProcess.invalidVariable))
+                    break
+                }
+                withEnvironment { $0.set(operands[0], to: operands[1]) }
+                processContext?.setenv(operands[0], operands[1])
+                stack.append(.nilValue)
+            case "$os.Unsetenv":
+                if withEnvironment({ $0.unset(operands[0]) }) {
+                    processContext?.unsetenv(operands[0])
+                }
+                stack.append(.nilValue)
+            case "$os.Environ":
+                let entries = withEnvironment { $0.entries }.map { GoValue.string($0) }
+                try requireCollectionCount(entries.count, resource: "slice elements")
+                let cell = try heap.allocate(.array(entries))
+                stack.append(
+                    .slice(
+                        GoSliceValue(
+                            backing: GoPointer(cell: cell), start: 0, length: entries.count,
+                            capacity: entries.count, zeroValue: .string(""))))
+            case "$os.Getpid":
+                stack.append(
+                    .int(processContext.map { Int64($0.getpid()) } ?? GoProcess.detachedProcessID))
+            case "$os.Hostname":
+                stack.append(.string(processContext?.hostname ?? GoProcess.detachedHostname))
+                stack.append(.nilValue)
+            default:
+                stack.append(
+                    .string(processContext?.currentDirectory ?? GoProcess.detachedDirectory))
+                stack.append(.nilValue)
+            }
+            return true
+        }
+
+        // MARK: Timers
+
+        /// Logical time in nanoseconds, which a timer is due by.
+        func logicalNanoseconds() -> Int64 {
+            let nanoseconds = (eventLoop.now * 1_000_000_000).rounded()
+            guard nanoseconds.isFinite, nanoseconds < 9.2e18 else { return .max }
+            return Int64(max(0, nanoseconds))
+        }
+
+        /// Start a goroutine that calls the function value `value`, from
+        /// outside any goroutine: what a timer of `time.AfterFunc` does
+        /// when it fires.
+        func startGoroutine(calling value: GoValue) throws {
+            let target = try functionValueTarget(value)
+            guard resourceLimits.maximumGoroutines >= 2,
+                goroutines.count <= resourceLimits.maximumGoroutines - 2
+            else {
+                throw GoRuntimeError.resourceLimitExceeded("goroutines")
+            }
+            guard nextGoroutineID < Int.max else {
+                throw GoRuntimeError.resourceLimitExceeded("goroutine identifiers")
+            }
+            let id = nextGoroutineID
+            nextGoroutineID += 1
+            goroutines[id] = GoroutineContext(
+                frames: [
+                    try makeFrame(
+                        function: target.function, stackBase: 0,
+                        arguments: try target.arguments(with: [GoValue]()), heap: &heap)
+                ],
+                stack: [])
+            runQueue.append(id)
+        }
+
+        /// Stop the timer at `address` from firing. Whether it was running.
+        func disarmTimer(at address: GoAddress) -> Bool {
+            guard let timer = runningTimers.removeValue(forKey: address) else { return false }
+            runtimeHandleRoots.removeValue(forKey: timer.root)
+            finishTimer()
+            return true
+        }
+
+        /// Have the timer whose struct `pointer` points to fire after
+        /// `nanoseconds`, and every `period` after that when it is a
+        /// ticker's.
+        func armTimer(
+            at pointer: GoPointer, after nanoseconds: Int64, period: Int64 = 0
+        ) throws {
+            try reserveTimer()
+            let root: Int
+            do {
+                root = try retainRuntimeHandle(.pointer(pointer))
+            } catch {
+                finishTimer()
+                throw error
+            }
+            let delay = max(0, nanoseconds)
+            let (deadline, overflow) = logicalNanoseconds().addingReportingOverflow(delay)
+            let sequence = nextTimerSequence
+            nextTimerSequence &+= 1
+            runningTimers[GoAddress(pointer)] = GoRunningTimer(
+                sequence: sequence, root: root, period: period,
+                deadline: overflow ? .max : deadline)
+            scheduleTimer(at: pointer, sequence: sequence, after: delay)
+        }
+
+        /// Put the firing of a timer on the event loop. The work cannot be
+        /// taken back, so it does nothing when the timer was stopped or
+        /// reset since: its sequence number is then another.
+        func scheduleTimer(at pointer: GoPointer, sequence: UInt64, after nanoseconds: Int64) {
+            let address = GoAddress(pointer)
+            scheduleRuntimeWork(after: Double(nanoseconds) / 1_000_000_000) {
+                guard executionIsActive, asynchronousError == nil,
+                    var timer = runningTimers[address], timer.sequence == sequence
+                else { return }
+                do {
+                    let fields = GoTimers.fields(of: try read(pointer: pointer, heap: heap))
+                    if let function = fields?.function {
+                        // What `time.AfterFunc` was given runs in a
+                        // goroutine of its own.
+                        _ = disarmTimer(at: address)
+                        try startGoroutine(calling: function)
+                        return
+                    }
+                    // The time goes to whoever waits or into the channel's
+                    // one place; a ticker nobody reads drops it.
+                    if let channel = fields?.channel,
+                        case .sent = try trySelectSend(.int(runtimeTimestamp()), to: channel)
+                    {
+                        try wakeReadyBlockedSelects()
+                    }
+                    guard timer.period > 0 else {
+                        _ = disarmTimer(at: address)
+                        return
+                    }
+                    let now = logicalNanoseconds()
+                    timer.deadline = GoTimers.nextDeadline(
+                        after: timer.deadline, period: timer.period, now: now)
+                    runningTimers[address] = timer
+                    scheduleTimer(
+                        at: pointer, sequence: sequence, after: max(0, timer.deadline &- now))
+                } catch let panic as GoRuntimePanic {
+                    asynchronousError = .panicError(panic.message)
+                } catch let error as GoRuntimeError {
+                    asynchronousError = error
+                } catch {
+                    asynchronousError = .typeMismatch
+                }
+            }
+        }
+
+        /// Take back a time a timer sent that nobody has received. Whether
+        /// there was one.
+        func drainTimerChannel(_ channel: GoValue) throws -> Bool {
+            guard case .channel(let value) = channel,
+                case .channelStorage(var storage) = try read(pointer: value.storage, heap: heap),
+                !storage.buffer.isEmpty
+            else { return false }
+            storage.buffer.removeAll()
+            try writePointer(.channelStorage(storage), through: value.storage, heap: &heap)
+            return true
+        }
+
+        /// Run a timer native: a constructor, or `Stop` or `Reset` of a
+        /// `time.Timer` or a `time.Ticker`. See `GoTimers`.
+        /// Returns `false` when `name` is not such a function.
+        func executeTimerNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoTimers.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            func duration(_ index: Int) throws -> Int64 {
+                guard case .int(let nanoseconds) = operands[index] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return nanoseconds
+            }
+            /// A new timer or ticker in a variable of its own, running.
+            func make(
+                _ typeName: String, after nanoseconds: Int64, period: Int64 = 0,
+                function: GoValue? = nil
+            ) throws {
+                var channel = GoValue.nilValue
+                if function == nil {
+                    let cell = try heap.allocate(.channelStorage(GoChannelStorage(capacity: 1)))
+                    channel = .channel(GoChannelValue(storage: GoPointer(cell: cell)))
+                }
+                let pointer = GoPointer(
+                    cell: try heap.allocate(
+                        GoTimers.value(typeName: typeName, channel: channel, function: function)))
+                stack.append(.pointer(pointer))
+                try armTimer(at: pointer, after: nanoseconds, period: period)
+            }
+
+            switch name {
+            case "$time.NewTimer":
+                try make(GoTimers.timerTypeName, after: try duration(0))
+                return true
+            case "$time.AfterFunc":
+                try make(GoTimers.timerTypeName, after: try duration(0), function: operands[1])
+                return true
+            case "$time.NewTicker":
+                let period = try duration(0)
+                guard period > 0 else { throw GoRuntimePanic(text: GoTimers.nonPositiveTicker) }
+                try make(GoTimers.tickerTypeName, after: period, period: period)
+                return true
+            default:
+                break
+            }
+
+            let timer = try structOperand(operands[0])
+            guard let fields = GoTimers.fields(of: timer.value) else {
+                throw GoRuntimeError.typeMismatch
+            }
+            let address = GoAddress(timer.pointer)
+            switch name {
+            case "$time.Timer.Stop", "$time.Timer.Reset":
+                let method = name == "$time.Timer.Stop" ? "Stop" : "Reset"
+                guard fields.isInitialized else {
+                    throw GoRuntimePanic(text: GoTimers.uninitialized(method, "Timer"))
+                }
+                // It had not been used up when it was still to fire, or
+                // had fired and nobody had the time yet.
+                let wasRunning = disarmTimer(at: address)
+                let wasSent = try drainTimerChannel(fields.channel)
+                if name == "$time.Timer.Reset" {
+                    try armTimer(at: timer.pointer, after: try duration(1))
+                }
+                stack.append(.bool(wasRunning || wasSent))
+            case "$time.Ticker.Stop":
+                // Go lets a ticker nobody made be stopped.
+                guard fields.isInitialized else { break }
+                _ = disarmTimer(at: address)
+                _ = try drainTimerChannel(fields.channel)
+            default:
+                let period = try duration(1)
+                guard period > 0 else { throw GoRuntimePanic(text: GoTimers.nonPositiveReset) }
+                guard fields.isInitialized else {
+                    throw GoRuntimePanic(text: GoTimers.uninitialized("Reset", "Ticker"))
+                }
+                _ = disarmTimer(at: address)
+                _ = try drainTimerChannel(fields.channel)
+                try armTimer(at: timer.pointer, after: period, period: period)
+            }
             return true
         }
 
@@ -4540,6 +5158,9 @@ public struct GoVirtualMachine: Sendable {
                                 || executeHostNative(name, argumentCount: argumentCount)
                                 || executeFileNative(name, argumentCount: argumentCount)
                                 || executeTimeNative(name, argumentCount: argumentCount)
+                                || executeSyncNative(name, argumentCount: argumentCount)
+                                || executeTimerNative(name, argumentCount: argumentCount)
+                                || executeProcessNative(name, argumentCount: argumentCount)
                                 || executeNumericNative(name, argumentCount: argumentCount)
                                 || executeFormatNative(name, argumentCount: argumentCount)
                                 || executeErrorNative(name, argumentCount: argumentCount)
@@ -6191,6 +6812,12 @@ public struct GoVirtualMachine: Sendable {
                         let library = try libraryError(receiver)
                     {
                         stack.append(.string(library.message))
+                        break
+                    }
+                    if methodName == "Unwrap", arguments.isEmpty,
+                        let wrapped = try libraryUnwrapResult(receiver)
+                    {
+                        stack.append(wrapped)
                         break
                     }
                     // Unwrap interface to get concrete type and value
