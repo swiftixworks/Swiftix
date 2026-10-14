@@ -552,6 +552,9 @@ format, behavior and platform changes are recorded here.
 - A program that uses `strings.NewReader` (and so `http.NewRequest`) or
   `io.Copy` is linked with more of the library and compiles to a larger
   image.
+- The Go tool reports `go1.24-swiftix.0.5`, so images cached by an earlier
+  tool are built again rather than replayed.
+
 
 ### Fixed
 
