@@ -309,6 +309,20 @@ format, behavior and platform changes are recorded here.
 - `sync/atomic`: the functions for the 32- and 64-bit integers and the typed
   `Int32`, `Int64`, `Uint32`, `Uint64`, `Bool`, and `Value`; `sync.Map` and
   `sync.Pool`.
+- `strings.Builder`, and the rest of `strings`: `Replace`, `ReplaceAll`,
+  `EqualFold`, the `Trim` and `Split` families, `Cut`, `CutPrefix`,
+  `CutSuffix`, `ContainsAny`, `IndexAny`, `LastIndexAny`, `LastIndexByte`,
+  `IndexFunc`, `LastIndexFunc`, `ContainsFunc`, `FieldsFunc`, `Map`, `Title`,
+  `ToTitle`, `Compare`, `NewReplacer`, and every method of `strings.Reader`,
+  written in Go on the native searches. `strconv.Quote`, `QuoteToASCII`,
+  `AppendQuote`, `Unquote`, `FormatBool`, `ParseBool`, `AppendInt`,
+  `ErrSyntax`, `ErrRange`, and `NumError`.
+- `bufio` (`Reader`, `Writer`, `ReadWriter`, `Scanner` with its split
+  functions and errors) and `bytes` (`Buffer` with Go's capacities, `Reader`,
+  and the functions that mirror `strings`), written in Go; the calls a
+  `bufio.Reader` or `Writer` makes of what is under it are Go's, call by
+  call. `io.ReaderFrom`, `io.WriterTo`, and `io.ErrNoProgress`; `io.Copy`
+  hands the copy to a source's `WriteTo` or a destination's `ReadFrom`.
 
 ### Changed
 
@@ -530,7 +544,9 @@ format, behavior and platform changes are recorded here.
 - A program that imports `context` is linked with the package's Go source
   and compiles to a different, larger image. A method of a nil `*os.File`
   returns `invalid argument`, as Go does.
-
+- A program that uses `strings.NewReader` (and so `http.NewRequest`) or
+  `io.Copy` is linked with more of the library and compiles to a larger
+  image.
 
 ### Fixed
 
@@ -663,6 +679,7 @@ format, behavior and platform changes are recorded here.
   true`.
 - `gofmt` writes `<-chan T` after a result list or a name without a blank
   inside the arrow (`func f() <-chan int`; it wrote `<- chan int`).
+- `strings.Reader.Size` returns an `int64`, as in Go.
 
 ## 0.13.1 — 2026-10-08
 
