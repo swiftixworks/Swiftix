@@ -3116,6 +3116,7 @@ struct FunctionChecker {
             }
             return binding.type
         case .selector(let base, let name, let position):
+            if isOSArgs(expression) { return .slice(.string) }
             let baseType = try pointerBaseType(of: base) ?? assignableType(of: base)
             try requireVisible(name, of: base, in: baseType, at: position)
             if let lent = try promotedType(
@@ -3865,7 +3866,9 @@ struct FunctionChecker {
                 guard underlying(target) != .bool else { throw cannotConvert(argument, ofType: source, to: target) }
                 return target
             }
-            guard sourceShape == underlying(target) || isAssignable(source, to: target) else {
+            guard sourceShape == underlying(target) || isAssignable(source, to: target)
+                || isConvertible(source, to: target)
+            else {
                 throw cannotConvert(argument, ofType: source, to: target)
             }
             return target
@@ -5034,6 +5037,13 @@ extension FunctionChecker {
     /// other whatever either is called.
     func isConvertible(_ source: GoType, to target: GoType) -> Bool {
         if isInterface(target) { return isAssignable(source, to: target) }
+        // Two pointer types that are not named convert when what they point
+        // to has one underlying type: `(*boolValue)(p)` for a `*bool`.
+        if case .pointer(let from) = source, case .pointer(let to) = target,
+            underlying(from) == underlying(to)
+        {
+            return true
+        }
         return underlying(source) == underlying(target)
     }
 

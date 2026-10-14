@@ -4600,6 +4600,10 @@ struct IRLowerer {
         if let followed = throughArrayPointer(indexOrSlice: target) {
             return try store(value, to: followed)
         }
+        if GoOSArgs.isOSArgs(target) {
+            operations.append(.call(function: GoOSArgs.setter, arguments: [value], destinations: []))
+            return
+        }
         switch target {
         case .identifier(let name, let position):
             // The blank identifier takes a value and keeps none.

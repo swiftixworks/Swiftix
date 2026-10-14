@@ -48,7 +48,9 @@ enum GoCompositeLiterals {
     static func isPredeclaredType(_ name: String) -> Bool {
         switch name {
         case "int", "string", "bool", "byte", "uint8", "error", "any": return true
-        default: return GoPredeclared.unsupportedNumericTypes.contains(name)
+        default:
+            return GoPredeclared.unsupportedNumericTypes.contains(name)
+                || GoPredeclared.numericType(name) != nil
         }
     }
 

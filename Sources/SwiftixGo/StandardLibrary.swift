@@ -36,6 +36,7 @@ enum GoStandardLibrary {
         "bufio", "bytes",
         "io/fs", "syscall",
         "encoding", "encoding/base64", "encoding/json",
+        "flag",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
@@ -374,7 +375,7 @@ extension GoStandardLibrary {
             + [
                 GoPredeclared.copyElements, GoPredeclared.appendElements,
                 GoPredeclared.newVariable, GoPredeclared.clearElements,
-                "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New",
+                "$sort.Strings", "$sort.Ints", "$strconv.Itoa", "$errors.New", GoOSArgs.setter,
                 "$errors.Unwrap", "$errors.Is", GoPredeclared.errorsAs,
                 "$fmt.Fprint", "$fmt.Fprintln", "$fmt.Fprint.n", "$fmt.Fprintln.n",
                 "$fmt.Sprintf", "$fmt.Errorf", "$fmt.Sprint", "$fmt.Sprintln",

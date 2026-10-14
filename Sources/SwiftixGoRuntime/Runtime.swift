@@ -927,6 +927,8 @@ public struct GoVirtualMachine: Sendable {
         var hasFormattingMethods: Bool?
         // The walks of `encoding/json` under way, by handle.
         var jsonWalks: [Int: GoJSONNatives.Walk] = [:]
+        /// `os.Args`: made when first read, replaced when a program assigns it.
+        var osArgs: GoValue?
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -4206,6 +4208,29 @@ public struct GoVirtualMachine: Sendable {
 
         /// Run a native of the `fmt.State` a `Format` method is given: see
         /// `GoFormatState`. Returns `false` when `name` is not such a function.
+        /// `$flag.zero`: the zero of a value's dynamic type (see
+        /// `GoZeroValues`).
+        func executeZeroNative(_ name: String, argumentCount: Int) throws -> Bool {
+            if name == "$os.setArgs" {
+                guard argumentCount == 1, let value = vm.stack.popLast() else {
+                    throw GoRuntimeError.argumentCountMismatch(
+                        function: name, expected: 1, actual: argumentCount)
+                }
+                osArgs = value
+                return true
+            }
+            guard name == GoZeroValues.native else { return false }
+            guard argumentCount == 1, let value = vm.stack.popLast() else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: 1, actual: argumentCount)
+            }
+            vm.stack.append(
+                try GoZeroValues.zero(
+                    of: value, descriptor: { typeDescriptor(named: $0) },
+                    allocate: { try vm.heap.allocate($0) }))
+            return true
+        }
+
         func executeFormatStateNative(_ name: String, argumentCount: Int) throws -> Bool {
             guard let expectedCount = GoFormatState.argumentCounts[name] else { return false }
             guard argumentCount == expectedCount, vm.stack.count >= argumentCount else {
@@ -5077,6 +5102,7 @@ public struct GoVirtualMachine: Sendable {
                 }
             }
             rootValues.append(contentsOf: runtimeHandleRoots.values)
+            if let osArgs { rootValues.append(osArgs) }
             // What a walk of `encoding/json` holds while a method it stopped
             // for runs.
             for walk in jsonWalks.values { rootValues.append(contentsOf: walk.heldValues) }
@@ -5873,6 +5899,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeNetNative(name, argumentCount: argumentCount)
                                 || executeJSONNative(name, argumentCount: argumentCount)
                                 || executeFormatStateNative(name, argumentCount: argumentCount)
+                                || executeZeroNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }
@@ -7810,16 +7837,20 @@ public struct GoVirtualMachine: Sendable {
                     vm.stack.append(.bool(passed))
                     try emit("--- \(status): \(name)\n")
                 case .osArgs:
-                    let elements = arguments.map { GoValue.string($0) }
-                    let cell = try vm.heap.allocate(.array(elements))
-                    vm.stack.append(
-                        .slice(
+                    // One slice for the run, as Go's `os.Args` is one
+                    // variable: what is written into it stays.
+                    if osArgs == nil {
+                        let elements = arguments.map { GoValue.string($0) }
+                        let cell = try vm.heap.allocate(.array(elements))
+                        osArgs = .slice(
                             GoSliceValue(
                                 backing: GoPointer(cell: cell),
                                 start: 0,
                                 length: elements.count,
                                 capacity: elements.count,
-                                zeroValue: .string(""))))
+                                zeroValue: .string("")))
+                    }
+                    vm.stack.append(osArgs ?? .nilValue)
                 case .exit:
                     guard case .int(let code) = try pop(&vm.stack) else {
                         throw GoRuntimeError.typeMismatch

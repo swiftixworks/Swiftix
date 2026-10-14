@@ -17,6 +17,9 @@ var ErrSyntax = errors.New("invalid syntax")
 // ErrRange is the error of a value too large for its type.
 var ErrRange = errors.New("value out of range")
 
+// IntSize is the size in bits of an int or uint value.
+const IntSize = 64
+
 // A NumError is a failed conversion: the function, its input, and why.
 type NumError struct {
 	Func string

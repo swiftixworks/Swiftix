@@ -139,6 +139,12 @@ enum GoSourceLibrary {
         case "net": return GoNetLibrary.textNative(name)
         case "os": return GoStandardLibrary.fileSystemNative(name)
         case "json": return GoJSONLibrary.textNative(name)
+        case "flag" where name == "zero":
+            // The zero of the dynamic type of a value, which Go's `flag`
+            // makes with `reflect`.
+            return GoNativeFunction(
+                symbol: "$flag.zero", goName: "flag.isZeroValue",
+                parameters: [.interface([])], results: [.interface([])])
         default: return nil
         }
     }
@@ -147,7 +153,7 @@ enum GoSourceLibrary {
     static let nativeCallNames =
         ["$sort.length", "$sort.swap"] + GoStandardLibrary.httpNativeCallNames
         + GoStandardLibrary.bytesNativeCallNames + GoNetLibrary.nativeCallNames
-        + GoJSONLibrary.nativeCallNames
+        + GoJSONLibrary.nativeCallNames + ["$flag.zero"]
 
     // MARK: What the text declares
 
