@@ -75,6 +75,9 @@ var ErrNoProgress = errors.New("multiple Read calls return no data or error")
 // ErrUnexpectedEOF is the end of the data where more was promised.
 var ErrUnexpectedEOF = errors.New("unexpected EOF")
 
+// ErrClosedPipe is the error of a read or a write on a closed pipe.
+var ErrClosedPipe = errors.New("io: read/write on closed pipe")
+
 // ErrShortBuffer is what ReadAtLeast says of a buffer smaller than the
 // least it was asked to read.
 var ErrShortBuffer = errors.New("short buffer")

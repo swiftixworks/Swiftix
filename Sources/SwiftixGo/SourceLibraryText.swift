@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "log", "net", "net/http", "net/url", "os", "sort", "strconv", "strings", "sync", "sync/atomic", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -42,10 +42,14 @@ enum GoSourceLibraryText {
             "value", "valueCtx", "withCancel", "withoutCancelCtx",
         ],
         "io": [
-            "Closer", "Copy", "Discard", "ErrNoProgress", "ErrShortBuffer", "ErrShortWrite",
-            "ErrUnexpectedEOF", "NopCloser", "ReadAll", "ReadAtLeast", "ReadCloser", "ReadFull",
-            "ReadWriteCloser", "ReadWriter", "Reader", "ReaderFrom", "StringWriter", "WriteCloser",
-            "WriteString", "Writer", "WriterTo", "discard", "nopCloser",
+            "Closer", "Copy", "Discard", "ErrClosedPipe", "ErrNoProgress", "ErrShortBuffer",
+            "ErrShortWrite", "ErrUnexpectedEOF", "NopCloser", "ReadAll", "ReadAtLeast",
+            "ReadCloser", "ReadFull", "ReadWriteCloser", "ReadWriter", "Reader", "ReaderFrom",
+            "StringWriter", "WriteCloser", "WriteString", "Writer", "WriterTo", "discard",
+            "nopCloser",
+        ],
+        "io/fs": [
+            "ErrClosed", "ErrExist", "ErrInvalid", "ErrNotExist", "ErrPermission", "PathError",
         ],
         "log": [
             "Default", "Fatal", "Fatalf", "Fatalln", "Flags", "LUTC", "Ldate", "Llongfile",
@@ -60,11 +64,10 @@ enum GoSourceLibraryText {
             "SplitHostPort", "TCPAddr", "TCPConn", "TCPListener", "UnknownNetworkError",
             "checkNetwork", "codeAddrInUse", "codeClosed", "codeEOF", "codeError", "codeNoAddress",
             "codeRefused", "codeReset", "codeTimedOut", "codeTimeout", "codeUnavailable", "conn",
-            "dialTCP", "errAddrInUse", "errConnRefused", "errConnReset", "errConnTimedOut",
-            "errInvalid", "errNetClosing", "errNoAddress", "errUnavailable", "hexDigit", "hexValue",
-            "hostIPv4", "indexByte", "isConnError", "isZeros", "lastIndexByte", "listenTCP",
-            "netFD", "newTCPConn", "parseIPv4", "parseIPv6", "parsePort", "readDeadline",
-            "resolveTCPAddr", "temporary", "timeout", "writeDeadline",
+            "dialTCP", "errNetClosing", "hexDigit", "hexValue", "hostIPv4", "indexByte",
+            "isConnError", "isZeros", "lastIndexByte", "listenTCP", "netFD", "newTCPConn",
+            "parseIPv4", "parseIPv6", "parsePort", "readDeadline", "resolveTCPAddr", "temporary",
+            "timeout", "writeDeadline",
         ],
         "net/http": [
             "CanonicalHeaderKey", "Client", "ConnState", "DefaultClient", "DefaultMaxHeaderBytes",
@@ -130,8 +133,14 @@ enum GoSourceLibraryText {
             "resolvePath", "splitHostPort", "unescape", "validOptionalPort", "validUserinfo",
         ],
         "os": [
-            "ErrDeadlineExceeded", "NewSyscallError", "SyscallError", "deadlineExceededError",
-            "timeout",
+            "Create", "ErrClosed", "ErrDeadlineExceeded", "ErrExist", "ErrInvalid", "ErrNotExist",
+            "ErrPermission", "IsExist", "IsNotExist", "IsPermission", "IsTimeout", "LinkError",
+            "Mkdir", "NewSyscallError", "Open", "OpenFile", "PathError", "ReadFile", "Remove",
+            "Rename", "SyscallError", "WriteFile", "deadlineExceededError", "errno", "pathError",
+            "timeout", "underlyingError", "underlyingErrorIs",
+        ],
+        "runtime": [
+            "Error",
         ],
         "sort": [
             "Find", "IntSlice", "Interface", "IntsAreSorted", "IsSorted", "Reverse", "Search",
@@ -170,6 +179,12 @@ enum GoSourceLibraryText {
             "StoreUint32", "StoreUint64", "SwapInt32", "SwapInt64", "SwapUint32", "SwapUint64",
             "Uint32", "Uint64", "Value", "lock", "sameType",
         ],
+        "syscall": [
+            "EACCES", "EADDRINUSE", "EADDRNOTAVAIL", "EAGAIN", "EBADF", "ECHILD", "ECONNREFUSED",
+            "ECONNRESET", "EEXIST", "EINTR", "EINVAL", "EIO", "EISDIR", "EMFILE", "ENETUNREACH",
+            "ENODEV", "ENOENT", "ENOSPC", "ENOSYS", "ENOTCONN", "ENOTDIR", "ENOTEMPTY", "ENOTSUP",
+            "EOPNOTSUPP", "EPERM", "EPIPE", "EROFS", "ETIMEDOUT", "EWOULDBLOCK", "Errno", "itoa",
+        ],
         "time": [
             "ANSIC", "April", "August", "DateOnly", "DateTime", "December", "February", "Friday",
             "January", "July", "June", "Kitchen", "Layout", "Local", "March", "May", "Monday",
@@ -187,16 +202,19 @@ enum GoSourceLibraryText {
         case "bytes": return bytes
         case "context": return context
         case "io": return io
+        case "io/fs": return ioFs
         case "log": return log
         case "net": return net
         case "net/http": return netHttp
         case "net/url": return netUrl
         case "os": return os
+        case "runtime": return runtime
         case "sort": return sort
         case "strconv": return strconv
         case "strings": return strings
         case "sync": return sync
         case "sync/atomic": return syncAtomic
+        case "syscall": return syscall
         case "time": return time
         default: return nil
         }
@@ -2990,6 +3008,9 @@ var ErrNoProgress = errors.New("multiple Read calls return no data or error")
 // ErrUnexpectedEOF is the end of the data where more was promised.
 var ErrUnexpectedEOF = errors.New("unexpected EOF")
 
+// ErrClosedPipe is the error of a read or a write on a closed pipe.
+var ErrClosedPipe = errors.New("io: read/write on closed pipe")
+
 // ErrShortBuffer is what ReadAtLeast says of a buffer smaller than the
 // least it was asked to read.
 var ErrShortBuffer = errors.New("short buffer")
@@ -3113,6 +3134,51 @@ func (d discard) WriteString(s string) (int, error) { return len(s), nil }
 
 // Discard accepts every write and keeps nothing.
 var Discard Writer = discard{}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let ioFs: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/io/fs/fs.go",
+            text: #"""
+// Package fs is the part of io/fs that the errors of the file system need:
+// the errors that say what kind of failure one is, and PathError, which
+// says on what path it happened.
+package fs
+
+import "errors"
+
+// The kinds of failure of the file system. errors.Is(err, ErrNotExist)
+// asks whether err is one: a *PathError holds a syscall.Errno, whose Is
+// method answers for these.
+var (
+	ErrInvalid    = errors.New("invalid argument")
+	ErrPermission = errors.New("permission denied")
+	ErrExist      = errors.New("file already exists")
+	ErrNotExist   = errors.New("file does not exist")
+	ErrClosed     = errors.New("file already closed")
+)
+
+// A PathError is a failed operation on a path: what was done, to which
+// path, and why.
+type PathError struct {
+	Op   string
+	Path string
+	Err  error
+}
+
+func (e *PathError) Error() string { return e.Op + " " + e.Path + ": " + e.Err.Error() }
+
+func (e *PathError) Unwrap() error { return e.Err }
+
+// Timeout reports whether the error is a timeout, as its Err says.
+func (e *PathError) Timeout() bool {
+	t, ok := e.Err.(interface{ Timeout() bool })
+	return ok && t.Timeout()
+}
 
 """#),
     ]
@@ -3881,6 +3947,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -4046,7 +4113,7 @@ func (e *OpError) Temporary() bool {
 
 func isConnError(err error) bool {
 	if se, ok := err.(*os.SyscallError); ok {
-		return se.Err == errConnReset
+		return se.Err == syscall.ECONNRESET
 	}
 	return false
 }
@@ -4124,16 +4191,6 @@ const (
 	codeNoAddress   = 9
 )
 
-var (
-	errConnRefused  = errors.New("connection refused")
-	errAddrInUse    = errors.New("address already in use")
-	errUnavailable  = errors.New("network is unreachable")
-	errConnReset    = errors.New("connection reset by peer")
-	errConnTimedOut = errors.New("connection timed out")
-	errInvalid      = errors.New("invalid argument")
-	errNoAddress    = errors.New("can't assign requested address")
-)
-
 // codeError is the error the natives' code stands for, from the system
 // call `call` when it is one.
 func codeError(call string, code int) error {
@@ -4143,17 +4200,17 @@ func codeError(call string, code int) error {
 	case codeClosed:
 		return ErrClosed
 	case codeRefused:
-		return os.NewSyscallError(call, errConnRefused)
+		return os.NewSyscallError(call, syscall.ECONNREFUSED)
 	case codeAddrInUse:
-		return os.NewSyscallError(call, errAddrInUse)
+		return os.NewSyscallError(call, syscall.EADDRINUSE)
 	case codeReset:
-		return os.NewSyscallError(call, errConnReset)
+		return os.NewSyscallError(call, syscall.ECONNRESET)
 	case codeTimedOut:
-		return os.NewSyscallError(call, errConnTimedOut)
+		return os.NewSyscallError(call, syscall.ETIMEDOUT)
 	case codeNoAddress:
-		return os.NewSyscallError(call, errNoAddress)
+		return os.NewSyscallError(call, syscall.EADDRNOTAVAIL)
 	}
-	return os.NewSyscallError(call, errUnavailable)
+	return os.NewSyscallError(call, syscall.ENETUNREACH)
 }
 
 // A netFD is a descriptor of the kernel with the addresses of its ends.
@@ -4190,7 +4247,7 @@ func (c *TCPConn) opError(op string, err error) error {
 // Read implements the Conn Read method.
 func (c *TCPConn) Read(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, errInvalid
+		return 0, syscall.EINVAL
 	}
 	if c.fd.closed {
 		return 0, c.opError("read", ErrClosed)
@@ -4208,7 +4265,7 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 // Write implements the Conn Write method.
 func (c *TCPConn) Write(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, errInvalid
+		return 0, syscall.EINVAL
 	}
 	if c.fd.closed {
 		return 0, c.opError("write", ErrClosed)
@@ -4223,7 +4280,7 @@ func (c *TCPConn) Write(b []byte) (int, error) {
 // Close closes the connection.
 func (c *TCPConn) Close() error {
 	if !c.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if c.fd.closed {
 		return c.opError("close", ErrClosed)
@@ -4272,7 +4329,7 @@ func (c *TCPConn) SetWriteDeadline(t time.Time) error {
 
 func (c *TCPConn) setDeadline(which int, t time.Time) error {
 	if !c.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if c.fd.closed {
 		return c.opError("set", ErrClosed)
@@ -4300,7 +4357,7 @@ func (l *TCPListener) opError(op string, err error) error {
 // AcceptTCP accepts the next incoming call and returns the new connection.
 func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
 	if !l.ok() {
-		return nil, errInvalid
+		return nil, syscall.EINVAL
 	}
 	if l.fd.closed {
 		return nil, l.opError("accept", ErrClosed)
@@ -4327,7 +4384,7 @@ func (l *TCPListener) Accept() (Conn, error) {
 // Close stops listening on the TCP address.
 func (l *TCPListener) Close() error {
 	if !l.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if l.fd.closed {
 		return l.opError("close", ErrClosed)
@@ -4413,7 +4470,7 @@ func listenTCP(network, address string) (*TCPListener, error) {
 	if len(addr.IP) != 0 && !addr.IP.IsUnspecified() {
 		v4, ok := hostIPv4(addr.IP)
 		if !ok {
-			return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: os.NewSyscallError("bind", errNoAddress)}
+			return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: os.NewSyscallError("bind", syscall.EADDRNOTAVAIL)}
 		}
 		ip = v4
 		listening = ParseIP(v4).To4()
@@ -10693,6 +10750,181 @@ func (e *deadlineExceededError) Temporary() bool { return true }
 
 """#),
         GoSourceFile(
+            path: "$GOROOT/src/os/error.go",
+            text: #"""
+// Package os is the part of os that is written in Go: its errors, and the
+// functions of the file system, which give them. The files themselves, the
+// standard streams, the environment, and the process belong to the run-time
+// library, which this file imports under the same path.
+package os
+
+import (
+	"errors"
+	"io/fs"
+	"syscall"
+)
+
+// The kinds of failure of the file system, which are those of io/fs.
+var (
+	ErrInvalid    = fs.ErrInvalid
+	ErrPermission = fs.ErrPermission
+	ErrExist      = fs.ErrExist
+	ErrNotExist   = fs.ErrNotExist
+	ErrClosed     = fs.ErrClosed
+)
+
+// PathError is the error of an operation on a path.
+type PathError = fs.PathError
+
+// A LinkError is a failed operation on two paths, such as a rename.
+type LinkError struct {
+	Op  string
+	Old string
+	New string
+	Err error
+}
+
+func (e *LinkError) Error() string { return e.Op + " " + e.Old + " " + e.New + ": " + e.Err.Error() }
+
+func (e *LinkError) Unwrap() error { return e.Err }
+
+// IsExist reports whether err says that a file already exists. Unlike
+// errors.Is, it looks only inside a *PathError or a *LinkError.
+func IsExist(err error) bool { return underlyingErrorIs(err, ErrExist) }
+
+// IsNotExist reports whether err says that a file does not exist.
+func IsNotExist(err error) bool { return underlyingErrorIs(err, ErrNotExist) }
+
+// IsPermission reports whether err says that permission was denied.
+func IsPermission(err error) bool { return underlyingErrorIs(err, ErrPermission) }
+
+// IsTimeout reports whether err says that an operation ran out of time.
+func IsTimeout(err error) bool {
+	t, ok := underlyingError(err).(interface{ Timeout() bool })
+	return ok && t.Timeout()
+}
+
+func underlyingErrorIs(err, target error) bool {
+	err = underlyingError(err)
+	if err == target {
+		return true
+	}
+	e, ok := err.(syscall.Errno)
+	return ok && e.Is(target)
+}
+
+// underlyingError is the error a *PathError or a *LinkError holds, or err.
+func underlyingError(err error) error {
+	switch err := err.(type) {
+	case *PathError:
+		return err.Err
+	case *LinkError:
+		return err.Err
+	}
+	return err
+}
+
+// errno is the error whose text is why: the syscall.Errno that says it,
+// ErrClosed for a file used after Close, or a new error.
+func errno(why string) error {
+	if why == ErrClosed.Error() {
+		return ErrClosed
+	}
+	for e := syscall.Errno(1); e < 0x86; e++ {
+		if e.Error() == why {
+			return e
+		}
+	}
+	return errors.New(why)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/os/file.go",
+            text: #"""
+package os
+
+import (
+	"os"
+	"strings"
+)
+
+// The files are opened, read, and changed by natives of the run-time
+// library, which fail with the text of Go's error alone: the operation, the
+// path, and why. These functions give what a native gave and, for its
+// error, Go's *PathError or *LinkError, holding the syscall.Errno that the
+// text names.
+
+// pathError is the *PathError of a failure on name that a native reported
+// as failure; nil when there is none.
+func pathError(name string, failure error) error {
+	if failure == nil {
+		return nil
+	}
+	op, rest, ok := strings.Cut(failure.Error(), " ")
+	why, found := strings.CutPrefix(rest, name+": ")
+	if !ok || !found {
+		return failure
+	}
+	return &PathError{Op: op, Path: name, Err: errno(why)}
+}
+
+// Open opens the named file for reading.
+func Open(name string) (*os.File, error) {
+	f, err := native.Open(name)
+	return f, pathError(name, err)
+}
+
+// Create creates or truncates the named file, open for reading and writing.
+func Create(name string) (*os.File, error) {
+	f, err := native.Create(name)
+	return f, pathError(name, err)
+}
+
+// OpenFile opens the named file with the flags (O_RDONLY and the like) and,
+// when it creates the file, the permissions perm.
+func OpenFile(name string, flag int, perm int) (*os.File, error) {
+	f, err := native.OpenFile(name, flag, perm)
+	return f, pathError(name, err)
+}
+
+// ReadFile reads the named file and returns what it holds.
+func ReadFile(name string) ([]byte, error) {
+	data, err := native.ReadFile(name)
+	return data, pathError(name, err)
+}
+
+// WriteFile writes data to the named file, creating it with perm if
+// needed and truncating it otherwise.
+func WriteFile(name string, data []byte, perm int) error {
+	return pathError(name, native.WriteFile(name, data, perm))
+}
+
+// Remove removes the named file or empty directory.
+func Remove(name string) error {
+	return pathError(name, native.Remove(name))
+}
+
+// Mkdir creates a directory with the permissions perm.
+func Mkdir(name string, perm int) error {
+	return pathError(name, native.Mkdir(name, perm))
+}
+
+// Rename renames oldpath to newpath, replacing a file there.
+func Rename(oldpath, newpath string) error {
+	failure := native.Rename(oldpath, newpath)
+	if failure == nil {
+		return nil
+	}
+	why, ok := strings.CutPrefix(failure.Error(), "rename "+oldpath+" "+newpath+": ")
+	if !ok {
+		return failure
+	}
+	return &LinkError{Op: "rename", Old: oldpath, New: newpath, Err: errno(why)}
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/os/syscall.go",
             text: #"""
 package os
@@ -10725,6 +10957,28 @@ func NewSyscallError(syscall string, err error) error {
 		return nil
 	}
 	return &SyscallError{syscall, err}
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let runtime: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/runtime/error.go",
+            text: #"""
+// Package runtime is the part of runtime that is written in Go: the
+// interface of its errors. The errors themselves are made by the VM, which
+// gives them both methods; GC and the like belong to the run-time library.
+package runtime
+
+// An Error is a run-time error: an index out of range, a nil dereference, a
+// failed type assertion, and the like. RuntimeError does nothing; it tells
+// these errors from others.
+type Error interface {
+	error
+	RuntimeError()
 }
 
 """#),
@@ -13505,6 +13759,157 @@ func (v *Value) CompareAndSwap(old, val any) bool {
 	}
 	lock.Unlock()
 	return swapped
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let syscall: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/syscall/syscall.go",
+            text: #"""
+// Package syscall is the part of syscall that the errors of the file
+// system need: Errno, the number of a failed system call, with Linux's
+// numbers and texts, which the run-time library reports.
+package syscall
+
+import "io/fs"
+
+// An Errno is the error number of a failed system call.
+type Errno uintptr
+
+// The error numbers the run-time library reports, as Linux numbers them.
+const (
+	EPERM         Errno = 0x1
+	ENOENT        Errno = 0x2
+	EINTR         Errno = 0x4
+	EIO           Errno = 0x5
+	ECHILD        Errno = 0xa
+	EAGAIN        Errno = 0xb
+	EBADF         Errno = 0x9
+	EACCES        Errno = 0xd
+	EEXIST        Errno = 0x11
+	ENODEV        Errno = 0x13
+	ENOTDIR       Errno = 0x14
+	EISDIR        Errno = 0x15
+	EINVAL        Errno = 0x16
+	EMFILE        Errno = 0x18
+	ENOSPC        Errno = 0x1c
+	EROFS         Errno = 0x1e
+	EPIPE         Errno = 0x20
+	ENOSYS        Errno = 0x26
+	ENOTEMPTY     Errno = 0x27
+	ENOTSUP       Errno = 0x5f
+	EADDRINUSE    Errno = 0x62
+	EADDRNOTAVAIL Errno = 0x63
+	ENETUNREACH   Errno = 0x65
+	ECONNRESET    Errno = 0x68
+	ENOTCONN      Errno = 0x6b
+	ETIMEDOUT     Errno = 0x6e
+	ECONNREFUSED  Errno = 0x6f
+)
+
+// EWOULDBLOCK is EAGAIN, and EOPNOTSUPP ENOTSUP, as on Linux.
+const (
+	EWOULDBLOCK Errno = EAGAIN
+	EOPNOTSUPP  Errno = ENOTSUP
+)
+
+func (e Errno) Error() string {
+	switch e {
+	case EPERM:
+		return "operation not permitted"
+	case ENOENT:
+		return "no such file or directory"
+	case EINTR:
+		return "interrupted system call"
+	case EIO:
+		return "input/output error"
+	case EBADF:
+		return "bad file descriptor"
+	case ECHILD:
+		return "no child processes"
+	case EAGAIN:
+		return "resource temporarily unavailable"
+	case EACCES:
+		return "permission denied"
+	case EEXIST:
+		return "file exists"
+	case ENODEV:
+		return "no such device"
+	case ENOTDIR:
+		return "not a directory"
+	case EISDIR:
+		return "is a directory"
+	case EINVAL:
+		return "invalid argument"
+	case EMFILE:
+		return "too many open files"
+	case ENOSPC:
+		return "no space left on device"
+	case EROFS:
+		return "read-only file system"
+	case EPIPE:
+		return "broken pipe"
+	case ENOSYS:
+		return "function not implemented"
+	case ENOTEMPTY:
+		return "directory not empty"
+	case ENOTSUP:
+		return "operation not supported"
+	case EADDRINUSE:
+		return "address already in use"
+	case EADDRNOTAVAIL:
+		// The text Go reports for a bind to an address no interface has.
+		return "can't assign requested address"
+	case ENETUNREACH:
+		return "network is unreachable"
+	case ECONNREFUSED:
+		return "connection refused"
+	case ECONNRESET:
+		return "connection reset by peer"
+	case ENOTCONN:
+		return "transport endpoint is not connected"
+	case ETIMEDOUT:
+		return "connection timed out"
+	}
+	return "errno " + itoa(int(e))
+}
+
+// itoa is the decimal text of n.
+func itoa(n int) string {
+	if n < 0 {
+		return "-" + itoa(-n)
+	}
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return itoa(n/10) + string(rune('0'+n%10))
+}
+
+// Is answers errors.Is for the kinds of failure of io/fs.
+func (e Errno) Is(target error) bool {
+	switch target {
+	case fs.ErrPermission:
+		return e == EACCES || e == EPERM
+	case fs.ErrExist:
+		return e == EEXIST || e == ENOTEMPTY
+	case fs.ErrNotExist:
+		return e == ENOENT
+	}
+	return false
+}
+
+// Temporary reports whether a later try may succeed.
+func (e Errno) Temporary() bool {
+	return e == EINTR || e == EMFILE || e == ECONNRESET || e.Timeout()
+}
+
+// Timeout reports whether the call ran out of time.
+func (e Errno) Timeout() bool {
+	return e == EAGAIN || e == ETIMEDOUT
 }
 
 """#),

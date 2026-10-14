@@ -78,6 +78,43 @@ struct GoNetServerTests {
         #expect(difference == nil, "\(difference ?? "")")
     }
 
+    /// The errors of `net` and of `os` wrap the same `syscall.Errno`
+    /// values, so `errors.Is` matches a connection refused and a missing
+    /// file to the numbers and sentinels Go matches them to.
+    @Test func networkAndFileErrorsWrapSyscallNumbers() throws {
+        try expectGo(
+            #"""
+            package main
+
+            import (
+            	"errors"
+            	"fmt"
+            	"net"
+            	"os"
+            	"syscall"
+            )
+
+            func main() {
+            	_, err := net.Dial("tcp", "127.0.0.1:1")
+            	var se *os.SyscallError
+            	fmt.Println(err, errors.As(err, &se), errors.Is(err, syscall.ECONNREFUSED))
+            	_, err = os.Open("nope")
+            	fmt.Println(err, os.IsNotExist(err), errors.Is(err, os.ErrNotExist))
+            	var pe *os.PathError
+            	if errors.As(err, &pe) {
+            		fmt.Println(pe.Op, pe.Path, pe.Err == syscall.ENOENT)
+            	}
+            }
+
+            """#,
+            #"""
+            dial tcp 127.0.0.1:1: connect: connection refused true true
+            open nope: no such file or directory true true
+            open nope true
+
+            """#)
+    }
+
     /// An echo server that closes a connection idle for 200 ms, through a
     /// listener and connections of the program that count bytes; a client
     /// that talks and then goes quiet, one whose own deadline passes and

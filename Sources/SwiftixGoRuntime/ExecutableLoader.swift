@@ -63,7 +63,9 @@ public enum GoExecutableLoader {
             // Cooperative: the program yields to the event loop every quantum
             // and parks on sleep, input, and full pipes, so it has no total
             // instruction cap; the process exits when the run completes.
-            GoVirtualMachine(resourceLimits: processResourceLimits).startProcess(
+            var machine = GoVirtualMachine(resourceLimits: processResourceLimits)
+            machine.tracesPanics = true
+            machine.startProcess(
                 executable,
                 processContext: child,
                 arguments: arguments,
@@ -72,11 +74,13 @@ public enum GoExecutableLoader {
                     case .success(let result):
                         child.exit(result.exitCode)
                     case .failure(let error):
-                        writeError(child, "\(path): \(String(describing: error))\n")
-                        // A Go program that panics exits with status 2.
+                        // A Go program that panics exits with status 2, and
+                        // says so as Go's does, without its name before.
                         if case GoRuntimeError.panicError = error {
+                            writeError(child, "\(String(describing: error))\n")
                             child.exit(2)
                         } else {
+                            writeError(child, "\(path): \(String(describing: error))\n")
                             child.exit(1)
                         }
                     }

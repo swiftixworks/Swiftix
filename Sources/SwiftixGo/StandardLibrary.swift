@@ -34,6 +34,7 @@ enum GoStandardLibrary {
         "net/url",
         "log", "sync/atomic",
         "bufio", "bytes",
+        "io/fs", "syscall",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {

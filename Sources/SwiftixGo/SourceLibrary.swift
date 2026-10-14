@@ -137,6 +137,7 @@ enum GoSourceLibrary {
         case "strconv": return GoNumberLibrary.parsingFunction(name)
         case "time": return GoTimeLibrary.textNative(name)
         case "net": return GoNetLibrary.textNative(name)
+        case "os": return GoStandardLibrary.fileSystemNative(name)
         default: return nil
         }
     }

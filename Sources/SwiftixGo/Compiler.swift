@@ -1584,16 +1584,17 @@ struct IRLowerer {
             scopes[0][capture.name] = LoweredBinding(register: local, type: capture.type)
         }
         try lower(function.body, createsScope: false)
-        if function.resultTypes.isEmpty, operations.last != .return {
+        if function.resultTypes.isEmpty, lastOperation != .return {
             operations.append(.return)
         }
-        let lowered = GoIRFunction(
+        var lowered = GoIRFunction(
             name: compiledName,
             parameterCount: captures.count + function.parameters.count
                 + (function.receiver == nil ? 0 : 1),
             returnCount: function.resultTypes.count,
             registerCount: nextRegister,
             operations: operations)
+        lowered.trace = GoFunctionTrace(function, compiledName: compiledName, isLiteral: isLiteralBody)
         if !isLiteralBody { try lowerPendingLiterals() }
         return lowered
     }
@@ -2022,6 +2023,7 @@ struct IRLowerer {
         // one function, an unoptimized build keeps the locals of every
         // case in every frame, and each nested statement cost the stack of
         // all of them: four levels of nesting filled a 512 KB thread.
+        markLine(of: statement)
         switch statement {
         case .declaration: try lowerDeclaration(statement)
         case .assignment: try lowerAssignment(statement)
@@ -6114,7 +6116,7 @@ private enum BytecodeEmitter {
     }
 
     static func emitInstructions(_ program: GoIRProgram) -> GoExecutable {
-        GoExecutable(
+        var executable = GoExecutable(
             entryPoint: program.entryPoint,
             initializers: program.initializers,
             globalCount: program.globalCount,
@@ -6133,6 +6135,9 @@ private enum BytecodeEmitter {
                     rootLocalIndices: Array(0..<function.registerCount),
                     safepointProgramCounters: Array(0...instructions.count))
             })
+        executable.sourceLines = GoFunctionTrace.sourceLines(
+            of: program, instructionCount: instructionCount(for:))
+        return executable
     }
 
     static func labelOffsets(for operations: [GoIROperation]) -> [Int: Int] {

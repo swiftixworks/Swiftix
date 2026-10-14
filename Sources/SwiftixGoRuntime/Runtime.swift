@@ -520,6 +520,9 @@ public struct GoExecutable: Sendable, Equatable {
     public let initializers: [String]
     public let globalCount: Int
     public let functions: [GoBytecodeFunction]
+    /// Where the functions came from, for the trace of a panic. Not part of
+    /// the image, and not of what makes two executables equal.
+    public var sourceLines = GoSourceLines()
 
     public init(
         entryPoint: String,
@@ -619,6 +622,10 @@ public struct GoVirtualMachine: Sendable {
     public let selectSeed: UInt64
     public let garbageCollectionThreshold: Int
     public let resourceLimits: GoRuntimeResourceLimits
+    /// Whether an unrecovered panic is reported with Go's goroutine trace
+    /// after its first line, as `go run` and a program run as a process
+    /// print it. Off, the error says only what panicked.
+    public var tracesPanics = false
 
     public init(
         maximumInstructions: Int = 1_000_000,
@@ -877,6 +884,25 @@ public struct GoVirtualMachine: Sendable {
         // is handed to a later open.
         var openFiles: [Int64: GoFiles.OpenFile] = [:]
         var nextFileHandle = GoFiles.firstHandle
+        // The frames of each goroutine when its latest panic began, for the
+        // trace of one nobody recovers. Kept only when traces are asked for.
+        var panicTraces: [Int: [GoTraceFrame]] = [:]
+        /// Notes the frames of the current goroutine as a panic begins.
+        func notePanicBegins() {
+            guard tracesPanics else { return }
+            panicTraces[vm.currentGoroutineID] = vm.frames.map {
+                GoTraceFrame(function: $0.function, offset: max(0, $0.programCounter - 1))
+            }
+        }
+        /// Go's goroutine trace of the current goroutine's latest panic, or
+        /// nothing when traces are not asked for.
+        func panicTrace() -> String {
+            guard tracesPanics else { return "" }
+            return GoTraceback.text(
+                goroutine: vm.currentGoroutineID,
+                frames: panicTraces[vm.currentGoroutineID] ?? [],
+                lines: executable.sourceLines)
+        }
         // Who is parked on each `sync.RWMutex` and `sync.Cond`, by where
         // the struct is.
         var lockWaiters: [GoAddress: GoLockWaiters] = [:]
@@ -2021,6 +2047,14 @@ public struct GoVirtualMachine: Sendable {
                     break
                 }
                 var bytes: [UInt8] = []
+                // Go opens a directory and fails to read it.
+                if processContext.stat(path)?.isDirectory == true {
+                    vm.stack.append(contentsOf: [
+                        .nilValue,
+                        errorValue("read \(path): \(GoFiles.message(for: SyscallError.isADirectory))"),
+                    ])
+                    break
+                }
                 do {
                     let descriptor = try processContext.openFile(path, access: .readOnly)
                     defer { try? processContext.closeFile(descriptor) }
@@ -2038,7 +2072,7 @@ public struct GoVirtualMachine: Sendable {
                     throw error
                 } catch {
                     vm.stack.append(contentsOf: [
-                        .nilValue, errorValue("open \(path): \(String(describing: error))"),
+                        .nilValue, errorValue("open \(path): \(GoFiles.message(for: error))"),
                     ])
                     break
                 }
@@ -2081,7 +2115,7 @@ public struct GoVirtualMachine: Sendable {
                         offset += written
                     }
                 } catch {
-                    failure = "open \(path): \(String(describing: error))"
+                    failure = "open \(path): \(GoFiles.message(for: error))"
                 }
                 vm.stack.append(errorValue(failure))
             }
@@ -2166,7 +2200,8 @@ public struct GoVirtualMachine: Sendable {
                     report.describeFirst(as: try panicText(record.value))
                 }
             }
-            throw GoRuntimeError.panicError(report.lines.joined(separator: "\n\tpanic: "))
+            throw GoRuntimeError.panicError(
+                report.lines.joined(separator: "\n\tpanic: ") + panicTrace())
         }
 
         /// What Go prints after `panic: ` for a value no method describes:
@@ -2976,10 +3011,7 @@ public struct GoVirtualMachine: Sendable {
                 if target.implementers.contains(GoLibraryMethods.refusalMark + boxed.typeName) {
                     return "Unwrap"
                 }
-                let provided = GoErrors.methods(ofLibraryType: boxed.typeName)
-                return target.methods.first {
-                    !provided.contains($0.name) || $0.parameterCount != 0 || $0.resultCount != 1
-                }?.name
+                return target.methods.first { !GoErrors.provides(boxed.typeName, $0) }?.name
             }
             guard let first = target.methods.first else { return nil }
             guard let owner = methodTarget(value)?.owner else { return first.name }
@@ -5318,6 +5350,7 @@ public struct GoVirtualMachine: Sendable {
                     return try runInstructions()
                 } catch let panic as GoRuntimePanic {
                     guard !vm.frames.isEmpty else { throw GoRuntimeError.panicError(panic.message) }
+                    notePanicBegins()
                     vm.frames[vm.frames.count - 1].pendingExit = .panicking(panic.value)
                 }
             }
@@ -5483,6 +5516,7 @@ public struct GoVirtualMachine: Sendable {
                             break executionLoop
                         }
                         if vm.currentGoroutineID != 0 {
+                            if !panicTraces.isEmpty { panicTraces[vm.currentGoroutineID] = nil }
                             try resumeAfterGoroutineCompletion()
                             continue
                         }
@@ -6163,6 +6197,7 @@ public struct GoVirtualMachine: Sendable {
                     activeDeferredCallCount += 1
                 case .panic:
                     let value = vm.stack.popLast() ?? .string("nil")
+                    notePanicBegins()
                     vm.frames[frameIndex].pendingExit = .panicking(value)
                 case .recover:
                     guard vm.frames[frameIndex].isDeferredCall, frameIndex > 0,
@@ -7392,6 +7427,13 @@ public struct GoVirtualMachine: Sendable {
                     guard let functionName = candidates.first(where: { functions[$0] != nil }),
                         let function = functions[functionName]
                     else {
+                        // `RuntimeError` of an error of the runtime, which
+                        // does nothing.
+                        if methodName == "RuntimeError", arguments.isEmpty,
+                            GoErrors.isRuntimeErrorType(concreteTypeName)
+                        {
+                            break
+                        }
                         throw GoRuntimeError.missingFunction(concreteTypeName + "." + methodName)
                     }
                     guard vm.frames.count < maximumCallDepth else {

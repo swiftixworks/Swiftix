@@ -63,7 +63,9 @@ extension ProcessContext: GoToolContext {
     ) throws -> Int32 {
         // `go run` and `go test` bound no CPU time, as Go's do: a program
         // that loops forever runs until it is interrupted.
-        try GoVirtualMachine(maximumInstructions: .max).run(
+        var machine = GoVirtualMachine(maximumInstructions: .max)
+        machine.tracesPanics = true
+        return try machine.run(
             executable,
             eventLoop: eventLoop,
             processContext: self,

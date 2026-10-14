@@ -280,7 +280,9 @@ public final class HostGoToolContext: GoToolContext {
             do {
                 // `go run` and `go test` bound no CPU time, as Go's do: a program
                 // that loops forever runs until it is interrupted.
-                let code = try GoVirtualMachine(maximumInstructions: .max).run(
+                var machine = GoVirtualMachine(maximumInstructions: .max)
+                machine.tracesPanics = true
+                let code = try machine.run(
                     executable,
                     eventLoop: loop,
                     processContext: context,

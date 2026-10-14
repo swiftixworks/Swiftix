@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -176,7 +177,7 @@ func (e *OpError) Temporary() bool {
 
 func isConnError(err error) bool {
 	if se, ok := err.(*os.SyscallError); ok {
-		return se.Err == errConnReset
+		return se.Err == syscall.ECONNRESET
 	}
 	return false
 }
@@ -254,16 +255,6 @@ const (
 	codeNoAddress   = 9
 )
 
-var (
-	errConnRefused  = errors.New("connection refused")
-	errAddrInUse    = errors.New("address already in use")
-	errUnavailable  = errors.New("network is unreachable")
-	errConnReset    = errors.New("connection reset by peer")
-	errConnTimedOut = errors.New("connection timed out")
-	errInvalid      = errors.New("invalid argument")
-	errNoAddress    = errors.New("can't assign requested address")
-)
-
 // codeError is the error the natives' code stands for, from the system
 // call `call` when it is one.
 func codeError(call string, code int) error {
@@ -273,17 +264,17 @@ func codeError(call string, code int) error {
 	case codeClosed:
 		return ErrClosed
 	case codeRefused:
-		return os.NewSyscallError(call, errConnRefused)
+		return os.NewSyscallError(call, syscall.ECONNREFUSED)
 	case codeAddrInUse:
-		return os.NewSyscallError(call, errAddrInUse)
+		return os.NewSyscallError(call, syscall.EADDRINUSE)
 	case codeReset:
-		return os.NewSyscallError(call, errConnReset)
+		return os.NewSyscallError(call, syscall.ECONNRESET)
 	case codeTimedOut:
-		return os.NewSyscallError(call, errConnTimedOut)
+		return os.NewSyscallError(call, syscall.ETIMEDOUT)
 	case codeNoAddress:
-		return os.NewSyscallError(call, errNoAddress)
+		return os.NewSyscallError(call, syscall.EADDRNOTAVAIL)
 	}
-	return os.NewSyscallError(call, errUnavailable)
+	return os.NewSyscallError(call, syscall.ENETUNREACH)
 }
 
 // A netFD is a descriptor of the kernel with the addresses of its ends.
@@ -320,7 +311,7 @@ func (c *TCPConn) opError(op string, err error) error {
 // Read implements the Conn Read method.
 func (c *TCPConn) Read(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, errInvalid
+		return 0, syscall.EINVAL
 	}
 	if c.fd.closed {
 		return 0, c.opError("read", ErrClosed)
@@ -338,7 +329,7 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 // Write implements the Conn Write method.
 func (c *TCPConn) Write(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, errInvalid
+		return 0, syscall.EINVAL
 	}
 	if c.fd.closed {
 		return 0, c.opError("write", ErrClosed)
@@ -353,7 +344,7 @@ func (c *TCPConn) Write(b []byte) (int, error) {
 // Close closes the connection.
 func (c *TCPConn) Close() error {
 	if !c.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if c.fd.closed {
 		return c.opError("close", ErrClosed)
@@ -402,7 +393,7 @@ func (c *TCPConn) SetWriteDeadline(t time.Time) error {
 
 func (c *TCPConn) setDeadline(which int, t time.Time) error {
 	if !c.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if c.fd.closed {
 		return c.opError("set", ErrClosed)
@@ -430,7 +421,7 @@ func (l *TCPListener) opError(op string, err error) error {
 // AcceptTCP accepts the next incoming call and returns the new connection.
 func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
 	if !l.ok() {
-		return nil, errInvalid
+		return nil, syscall.EINVAL
 	}
 	if l.fd.closed {
 		return nil, l.opError("accept", ErrClosed)
@@ -457,7 +448,7 @@ func (l *TCPListener) Accept() (Conn, error) {
 // Close stops listening on the TCP address.
 func (l *TCPListener) Close() error {
 	if !l.ok() {
-		return errInvalid
+		return syscall.EINVAL
 	}
 	if l.fd.closed {
 		return l.opError("close", ErrClosed)
@@ -543,7 +534,7 @@ func listenTCP(network, address string) (*TCPListener, error) {
 	if len(addr.IP) != 0 && !addr.IP.IsUnspecified() {
 		v4, ok := hostIPv4(addr.IP)
 		if !ok {
-			return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: os.NewSyscallError("bind", errNoAddress)}
+			return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: os.NewSyscallError("bind", syscall.EADDRNOTAVAIL)}
 		}
 		ip = v4
 		listening = ParseIP(v4).To4()

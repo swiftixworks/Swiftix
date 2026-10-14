@@ -64,7 +64,9 @@ enum GoBuildCache {
                 _ = context.remove(path)
                 return nil
             }
-            return try GoExecutableImage.decode(bytes)
+            var executable = try GoExecutableImage.decode(bytes)
+            executable.sourceLines = loadSourceLines(context, path: path)
+            return executable
         } catch {
             _ = context.remove(path)
             return nil
@@ -110,6 +112,45 @@ enum GoBuildCache {
         } catch {
             throw GoBuildCacheError.cannotWrite(path, String(describing: error))
         }
+        storeSourceLines(context, executable.sourceLines, path: path)
+    }
+
+    /// Where the source lines of the image at `path` are kept: they are not
+    /// part of the image (see `GoSourceLines`).
+    private static func sourceLinesPath(_ path: String) -> String { path + ".lines" }
+
+    /// Keeps `lines` beside the image. A table that cannot be written only
+    /// costs a later trace its lines.
+    private static func storeSourceLines(
+        _ context: any GoToolContext, _ lines: GoSourceLines, path: String
+    ) {
+        let linesPath = sourceLinesPath(path)
+        guard !lines.isEmpty else {
+            _ = context.remove(linesPath)
+            return
+        }
+        guard
+            let descriptor = try? context.openFile(
+                linesPath, flags: [.create, .truncate], access: .writeOnly)
+        else { return }
+        defer { try? context.closeFile(descriptor) }
+        _ = try? context.writeFile(descriptor, lines.encoded)
+    }
+
+    /// The source lines kept beside the image at `path`, or none.
+    private static func loadSourceLines(_ context: any GoToolContext, path: String) -> GoSourceLines {
+        let linesPath = sourceLinesPath(path)
+        guard let status = context.lstat(linesPath), status.type == .regular,
+            status.size <= GoExecutableImage.maximumImageSize,
+            let descriptor = try? context.openFile(linesPath, access: .readOnly)
+        else { return GoSourceLines() }
+        defer { try? context.closeFile(descriptor) }
+        guard
+            let bytes = try? context.readFile(
+                descriptor, max: GoExecutableImage.maximumImageSize),
+            let lines = GoSourceLines(encoded: bytes)
+        else { return GoSourceLines() }
+        return lines
     }
 
     static func clear(_ context: any GoToolContext, root: String) throws {

@@ -139,9 +139,25 @@ public enum GoToolchain {
                 _ = context.write(1, Array(text.utf8))
             }
             context.exit(exitCode)
+        } catch let GoRuntimeError.panicError(message) {
+            // Go's `go run` reports how the program ended after its trace.
+            fail(
+                context,
+                "panic: " + inGoRoot(message, context) + "\nexit status 2", status: 1)
         } catch {
             fail(context, String(describing: error), status: 1)
         }
+    }
+
+    /// `text` with the files of the library named under `GOROOT`, as Go's
+    /// trace names them, rather than `$GOROOT`.
+    private static func inGoRoot(_ text: String, _ context: any GoToolContext) -> String {
+        guard text.contains("\t$GOROOT/"), let root = environment(context)["GOROOT"] else {
+            return text
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            line.hasPrefix("\t$GOROOT/") ? "\t" + root + line.dropFirst("\t$GOROOT".count) : line
+        }.joined(separator: "\n")
     }
 
     private static func runBuild(_ context: any GoToolContext, arguments: [String]) {

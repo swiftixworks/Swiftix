@@ -633,7 +633,7 @@ struct GoFileSystemTests: GoTestHarness {
         #expect(diagnostic("var count int = io.EOF\nfmt.Println(count)") != nil)
         #expect(diagnostic("var flag string = os.O_APPEND\nfmt.Println(flag)") != nil)
         #expect(diagnostic("fmt.Println(os.Stdout.Truncate(0))") != nil)
-        #expect(diagnostic("fmt.Println(io.ErrClosedPipe)") != nil)
+        #expect(diagnostic("fmt.Println(io.ErrNoSuchError)") != nil)
         #expect(
             diagnostic(
                 """

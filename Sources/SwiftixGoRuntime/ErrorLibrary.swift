@@ -67,6 +67,25 @@ enum GoErrors {
             || typeName == assertionErrorType
     }
 
+    /// Whether an interface value of this type name is an error of the
+    /// runtime, which has `RuntimeError` beside `Error` and so is Go's
+    /// `runtime.Error`.
+    static func isRuntimeErrorType(_ typeName: String) -> Bool {
+        typeName == runtimeErrorType || typeName == plainRuntimeErrorType
+            || typeName == boundsErrorType || typeName == assertionErrorType
+    }
+
+    /// Whether an error the library made of type `typeName` has `method`
+    /// with its parameters and results: `Error` and `Unwrap` take nothing
+    /// and give one value, `RuntimeError` takes and gives nothing.
+    static func provides(_ typeName: String, _ method: InterfaceTarget.Method) -> Bool {
+        guard method.parameterCount == 0 else { return false }
+        if method.name == "RuntimeError" {
+            return method.resultCount == 0 && isRuntimeErrorType(typeName)
+        }
+        return method.resultCount == 1 && methods(ofLibraryType: typeName).contains(method.name)
+    }
+
     /// Whether `typeName` is one of the pointer types above.
     static func isLibraryType(_ typeName: String) -> Bool {
         typeName == plainType || typeName == wrappingType || typeName == joiningType

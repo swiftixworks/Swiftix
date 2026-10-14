@@ -164,6 +164,9 @@ public struct GoIRFunction: Sendable, Equatable {
     public let returnCount: Int
     public let registerCount: Int
     public let operations: [GoIROperation]
+    /// Where the function was written and what Go calls it and the literals
+    /// in it, for the trace of a panic (`GoFunctionTrace`).
+    var trace: GoFunctionTrace?
 
     public init(
         name: String,

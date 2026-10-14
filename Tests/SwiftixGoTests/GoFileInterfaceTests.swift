@@ -133,8 +133,8 @@ struct GoFileInterfaceTests: GoTestHarness {
             """)
 
         #expect(calls(in: executable) == [
-            "call $os.ReadFile/1", "call $os.WriteFile/3", "call $conv.stringToBytes/1",
-            "call $os.WriteFile/3",
+            "call os.ReadFile/1", "call os.WriteFile/3", "call $conv.stringToBytes/1",
+            "call os.WriteFile/3",
         ])
         let image = try GoExecutableImage.encode(executable)
         #expect(try GoExecutableImage.decode(image) == executable)
@@ -180,7 +180,7 @@ struct GoFileInterfaceTests: GoTestHarness {
         #expect(output == "0 strconv.Atoi: parsing \"x\": invalid syntax\n")
 
         // Programs that never call Error() do not carry the method.
-        let plain = try compile("_, err := os.ReadFile(\"/x\")\nfmt.Println(err == nil)")
+        let plain = try compile("_, err := os.Getwd()\nfmt.Println(err == nil)")
         #expect(!plain.functions.contains { $0.name == "error.Error" })
     }
 
