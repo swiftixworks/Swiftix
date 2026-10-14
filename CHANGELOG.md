@@ -332,6 +332,10 @@ format, behavior and platform changes are recorded here.
   `Server.ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`,
   `ConnState`, `Shutdown`, `Close`, and `RegisterOnShutdown`;
   `Client.Timeout`; `http.TimeoutHandler`; `url.Error.Timeout` and `Temporary`.
+- An optional bytecode pass that removes the compiler's single-use
+  temporaries, about 40% fewer instructions executed. It is off unless the
+  toolchain is built with `-DSWIFTIX_GO_TEMPORARIES`, because it changes every
+  image.
 - `time.Time` has Go's calendar: `Year`, `Month` (`time.Month` with
   `String`), `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`
   (`time.Weekday`), `YearDay`, `ISOWeek`, `Date`, `Clock`, `IsZero`,
@@ -579,6 +583,14 @@ format, behavior and platform changes are recorded here.
 - `go run` and `go test` no longer stop a program after 1,000,000 VM
   instructions (`instruction limit exceeded`); like Go's, they bound no CPU
   time. Embedding hosts that call `GoVirtualMachine.run` keep the budget.
+- Swiftix Go programs run 4 to 20 times faster on the same images; what a
+  program prints, the instructions it is charged, and the order goroutines run
+  in are unchanged. An empty counted loop of 50,000 iterations takes 0.013 s
+  where it took 0.25 s, and the redis-style key-value server example 0.10 s
+  where it took 0.55 s (release builds).
+- `GoValue` stores integers, truth values, strings, arrays, and nil inline;
+  only its composite cases are `indirect`. Source compatible; code that
+  depends on its memory layout must be rebuilt.
 - `strconv.Atoi`, `ParseInt`, `ParseUint`, and `ParseFloat` fail with Go's
   `*strconv.NumError` (`Func`, `Num`, and `Err` as Go's), so `errors.Is(err,
   strconv.ErrRange)` and `errors.As` work; they are Go text around the native
