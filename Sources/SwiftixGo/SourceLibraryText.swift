@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "encoding", "encoding/base64", "encoding/json", "fmt", "io", "io/fs", "log", "net", "net/http", "net/url", "os", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -40,6 +40,31 @@ enum GoSourceLibraryText {
             "canceler", "causer", "contextName", "deadlineExceededError", "emptyCtx",
             "parentCancelCtx", "removeChild", "stringer", "stringify", "timerCtx", "todoCtx",
             "value", "valueCtx", "withCancel", "withoutCancelCtx",
+        ],
+        "encoding": [
+            "BinaryMarshaler", "BinaryUnmarshaler", "TextMarshaler", "TextUnmarshaler",
+        ],
+        "encoding/base64": [
+            "CorruptInputError", "Encoding", "NewEncoding", "NoPadding", "RawStdEncoding",
+            "RawURLEncoding", "StdEncoding", "StdPadding", "URLEncoding", "decodedLen",
+            "invalidIndex",
+        ],
+        "encoding/json": [
+            "Compact", "Decoder", "Delim", "Encoder", "HTMLEscape", "Indent",
+            "InvalidUnmarshalError", "Marshal", "MarshalIndent", "Marshaler", "MarshalerError",
+            "NewDecoder", "NewEncoder", "Number", "RawMessage", "SyntaxError", "Token", "Unmarshal",
+            "UnmarshalTypeError", "Unmarshaler", "UnsupportedTypeError", "UnsupportedValueError",
+            "Valid", "appendHTMLEscape", "appendIndent", "decodeCallUnmarshalJSON",
+            "decodeCallUnmarshalText", "decodeCheck", "decodeCorrupt",
+            "decodeDisallowUnknownFields", "decodeDone", "decodeFailed", "decodeInvalid",
+            "decodeSyntax", "decodeType", "decodeUseNumber", "encodeCallIsZero",
+            "encodeCallKeyText", "encodeCallMarshalJSON", "encodeCallMarshalText", "encodeDone",
+            "encodeFailed", "encodeMarshalerFailed", "encodeMarshalerSyntax",
+            "encodeUnsupportedType", "encodeUnsupportedValue", "hex", "isSpace", "isZeroer",
+            "marshal", "scanMore", "scanUnexpectedEOF", "textMarshaler", "textUnmarshaler",
+            "tokenArrayComma", "tokenArrayStart", "tokenArrayValue", "tokenObjectColon",
+            "tokenObjectComma", "tokenObjectKey", "tokenObjectStart", "tokenObjectValue",
+            "tokenTopValue", "unmarshal", "withContext",
         ],
         "fmt": [
             "Formatter", "GoStringer", "State", "Stringer",
@@ -204,6 +229,9 @@ enum GoSourceLibraryText {
         case "bufio": return bufio
         case "bytes": return bytes
         case "context": return context
+        case "encoding": return encoding
+        case "encoding/base64": return encodingBase64
+        case "encoding/json": return encodingJson
         case "fmt": return fmt
         case "io": return io
         case "io/fs": return ioFs
@@ -2924,6 +2952,1196 @@ func value(c Context, key any) any {
 			return c.Value(key)
 		}
 	}
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let encoding: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/encoding.go",
+            text: #"""
+// Package encoding defines interfaces shared by other packages that convert
+// data to and from byte-level and textual representations.
+package encoding
+
+// BinaryMarshaler is the interface implemented by an object that can
+// marshal itself into a binary form.
+type BinaryMarshaler interface {
+	MarshalBinary() (data []byte, err error)
+}
+
+// BinaryUnmarshaler is the interface implemented by an object that can
+// unmarshal a binary representation of itself.
+type BinaryUnmarshaler interface {
+	UnmarshalBinary(data []byte) error
+}
+
+// TextMarshaler is the interface implemented by an object that can marshal
+// itself into a textual form.
+type TextMarshaler interface {
+	MarshalText() (text []byte, err error)
+}
+
+// TextUnmarshaler is the interface implemented by an object that can
+// unmarshal a textual representation of itself.
+type TextUnmarshaler interface {
+	UnmarshalText(text []byte) error
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let encodingBase64: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/base64/base64.go",
+            text: #"""
+// Package base64 is encoding/base64, as Go writes it, without the streaming
+// encoder and decoder.
+package base64
+
+import "strconv"
+
+// An Encoding is a radix 64 encoding/decoding scheme, defined by a
+// 64-character alphabet.
+type Encoding struct {
+	encode    [64]byte   // mapping of symbol index to symbol byte value
+	decodeMap [256]uint8 // mapping of symbol byte value to symbol index
+	padChar   rune
+	strict    bool
+}
+
+const (
+	StdPadding rune = '=' // Standard padding character
+	NoPadding  rune = -1  // No padding
+)
+
+const invalidIndex = '\xff'
+
+// NewEncoding returns a new padded Encoding defined by the given alphabet,
+// which must be a 64-byte string that contains unique byte values and does
+// not contain the padding character or CR / LF ('\r', '\n').
+func NewEncoding(encoder string) *Encoding {
+	if len(encoder) != 64 {
+		panic("encoding alphabet is not 64-bytes long")
+	}
+
+	e := new(Encoding)
+	e.padChar = StdPadding
+	copy(e.encode[:], encoder)
+	for i := range e.decodeMap {
+		e.decodeMap[i] = invalidIndex
+	}
+
+	for i := 0; i < len(encoder); i++ {
+		// Note: While we document that the alphabet cannot contain
+		// the padding character, we do not enforce it since we do not know
+		// if the caller intends to switch the padding from StdPadding later.
+		switch {
+		case encoder[i] == '\n' || encoder[i] == '\r':
+			panic("encoding alphabet contains newline character")
+		case e.decodeMap[encoder[i]] != invalidIndex:
+			panic("encoding alphabet includes duplicate symbols")
+		}
+		e.decodeMap[encoder[i]] = uint8(i)
+	}
+	return e
+}
+
+// WithPadding creates a new encoding identical to enc except with a
+// specified padding character, or NoPadding to disable padding.
+func (enc Encoding) WithPadding(padding rune) *Encoding {
+	switch {
+	case padding < NoPadding || padding == '\r' || padding == '\n' || padding > 0xff:
+		panic("invalid padding")
+	case padding != NoPadding && enc.decodeMap[byte(padding)] != invalidIndex:
+		panic("padding contained in alphabet")
+	}
+	enc.padChar = padding
+	return &enc
+}
+
+// Strict creates a new encoding identical to enc except with strict
+// decoding enabled.
+func (enc Encoding) Strict() *Encoding {
+	enc.strict = true
+	return &enc
+}
+
+// StdEncoding is the standard base64 encoding, as defined in RFC 4648.
+var StdEncoding = NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+// URLEncoding is the alternate base64 encoding defined in RFC 4648.
+// It is typically used in URLs and file names.
+var URLEncoding = NewEncoding("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+// RawStdEncoding is the standard raw, unpadded base64 encoding.
+var RawStdEncoding = StdEncoding.WithPadding(NoPadding)
+
+// RawURLEncoding is the unpadded alternate base64 encoding.
+var RawURLEncoding = URLEncoding.WithPadding(NoPadding)
+
+// Encode encodes src using the encoding enc, writing EncodedLen(len(src))
+// bytes to dst.
+func (enc *Encoding) Encode(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
+	di, si := 0, 0
+	n := (len(src) / 3) * 3
+	for si < n {
+		// Convert 3x 8bit source bytes into 4 bytes
+		val := uint(src[si+0])<<16 | uint(src[si+1])<<8 | uint(src[si+2])
+
+		dst[di+0] = enc.encode[val>>18&0x3F]
+		dst[di+1] = enc.encode[val>>12&0x3F]
+		dst[di+2] = enc.encode[val>>6&0x3F]
+		dst[di+3] = enc.encode[val&0x3F]
+
+		si += 3
+		di += 4
+	}
+
+	remain := len(src) - si
+	if remain == 0 {
+		return
+	}
+	// Add the remaining small block
+	val := uint(src[si+0]) << 16
+	if remain == 2 {
+		val |= uint(src[si+1]) << 8
+	}
+
+	dst[di+0] = enc.encode[val>>18&0x3F]
+	dst[di+1] = enc.encode[val>>12&0x3F]
+
+	switch remain {
+	case 2:
+		dst[di+2] = enc.encode[val>>6&0x3F]
+		if enc.padChar != NoPadding {
+			dst[di+3] = byte(enc.padChar)
+		}
+	case 1:
+		if enc.padChar != NoPadding {
+			dst[di+2] = byte(enc.padChar)
+			dst[di+3] = byte(enc.padChar)
+		}
+	}
+}
+
+// AppendEncode appends the base64 encoded src to dst and returns the
+// extended buffer.
+func (enc *Encoding) AppendEncode(dst, src []byte) []byte {
+	buf := make([]byte, enc.EncodedLen(len(src)))
+	enc.Encode(buf, src)
+	return append(dst, buf...)
+}
+
+// EncodeToString returns the base64 encoding of src.
+func (enc *Encoding) EncodeToString(src []byte) string {
+	buf := make([]byte, enc.EncodedLen(len(src)))
+	enc.Encode(buf, src)
+	return string(buf)
+}
+
+// EncodedLen returns the length in bytes of the base64 encoding of an input
+// buffer of length n.
+func (enc *Encoding) EncodedLen(n int) int {
+	if enc.padChar == NoPadding {
+		return n/3*4 + (n%3*8+5)/6 // minimum # chars at 6 bits per char
+	}
+	return (n + 2) / 3 * 4 // minimum # 4-char quanta, 3 bytes each
+}
+
+// CorruptInputError is the offset of the byte at which the input is not
+// base64.
+type CorruptInputError int64
+
+func (e CorruptInputError) Error() string {
+	return "illegal base64 data at input byte " + strconv.FormatInt(int64(e), 10)
+}
+
+// decodeQuantum decodes up to 4 base64 bytes. The received parameters are
+// the destination buffer dst, the source buffer src and an index in the
+// source buffer si. It returns the number of bytes read from src, the
+// number of bytes written to dst, and an error, if any.
+func (enc *Encoding) decodeQuantum(dst, src []byte, si int) (nsi, n int, err error) {
+	// Decode quantum using the base64 alphabet
+	var dbuf [4]byte
+	dlen := 4
+
+	for j := 0; j < len(dbuf); j++ {
+		if len(src) == si {
+			switch {
+			case j == 0:
+				return si, 0, nil
+			case j == 1, enc.padChar != NoPadding:
+				return si, 0, CorruptInputError(si - j)
+			}
+			dlen = j
+			break
+		}
+		in := src[si]
+		si++
+
+		out := enc.decodeMap[in]
+		if out != 0xff {
+			dbuf[j] = out
+			continue
+		}
+
+		if in == '\n' || in == '\r' {
+			j--
+			continue
+		}
+
+		if rune(in) != enc.padChar {
+			return si, 0, CorruptInputError(si - 1)
+		}
+
+		// We've reached the end and there's padding
+		switch j {
+		case 0, 1:
+			// incorrect padding
+			return si, 0, CorruptInputError(si - 1)
+		case 2:
+			// "==" is expected, the first "=" is already consumed.
+			// skip over newlines
+			for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+				si++
+			}
+			if si == len(src) {
+				// not enough padding
+				return si, 0, CorruptInputError(len(src))
+			}
+			if rune(src[si]) != enc.padChar {
+				// incorrect padding
+				return si, 0, CorruptInputError(si - 1)
+			}
+
+			si++
+		}
+
+		// skip over newlines
+		for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+			si++
+		}
+		if si < len(src) {
+			// trailing garbage
+			err = CorruptInputError(si)
+		}
+		dlen = j
+		break
+	}
+
+	// Convert 4x 6bit source bytes into 3 bytes
+	val := uint(dbuf[0])<<18 | uint(dbuf[1])<<12 | uint(dbuf[2])<<6 | uint(dbuf[3])
+	dbuf[2], dbuf[1], dbuf[0] = byte(val>>0), byte(val>>8), byte(val>>16)
+	switch dlen {
+	case 4:
+		dst[2] = dbuf[2]
+		dbuf[2] = 0
+		fallthrough
+	case 3:
+		dst[1] = dbuf[1]
+		if enc.strict && dbuf[2] != 0 {
+			return si, 0, CorruptInputError(si - 1)
+		}
+		dbuf[1] = 0
+		fallthrough
+	case 2:
+		dst[0] = dbuf[0]
+		if enc.strict && (dbuf[1] != 0 || dbuf[2] != 0) {
+			return si, 0, CorruptInputError(si - 2)
+		}
+	}
+
+	return si, dlen - 1, err
+}
+
+// AppendDecode appends the base64 decoded src to dst and returns the
+// extended buffer. If the input is malformed, it returns the partially
+// decoded src and an error.
+func (enc *Encoding) AppendDecode(dst, src []byte) ([]byte, error) {
+	// Compute the output size without padding to avoid over allocating.
+	n := len(src)
+	for n > 0 && rune(src[n-1]) == enc.padChar {
+		n--
+	}
+	n = decodedLen(n, NoPadding)
+
+	buf := make([]byte, n)
+	n, err := enc.Decode(buf, src)
+	return append(dst, buf[:n]...), err
+}
+
+// DecodeString returns the bytes represented by the base64 string s.
+func (enc *Encoding) DecodeString(s string) ([]byte, error) {
+	dbuf := make([]byte, enc.DecodedLen(len(s)))
+	n, err := enc.Decode(dbuf, []byte(s))
+	return dbuf[:n], err
+}
+
+// Decode decodes src using the encoding enc. It writes at most
+// DecodedLen(len(src)) bytes to dst and returns the number of bytes
+// written. New line characters (\r and \n) are ignored.
+func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
+	if len(src) == 0 {
+		return 0, nil
+	}
+	si := 0
+	for si < len(src) {
+		var ninc int
+		si, ninc, err = enc.decodeQuantum(dst[n:], src, si)
+		n += ninc
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, err
+}
+
+// DecodedLen returns the maximum length in bytes of the decoded data
+// corresponding to n bytes of base64-encoded data.
+func (enc *Encoding) DecodedLen(n int) int {
+	return decodedLen(n, enc.padChar)
+}
+
+func decodedLen(n int, padChar rune) int {
+	if padChar == NoPadding {
+		// Unpadded data may end with partial block of 2-3 characters.
+		return n/4*3 + n%4*6/8
+	}
+	// Padded base64 should always be a multiple of 4 characters in length.
+	return n / 4 * 3
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let encodingJson: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/json/decode.go",
+            text: #"""
+package json
+
+import (
+	"encoding/base64"
+	"errors"
+	"strconv"
+)
+
+// Unmarshal parses the JSON-encoded data and stores the result in the value
+// pointed to by v.
+func Unmarshal(data []byte, v any) error {
+	return unmarshal(data, v, decodeCheck)
+}
+
+// Unmarshaler is the interface implemented by types that can unmarshal a
+// JSON description of themselves.
+type Unmarshaler interface {
+	UnmarshalJSON([]byte) error
+}
+
+// An UnmarshalTypeError describes a JSON value that was not appropriate for
+// a value of a specific Go type.
+type UnmarshalTypeError struct {
+	Value  string // description of JSON value - "bool", "array", "number -5"
+	typ    string
+	Offset int64  // error occurred after reading Offset bytes
+	Struct string // name of the struct type containing the field
+	Field  string // the full path from root node to the field, include embedded struct
+}
+
+func (e *UnmarshalTypeError) Error() string {
+	if e.Struct != "" || e.Field != "" {
+		return "json: cannot unmarshal " + e.Value + " into Go struct field " + e.Struct + "." + e.Field + " of type " + e.typ
+	}
+	return "json: cannot unmarshal " + e.Value + " into Go value of type " + e.typ
+}
+
+// An InvalidUnmarshalError describes an invalid argument passed to
+// Unmarshal: one that is not a non-nil pointer.
+type InvalidUnmarshalError struct {
+	what string
+}
+
+func (e *InvalidUnmarshalError) Error() string {
+	return "json: Unmarshal(" + e.what + ")"
+}
+
+// A Number represents a JSON number literal.
+type Number string
+
+// String returns the literal text of the number.
+func (n Number) String() string { return string(n) }
+
+// Float64 returns the number as a float64.
+func (n Number) Float64() (float64, error) {
+	return strconv.ParseFloat(string(n), 64)
+}
+
+// Int64 returns the number as an int64.
+func (n Number) Int64() (int64, error) {
+	return strconv.ParseInt(string(n), 10, 64)
+}
+
+// How a decoding goes: whether the text is checked first, as Unmarshal does
+// and a Decoder, which has read it, does not, and the options of a Decoder.
+const (
+	decodeCheck = 1 << iota
+	decodeUseNumber
+	decodeDisallowUnknownFields
+)
+
+// What the native of a decoding says when it stops.
+const (
+	decodeDone = iota
+	decodeSyntax
+	decodeInvalid
+	decodeType
+	decodeFailed
+	decodeCorrupt
+	decodeCallUnmarshalJSON
+	decodeCallUnmarshalText
+)
+
+// unmarshal decodes data into v.
+func unmarshal(data []byte, v any, flags int) error {
+	h := native.decodeStart(data, v, flags)
+	defer native.release(h)
+	for {
+		code, x, text := native.decodeRun(h)
+		switch code {
+		case decodeDone:
+			return nil
+		case decodeSyntax:
+			msg, offset := native.failure(h)
+			return &SyntaxError{msg, offset}
+		case decodeInvalid:
+			return &InvalidUnmarshalError{text}
+		case decodeType:
+			value, offset, strct, field := native.typeError(h)
+			return &UnmarshalTypeError{value, text, offset, strct, field}
+		case decodeFailed:
+			return errors.New(text)
+		case decodeCorrupt:
+			_, offset := native.failure(h)
+			return base64.CorruptInputError(offset)
+		case decodeCallUnmarshalJSON:
+			if err := x.(Unmarshaler).UnmarshalJSON(native.raw(h)); err != nil {
+				return withContext(h, err)
+			}
+			native.resume(h, nil)
+		case decodeCallUnmarshalText:
+			if err := x.(textUnmarshaler).UnmarshalText(native.raw(h)); err != nil {
+				return withContext(h, err)
+			}
+			native.resume(h, nil)
+		}
+	}
+}
+
+// textUnmarshaler is encoding.TextUnmarshaler.
+type textUnmarshaler interface {
+	UnmarshalText(text []byte) error
+}
+
+// withContext is err, an error of a method, with the struct and field the
+// decoding was in when err is an *UnmarshalTypeError, as Go adds them.
+func withContext(h int, err error) error {
+	if e, ok := err.(*UnmarshalTypeError); ok {
+		strct, field, ok := native.context(h, e.Field)
+		if ok {
+			e.Struct = strct
+			e.Field = field
+		}
+	}
+	return err
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/json/encode.go",
+            text: #"""
+// Package json is encoding/json. The walk over a value, which Go makes with
+// reflect, is a native of the run-time library: it reads the value by the
+// type it travels with in an interface and writes the text, or reads the
+// text and builds the value. What only the program can do, calling its
+// MarshalJSON, MarshalText, UnmarshalJSON, or UnmarshalText methods, this
+// text does when the native stops and asks for it, after which the native
+// goes on where it stopped. The error types are Go's, without the fields of
+// type reflect.Type and reflect.Value, whose text they keep for Error.
+package json
+
+import (
+	"errors"
+	"strconv"
+)
+
+// Marshal returns the JSON encoding of v.
+func Marshal(v any) ([]byte, error) {
+	return marshal(v, true)
+}
+
+// MarshalIndent is like Marshal but applies Indent to format the output.
+func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
+	b, err := Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	b2, err := appendIndent(make([]byte, 0, 2*len(b)), b, prefix, indent)
+	if err != nil {
+		return nil, err
+	}
+	return b2, nil
+}
+
+// Marshaler is the interface implemented by types that can marshal
+// themselves into valid JSON.
+type Marshaler interface {
+	MarshalJSON() ([]byte, error)
+}
+
+// An UnsupportedTypeError is returned by Marshal when attempting to encode
+// an unsupported value type.
+type UnsupportedTypeError struct {
+	typ string
+}
+
+func (e *UnsupportedTypeError) Error() string {
+	return "json: unsupported type: " + e.typ
+}
+
+// An UnsupportedValueError is returned by Marshal when attempting to encode
+// an unsupported value.
+type UnsupportedValueError struct {
+	Str string
+}
+
+func (e *UnsupportedValueError) Error() string {
+	return "json: unsupported value: " + e.Str
+}
+
+// A MarshalerError represents an error from calling a MarshalJSON or
+// MarshalText method.
+type MarshalerError struct {
+	typ        string
+	Err        error
+	sourceFunc string
+}
+
+func (e *MarshalerError) Error() string {
+	srcFunc := e.sourceFunc
+	if srcFunc == "" {
+		srcFunc = "MarshalJSON"
+	}
+	return "json: error calling " + srcFunc +
+		" for type " + e.typ +
+		": " + e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e *MarshalerError) Unwrap() error { return e.Err }
+
+// What the native of an encoding says when it stops: the text is done, the
+// value it gives must be asked for its text, or the encoding failed.
+const (
+	encodeDone = iota
+	encodeUnsupportedType
+	encodeUnsupportedValue
+	encodeFailed
+	encodeMarshalerSyntax
+	encodeMarshalerFailed
+	encodeCallMarshalJSON
+	encodeCallMarshalText
+	encodeCallKeyText
+	encodeCallIsZero
+)
+
+// marshal encodes v, escaping <, >, and & in strings when escapeHTML.
+func marshal(v any, escapeHTML bool) ([]byte, error) {
+	flags := 0
+	if escapeHTML {
+		flags = 1
+	}
+	h := native.encodeStart(v, flags)
+	defer native.release(h)
+	for {
+		code, x, text := native.encodeRun(h)
+		switch code {
+		case encodeDone:
+			return native.encoded(h), nil
+		case encodeUnsupportedType:
+			return nil, &UnsupportedTypeError{typ: text}
+		case encodeUnsupportedValue:
+			return nil, &UnsupportedValueError{Str: text}
+		case encodeFailed:
+			return nil, errors.New(text)
+		case encodeMarshalerSyntax:
+			msg, offset := native.failure(h)
+			return nil, &MarshalerError{text, &SyntaxError{msg, offset}, "MarshalJSON"}
+		case encodeMarshalerFailed:
+			msg, _ := native.failure(h)
+			return nil, &MarshalerError{text, errors.New(msg), "MarshalJSON"}
+		case encodeCallMarshalJSON:
+			b, err := x.(Marshaler).MarshalJSON()
+			if err != nil {
+				return nil, &MarshalerError{text, err, "MarshalJSON"}
+			}
+			native.resume(h, b)
+		case encodeCallMarshalText:
+			b, err := x.(textMarshaler).MarshalText()
+			if err != nil {
+				return nil, &MarshalerError{text, err, "MarshalText"}
+			}
+			native.resume(h, b)
+		case encodeCallKeyText:
+			b, err := x.(textMarshaler).MarshalText()
+			if err != nil {
+				return nil, errors.New("json: encoding error for type " + strconv.Quote(text) + ": " + strconv.Quote(err.Error()))
+			}
+			native.resume(h, b)
+		case encodeCallIsZero:
+			if x.(isZeroer).IsZero() {
+				native.resume(h, nil)
+			} else {
+				native.resume(h, []byte{1})
+			}
+		}
+	}
+}
+
+// textMarshaler is encoding.TextMarshaler, which a program implements
+// without importing encoding.
+type textMarshaler interface {
+	MarshalText() (text []byte, err error)
+}
+
+// isZeroer is what the omitzero option asks a value.
+type isZeroer interface {
+	IsZero() bool
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/json/indent.go",
+            text: #"""
+package json
+
+import "bytes"
+
+// A SyntaxError is a description of a JSON syntax error.
+type SyntaxError struct {
+	msg    string // description of error
+	Offset int64  // error occurred after reading Offset bytes
+}
+
+func (e *SyntaxError) Error() string { return e.msg }
+
+// Valid reports whether data is a valid JSON encoding.
+func Valid(data []byte) bool {
+	msg, _ := native.valid(data)
+	return msg == ""
+}
+
+// HTMLEscape appends to dst the JSON-encoded src with <, >, &, U+2028 and
+// U+2029 characters inside string literals changed to <, >,
+// &,  ,  .
+func HTMLEscape(dst *bytes.Buffer, src []byte) {
+	dst.Grow(len(src))
+	dst.Write(appendHTMLEscape(nil, src))
+}
+
+const hex = "0123456789abcdef"
+
+func appendHTMLEscape(dst, src []byte) []byte {
+	start := 0
+	for i, c := range src {
+		if c == '<' || c == '>' || c == '&' {
+			dst = append(dst, src[start:i]...)
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
+			start = i + 1
+		}
+		// Convert U+2028 and U+2029 (E2 80 A8 and E2 80 A9).
+		if c == 0xE2 && i+2 < len(src) && src[i+1] == 0x80 && src[i+2]&^1 == 0xA8 {
+			dst = append(dst, src[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', hex[src[i+2]&0xF])
+			start = i + len(" ")
+		}
+	}
+	return append(dst, src[start:]...)
+}
+
+// Compact appends to dst the JSON-encoded src with insignificant space
+// characters elided.
+func Compact(dst *bytes.Buffer, src []byte) error {
+	dst.Grow(len(src))
+	b, msg, offset := native.compact(nil, src, false)
+	if msg != "" {
+		return &SyntaxError{msg, offset}
+	}
+	dst.Write(b)
+	return nil
+}
+
+// Indent appends to dst an indented form of the JSON-encoded src.
+func Indent(dst *bytes.Buffer, src []byte, prefix, indent string) error {
+	dst.Grow(2 * len(src))
+	b, err := appendIndent(nil, src, prefix, indent)
+	dst.Write(b)
+	return err
+}
+
+func appendIndent(dst, src []byte, prefix, indent string) ([]byte, error) {
+	b, msg, offset := native.indent(dst, src, prefix, indent)
+	if msg != "" {
+		return b, &SyntaxError{msg, offset}
+	}
+	return b, nil
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/json/stream.go",
+            text: #"""
+package json
+
+import (
+	"bytes"
+	"errors"
+	"io"
+)
+
+// A Decoder reads and decodes JSON values from an input stream.
+type Decoder struct {
+	r       io.Reader
+	buf     []byte
+	flags   int
+	scanp   int   // start of unread data in buf
+	scanned int64 // amount of data already scanned
+	// The bytes the scanner has read, which is where it reports an error.
+	scanBytes int64
+	err       error
+
+	tokenState int
+	tokenStack []int
+}
+
+// NewDecoder returns a new decoder that reads from r.
+func NewDecoder(r io.Reader) *Decoder {
+	return &Decoder{r: r}
+}
+
+// UseNumber causes the Decoder to unmarshal a number into an interface
+// value as a Number instead of as a float64.
+func (dec *Decoder) UseNumber() { dec.flags |= decodeUseNumber }
+
+// DisallowUnknownFields causes the Decoder to return an error when the
+// destination is a struct and the input contains object keys which do not
+// match any non-ignored, exported fields in the destination.
+func (dec *Decoder) DisallowUnknownFields() { dec.flags |= decodeDisallowUnknownFields }
+
+// Decode reads the next JSON-encoded value from its input and stores it in
+// the value pointed to by v.
+func (dec *Decoder) Decode(v any) error {
+	if dec.err != nil {
+		return dec.err
+	}
+
+	if err := dec.tokenPrepareForDecode(); err != nil {
+		return err
+	}
+
+	if !dec.tokenValueAllowed() {
+		return &SyntaxError{msg: "not at beginning of value", Offset: dec.InputOffset()}
+	}
+
+	// Read whole value into buffer.
+	n, err := dec.readValue()
+	if err != nil {
+		return err
+	}
+	data := dec.buf[dec.scanp : dec.scanp+n]
+	dec.scanp += n
+
+	// Don't save err from unmarshal into dec.err:
+	// the connection is still usable since we read a complete JSON
+	// object from it before the error happened.
+	err = unmarshal(data, v, dec.flags)
+
+	// fixup token streaming state
+	dec.tokenValueEnd()
+
+	return err
+}
+
+// Buffered returns a reader of the data remaining in the Decoder's buffer.
+func (dec *Decoder) Buffered() io.Reader {
+	return bytes.NewReader(dec.buf[dec.scanp:])
+}
+
+// readValue reads a JSON value into dec.buf. It returns the length of the
+// encoding. The native scans what is buffered from the start of the value
+// each time, which is where Go's scanner, that keeps its state, would be.
+func (dec *Decoder) readValue() (int, error) {
+	var err error
+	for {
+		n, count, msg := native.scanValue(dec.buf[dec.scanp:], err == io.EOF)
+		switch {
+		case n >= 0:
+			dec.scanBytes += int64(count)
+			return n, nil
+		case msg != "":
+			dec.err = &SyntaxError{msg, dec.scanBytes + int64(count)}
+			return 0, dec.err
+		}
+		if err != nil {
+			if err == io.EOF && n == scanUnexpectedEOF {
+				err = io.ErrUnexpectedEOF
+			}
+			dec.err = err
+			return 0, err
+		}
+		err = dec.refill()
+	}
+}
+
+// What the scanner of a stream says of the bytes buffered at the end of
+// the input: a value that has not ended, or space alone.
+const (
+	scanMore          = -1
+	scanUnexpectedEOF = -2
+)
+
+func (dec *Decoder) refill() error {
+	// Make room to read more into the buffer.
+	// First slide down data already consumed.
+	if dec.scanp > 0 {
+		dec.scanned += int64(dec.scanp)
+		n := copy(dec.buf, dec.buf[dec.scanp:])
+		dec.buf = dec.buf[:n]
+		dec.scanp = 0
+	}
+
+	// Grow buffer if not large enough.
+	const minRead = 512
+	if cap(dec.buf)-len(dec.buf) < minRead {
+		newBuf := make([]byte, len(dec.buf), 2*cap(dec.buf)+minRead)
+		copy(newBuf, dec.buf)
+		dec.buf = newBuf
+	}
+
+	// Read. Delay error for next iteration (after scan).
+	n, err := dec.r.Read(dec.buf[len(dec.buf):cap(dec.buf)])
+	dec.buf = dec.buf[0 : len(dec.buf)+n]
+
+	return err
+}
+
+// An Encoder writes JSON values to an output stream.
+type Encoder struct {
+	w          io.Writer
+	err        error
+	escapeHTML bool
+
+	indentBuf    []byte
+	indentPrefix string
+	indentValue  string
+}
+
+// NewEncoder returns a new encoder that writes to w.
+func NewEncoder(w io.Writer) *Encoder {
+	return &Encoder{w: w, escapeHTML: true}
+}
+
+// Encode writes the JSON encoding of v to the stream, followed by a newline
+// character.
+func (enc *Encoder) Encode(v any) error {
+	if enc.err != nil {
+		return enc.err
+	}
+
+	b, err := marshal(v, enc.escapeHTML)
+	if err != nil {
+		return err
+	}
+
+	// Terminate each value with a newline.
+	b = append(b, '\n')
+
+	if enc.indentPrefix != "" || enc.indentValue != "" {
+		enc.indentBuf, err = appendIndent(enc.indentBuf[:0], b, enc.indentPrefix, enc.indentValue)
+		if err != nil {
+			return err
+		}
+		b = enc.indentBuf
+	}
+	if _, err = enc.w.Write(b); err != nil {
+		enc.err = err
+	}
+	return err
+}
+
+// SetIndent instructs the encoder to format each subsequent encoded value
+// as if indented by the package-level function Indent(dst, src, prefix,
+// indent).
+func (enc *Encoder) SetIndent(prefix, indent string) {
+	enc.indentPrefix = prefix
+	enc.indentValue = indent
+}
+
+// SetEscapeHTML specifies whether problematic HTML characters should be
+// escaped inside JSON quoted strings.
+func (enc *Encoder) SetEscapeHTML(on bool) {
+	enc.escapeHTML = on
+}
+
+// RawMessage is a raw encoded JSON value.
+type RawMessage []byte
+
+// MarshalJSON returns m as the JSON encoding of m.
+func (m RawMessage) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
+	return m, nil
+}
+
+// UnmarshalJSON sets *m to a copy of data.
+func (m *RawMessage) UnmarshalJSON(data []byte) error {
+	if m == nil {
+		return errors.New("json.RawMessage: UnmarshalJSON on nil pointer")
+	}
+	*m = append((*m)[0:0], data...)
+	return nil
+}
+
+// A Token holds a value of one of these types: Delim, bool, float64,
+// Number, string, nil.
+type Token any
+
+const (
+	tokenTopValue = iota
+	tokenArrayStart
+	tokenArrayValue
+	tokenArrayComma
+	tokenObjectStart
+	tokenObjectKey
+	tokenObjectColon
+	tokenObjectValue
+	tokenObjectComma
+)
+
+// advance tokenstate from a separator state to a value state
+func (dec *Decoder) tokenPrepareForDecode() error {
+	// Note: Not calling peek before switch, to avoid
+	// putting peek into the standard Decode path.
+	// peek is only called when using the Token API.
+	switch dec.tokenState {
+	case tokenArrayComma:
+		c, err := dec.peek()
+		if err != nil {
+			return err
+		}
+		if c != ',' {
+			return &SyntaxError{"expected comma after array element", dec.InputOffset()}
+		}
+		dec.scanp++
+		dec.tokenState = tokenArrayValue
+	case tokenObjectColon:
+		c, err := dec.peek()
+		if err != nil {
+			return err
+		}
+		if c != ':' {
+			return &SyntaxError{"expected colon after object key", dec.InputOffset()}
+		}
+		dec.scanp++
+		dec.tokenState = tokenObjectValue
+	}
+	return nil
+}
+
+func (dec *Decoder) tokenValueAllowed() bool {
+	switch dec.tokenState {
+	case tokenTopValue, tokenArrayStart, tokenArrayValue, tokenObjectValue:
+		return true
+	}
+	return false
+}
+
+func (dec *Decoder) tokenValueEnd() {
+	switch dec.tokenState {
+	case tokenArrayStart, tokenArrayValue:
+		dec.tokenState = tokenArrayComma
+	case tokenObjectValue:
+		dec.tokenState = tokenObjectComma
+	}
+}
+
+// A Delim is a JSON array or object delimiter, one of [ ] { or }.
+type Delim rune
+
+func (d Delim) String() string {
+	return string(d)
+}
+
+// Token returns the next JSON token in the input stream. At the end of the
+// input stream, Token returns nil, io.EOF.
+func (dec *Decoder) Token() (Token, error) {
+	for {
+		c, err := dec.peek()
+		if err != nil {
+			return nil, err
+		}
+		switch c {
+		case '[':
+			if !dec.tokenValueAllowed() {
+				return dec.tokenError(c)
+			}
+			dec.scanp++
+			dec.tokenStack = append(dec.tokenStack, dec.tokenState)
+			dec.tokenState = tokenArrayStart
+			return Delim('['), nil
+
+		case ']':
+			if dec.tokenState != tokenArrayStart && dec.tokenState != tokenArrayComma {
+				return dec.tokenError(c)
+			}
+			dec.scanp++
+			dec.tokenState = dec.tokenStack[len(dec.tokenStack)-1]
+			dec.tokenStack = dec.tokenStack[:len(dec.tokenStack)-1]
+			dec.tokenValueEnd()
+			return Delim(']'), nil
+
+		case '{':
+			if !dec.tokenValueAllowed() {
+				return dec.tokenError(c)
+			}
+			dec.scanp++
+			dec.tokenStack = append(dec.tokenStack, dec.tokenState)
+			dec.tokenState = tokenObjectStart
+			return Delim('{'), nil
+
+		case '}':
+			if dec.tokenState != tokenObjectStart && dec.tokenState != tokenObjectComma {
+				return dec.tokenError(c)
+			}
+			dec.scanp++
+			dec.tokenState = dec.tokenStack[len(dec.tokenStack)-1]
+			dec.tokenStack = dec.tokenStack[:len(dec.tokenStack)-1]
+			dec.tokenValueEnd()
+			return Delim('}'), nil
+
+		case ':':
+			if dec.tokenState != tokenObjectColon {
+				return dec.tokenError(c)
+			}
+			dec.scanp++
+			dec.tokenState = tokenObjectValue
+			continue
+
+		case ',':
+			if dec.tokenState == tokenArrayComma {
+				dec.scanp++
+				dec.tokenState = tokenArrayValue
+				continue
+			}
+			if dec.tokenState == tokenObjectComma {
+				dec.scanp++
+				dec.tokenState = tokenObjectKey
+				continue
+			}
+			return dec.tokenError(c)
+
+		case '"':
+			if dec.tokenState == tokenObjectStart || dec.tokenState == tokenObjectKey {
+				var x string
+				old := dec.tokenState
+				dec.tokenState = tokenTopValue
+				err := dec.Decode(&x)
+				dec.tokenState = old
+				if err != nil {
+					return nil, err
+				}
+				dec.tokenState = tokenObjectColon
+				return x, nil
+			}
+			fallthrough
+
+		default:
+			if !dec.tokenValueAllowed() {
+				return dec.tokenError(c)
+			}
+			var x any
+			if err := dec.Decode(&x); err != nil {
+				return nil, err
+			}
+			return x, nil
+		}
+	}
+}
+
+func (dec *Decoder) tokenError(c byte) (Token, error) {
+	var context string
+	switch dec.tokenState {
+	case tokenTopValue:
+		context = " looking for beginning of value"
+	case tokenArrayStart, tokenArrayValue, tokenObjectValue:
+		context = " looking for beginning of value"
+	case tokenArrayComma:
+		context = " after array element"
+	case tokenObjectKey:
+		context = " looking for beginning of object key string"
+	case tokenObjectColon:
+		context = " after object key"
+	case tokenObjectComma:
+		context = " after object key:value pair"
+	}
+	return nil, &SyntaxError{"invalid character " + native.quoteChar(c) + context, dec.InputOffset()}
+}
+
+// More reports whether there is another element in the current array or
+// object being parsed.
+func (dec *Decoder) More() bool {
+	c, err := dec.peek()
+	return err == nil && c != ']' && c != '}'
+}
+
+func (dec *Decoder) peek() (byte, error) {
+	var err error
+	for {
+		for i := dec.scanp; i < len(dec.buf); i++ {
+			c := dec.buf[i]
+			if isSpace(c) {
+				continue
+			}
+			dec.scanp = i
+			return c, nil
+		}
+		// buffer has been scanned, now report any error
+		if err != nil {
+			return 0, err
+		}
+		err = dec.refill()
+	}
+}
+
+func isSpace(c byte) bool {
+	return c <= ' ' && (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+}
+
+// InputOffset returns the input stream byte offset of the current decoder
+// position.
+func (dec *Decoder) InputOffset() int64 {
+	return dec.scanned + int64(dec.scanp)
 }
 
 """#),

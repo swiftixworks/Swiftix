@@ -925,6 +925,8 @@ public struct GoVirtualMachine: Sendable {
         // Whether the program declares a `Format` or `GoString` method at
         // all, once `fmt` has asked: a program without one pays nothing more.
         var hasFormattingMethods: Bool?
+        // The walks of `encoding/json` under way, by handle.
+        var jsonWalks: [Int: GoJSONNatives.Walk] = [:]
         var programExitCode: Int32 = 0
         // Resumable-run state: a suspended run keeps every local alive through
         // `resumeHook`, which the stdin continuation invokes.
@@ -4305,6 +4307,34 @@ public struct GoVirtualMachine: Sendable {
             return true
         }
 
+        /// The natives of `encoding/json` (`GoJSONNatives`).
+        func executeJSONNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoJSONNatives.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount, vm.stack.count >= argumentCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
+            let heap = GoJSONHeap(
+                read: { try read(pointer: $0, heap: vm.heap) },
+                write: { try writePointer($0, through: $1, heap: &vm.heap) },
+                allocate: { try vm.heap.allocate($0) },
+                descriptor: { typeDescriptor(named: $0) },
+                method: { owner, method, parameters in
+                    guard let function = functions[owner + "." + method] else { return false }
+                    return function.parameterCount == parameters + 1
+                })
+            let host = GoJSONNatives.Host(
+                heap: heap, bytes: { try sliceBytes($0) }, makeBytes: { try makeByteSlice($0) },
+                retain: { try retainRuntimeHandle(.nilValue) },
+                root: { runtimeHandleRoots[$0] = $1 },
+                release: { runtimeHandleRoots.removeValue(forKey: $0) })
+            vm.stack.append(contentsOf: try GoJSONNatives.call(name, operands, walks: &jsonWalks, host: host))
+            return true
+        }
+
         /// The address of this end of a connection to `remote`, in dotted
         /// form: the loopback address for a peer on it, else the address of
         /// the interface on the peer's network.
@@ -5839,6 +5869,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeURLNative(name, argumentCount: argumentCount)
                                 || executeBytesNative(name, argumentCount: argumentCount)
                                 || executeNetNative(name, argumentCount: argumentCount)
+                                || executeJSONNative(name, argumentCount: argumentCount)
                                 || executeFormatStateNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)

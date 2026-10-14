@@ -138,6 +138,7 @@ enum GoSourceLibrary {
         case "time": return GoTimeLibrary.textNative(name)
         case "net": return GoNetLibrary.textNative(name)
         case "os": return GoStandardLibrary.fileSystemNative(name)
+        case "json": return GoJSONLibrary.textNative(name)
         default: return nil
         }
     }
@@ -146,6 +147,7 @@ enum GoSourceLibrary {
     static let nativeCallNames =
         ["$sort.length", "$sort.swap"] + GoStandardLibrary.httpNativeCallNames
         + GoStandardLibrary.bytesNativeCallNames + GoNetLibrary.nativeCallNames
+        + GoJSONLibrary.nativeCallNames
 
     // MARK: What the text declares
 
