@@ -280,7 +280,6 @@ format, behavior and platform changes are recorded here.
 - Array lengths that are constant expressions: `[n]T`, `[2 * n]T`,
   `[len("abc")]T`. `var a [n]int` was `expected array length`.
 
-
 ### Changed
 
 - Swiftix Go interface values carry their dynamic type wherever a value is
@@ -476,7 +475,22 @@ format, behavior and platform changes are recorded here.
   response are `int64`, as in Go; `t.Unix()` was an `int`.
 - `gofmt` writes the letter of a base prefix and of an exponent in lower case
   (`0X1F` to `0x1F`, `1E6` to `1e6`), as Go's does.
-
+- A compile error is reported in Go's words and at Go's place. A value of
+  the wrong type names the operand and where it was used: `cannot use 1
+  (untyped int constant) as string value in variable declaration` (was
+  `cannot use int as string value`), with the reason for an interface (`T
+  does not implement I (method M has pointer receiver)`). An invalid
+  operation is written out where it begins: `invalid operation: a + b
+  (mismatched types int and string)` (was `mismatched types int and string`
+  at the operator). A selection of what a type lacks is `t.b undefined (type
+  T has no field or method b)`. A call with the wrong number of arguments
+  gives `have (number)` and `want (int, string)`, for library functions and
+  builtins too. `x := f()` of a two-result `f` is `assignment mismatch: 1
+  variable but f returns 2 values`; `x redeclared in this block` is followed
+  by `other declaration of x`. Messages may hold continuation lines, each
+  after a tab, as Go prints them.
+- `GoType.description` prints `error`, `any`, and an interface type with its
+  methods (was `interface{...}` and `interface{}`).
 
 ### Fixed
 
@@ -607,7 +621,6 @@ format, behavior and platform changes are recorded here.
   string as S value`, and so were `const GET Method = "GET"`, a `Method` map
   key or argument written as a string, and `type Flag bool; var f Flag =
   true`.
-
 
 ## 0.13.1 — 2026-10-08
 
