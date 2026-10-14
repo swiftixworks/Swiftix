@@ -36,6 +36,11 @@ public enum GoFormatter {
         var printer = FormatPrinter(
             tokens: sortingImports(tokens), spacing: spacing, functionLiterals: literals,
             literalBraces: parsed.parentheses.literalBraces)
+        let text = Array(source.text.utf8)
+        printer.commentsAtLineStart = Set(
+            tokens.filter { $0.kind == .blockComment }.map(\.offset).filter {
+                $0 == 0 || text[$0 - 1] == 0x0A
+            })
         return printer.render()
     }
 
@@ -573,6 +578,9 @@ private struct FormatPrinter {
     /// The offsets of the `{` that open composite literals, as the parser
     /// found them: every other brace opens a block or the body of a type.
     let literalBraces: Set<Int>
+    /// The offsets of the `/* */` comments that begin in the first column
+    /// of their line, which Go's printer moves differently.
+    var commentsAtLineStart: Set<Int> = []
     var lines: [FormatLine] = []
     /// The cells of the line being written, and the text after the last one.
     var cells: [String] = []
@@ -1343,7 +1351,7 @@ private struct FormatPrinter {
             } else if !current.isEmpty {
                 ensureSpace()
             }
-            appendBlockComment(token.text)
+            appendBlockComment(token.text, atLineStart: commentsAtLineStart.contains(token.offset))
             previous = token
             previousWasUnaryOperator = false
             return
@@ -2068,11 +2076,116 @@ private struct FormatPrinter {
         return [")", "}", "]", "++", "--"].contains(token.text)
     }
 
-    mutating func appendBlockComment(_ text: String) {
-        let parts = text.split(separator: "\n", omittingEmptySubsequences: false)
+    /// A `/* */` comment, as Go's printer writes one (`writeComment`): its
+    /// first line where the comment begins, the lines after it without the
+    /// white space they share (`stripCommonPrefix`), indented as the
+    /// comment is. An empty line is kept.
+    mutating func appendBlockComment(_ text: String, atLineStart: Bool) {
+        let commentIndent = lineIndent ?? (indent + continuationIndent)
+        var parts = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if atLineStart, commentIndent > 0 {
+            for index in parts.indices.dropFirst() { parts[index] = "   " + parts[index] }
+        }
+        Self.stripCommonPrefix(&parts)
         for (index, part) in parts.enumerated() {
-            if index > 0 { finishLine() }
-            append(String(part))
+            let line = String(part.reversed().drop { $0 == " " || $0 == "\t" }.reversed())
+            if index == 0 {
+                append(line)
+                continue
+            }
+            finishLine()
+            if line.isEmpty {
+                lines.append(FormatLine(indent: 0))
+                continue
+            }
+            current = line
+            lineIndent = commentIndent
+        }
+    }
+
+    /// Go's `stripCommonPrefix` of the printer: the white space (and a
+    /// column of stars) that the lines after the first share comes off
+    /// them, and a closing line that holds only `*/` lines up with `/*`.
+    static func stripCommonPrefix(_ lines: inout [String]) {
+        guard lines.count > 1 else { return }
+        func isBlank(_ text: Substring) -> Bool { text.utf8.allSatisfy { $0 <= 0x20 } }
+        func commonPrefix(_ a: String, _ b: String) -> String {
+            var end = 0
+            let x = Array(a.utf8)
+            let y = Array(b.utf8)
+            while end < x.count, end < y.count, x[end] == y[end], x[end] <= 0x20 || x[end] == 0x2A {
+                end += 1
+            }
+            return String(decoding: x[..<end], as: UTF8.self)
+        }
+        var prefix = ""
+        var prefixSet = false
+        if lines.count > 2 {
+            for index in 1..<(lines.count - 1) {
+                if isBlank(lines[index][...]) {
+                    lines[index] = ""
+                } else {
+                    if !prefixSet {
+                        prefix = lines[index]
+                        prefixSet = true
+                    }
+                    prefix = commonPrefix(prefix, lines[index])
+                }
+            }
+        }
+        if !prefixSet {
+            prefix = commonPrefix(lines[lines.count - 1], lines[lines.count - 1])
+        }
+        var lineOfStars = false
+        if let star = prefix.firstIndex(of: "*") {
+            var before = String(prefix[..<star])
+            if before.hasSuffix(" ") { before.removeLast() }
+            prefix = before
+            lineOfStars = true
+        } else {
+            let first = Array(lines[0].utf8)
+            if isBlank(lines[0].dropFirst(2)) {
+                var bytes = Array(prefix.utf8)
+                var end = bytes.count
+                var spaces = 0
+                while spaces < 3, end > 0, bytes[end - 1] == 0x20 {
+                    end -= 1
+                    spaces += 1
+                }
+                if end == bytes.count, end > 0, bytes[end - 1] == 0x09 { end -= 1 }
+                bytes = Array(bytes[..<end])
+                prefix = String(decoding: bytes, as: UTF8.self)
+            } else {
+                var suffix = [UInt8](repeating: 0, count: first.count)
+                var n = 2
+                while n < first.count, first[n] <= 0x20 {
+                    suffix[n] = first[n]
+                    n += 1
+                }
+                if n > 2, suffix[2] == 0x09 {
+                    suffix = Array(suffix[2..<n])
+                } else {
+                    suffix[0] = 0x20
+                    suffix[1] = 0x20
+                    suffix = Array(suffix[0..<n])
+                }
+                let text = String(decoding: suffix, as: UTF8.self)
+                if prefix.hasSuffix(text) { prefix.removeLast(text.count) }
+            }
+        }
+        let last = lines[lines.count - 1]
+        let lastBytes = Array(last.utf8)
+        var closing = 0
+        while closing + 1 < lastBytes.count, !(lastBytes[closing] == 0x2A && lastBytes[closing + 1] == 0x2F) {
+            closing += 1
+        }
+        if lastBytes[..<closing].allSatisfy({ $0 <= 0x20 }) {
+            lines[lines.count - 1] = prefix + (lineOfStars ? " */" : "*/")
+        } else {
+            prefix = commonPrefix(prefix, last)
+        }
+        for index in lines.indices.dropFirst() where !lines[index].isEmpty {
+            lines[index] = String(decoding: Array(lines[index].utf8.dropFirst(prefix.utf8.count)), as: UTF8.self)
         }
     }
 

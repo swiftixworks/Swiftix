@@ -31,6 +31,13 @@ struct GoGofmtConformanceTests {
         #expect(try GoFormatter.format(GoSourceFile(path: "main.go", text: expected)) == expected)
     }
 
+    /// The lines of a `/* */` comment after its first lose the white space
+    /// they share and take the comment's indentation; an empty line in one
+    /// is kept.
+    @Test func blockCommentsMoveWithTheirCode() throws {
+        try expectGofmt(blockCommentsSource, blockCommentsExpected)
+    }
+
     @Test func columnsOfFieldsAndComments() throws {
         try expectGofmt(columnsOfFieldsAndCommentsSource, columnsOfFieldsAndCommentsExpected)
     }
@@ -2377,6 +2384,74 @@ func main() {
 	if bytes[0] == 'h' {
 		fmt.Println(classify(bytes[1]), '}'-'{')
 	}
+}
+
+"""#
+
+private let blockCommentsSource = #"""
+/*
+Package main keeps the text of its block comments.
+
+# Usage
+
+	run it
+
+The line above is part of the comment.
+*/
+package main
+
+func main() {
+/*
+	at the first column
+
+	of the line
+*/
+        /*
+          spaces
+          before
+        */
+	x := 1 /* tail
+
+  more */
+	if x > 0 {
+		/* one line */
+		x++
+	}
+	_ = x
+}
+
+"""#
+
+private let blockCommentsExpected = #"""
+/*
+Package main keeps the text of its block comments.
+
+# Usage
+
+	run it
+
+The line above is part of the comment.
+*/
+package main
+
+func main() {
+	/*
+		at the first column
+
+		of the line
+	*/
+	/*
+	   spaces
+	   before
+	*/
+	x := 1 /* tail
+
+	more */
+	if x > 0 {
+		/* one line */
+		x++
+	}
+	_ = x
 }
 
 """#
