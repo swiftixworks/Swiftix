@@ -174,7 +174,13 @@ struct GoSourceLibraryTests: GoTestHarness {
             n, err := io.Discard.Write([]byte("gone"))
             fmt.Println(n, err, io.EOF)
             """, imports: ["fmt", "io"])
-        #expect(discard == ["main", "$io.init", "io.discard.Write", "io.discard.WriteString"])
+        // Go's Discard has a ReadFrom that borrows its buffer from a pool.
+        #expect(
+            Set(discard) == [
+                "main", "$io.init", "io.discard.Write", "io.discard.WriteString",
+                "io.discard.ReadFrom", "*sync.Pool.Get", "*sync.Pool.Put",
+                "$literal.$GOROOT/src/io/io.go.20244",
+            ])
 
         let header = try functionNames(
             """

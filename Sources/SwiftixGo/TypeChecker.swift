@@ -1081,7 +1081,9 @@ struct FunctionChecker {
             let promoted = try promotedSelector(
                 base: base, baseType: baseType, name: name, position: position)
         else { return nil }
-        return try assignable ? assignableType(of: promoted) : type(of: promoted)
+        return try GoPromotion.$isCheckingPath.withValue(true) {
+            try assignable ? assignableType(of: promoted) : type(of: promoted)
+        }
     }
 
     /// The results of the call of `callee`, a selection from a value of
@@ -1097,16 +1099,18 @@ struct FunctionChecker {
                 base: base, baseType: baseType, name: name, position: namePosition,
                 isCalled: true)
         else { return nil }
-        if single {
-            // Whether one value is wanted was settled for the call as the
-            // source writes it: as a statement it may have several results.
-            return [
-                try callType(
-                    of: .call(callee: promoted, arguments: arguments, position: position),
-                    callee: promoted, arguments: arguments, position: position)
-            ]
+        return try GoPromotion.$isCheckingPath.withValue(true) {
+            if single {
+                // Whether one value is wanted was settled for the call as the
+                // source writes it: as a statement it may have several results.
+                return [
+                    try callType(
+                        of: .call(callee: promoted, arguments: arguments, position: position),
+                        callee: promoted, arguments: arguments, position: position)
+                ]
+            }
+            return try callResultTypes(callee: promoted, arguments: arguments, position: position)
         }
-        return try callResultTypes(callee: promoted, arguments: arguments, position: position)
     }
 
     /// The native method of the library that `callee` calls when an
@@ -4858,6 +4862,12 @@ extension FunctionChecker {
         _ name: String, of base: GoExpression, in type: GoType, at position: GoSourcePosition
     ) throws {
         guard isHidden(name, in: type) else { return }
+        // An embedded field a promotion selects on the program's behalf.
+        if GoPromotion.isCheckingPath,
+            structFields(of: type)?.contains(where: { $0.name == name && $0.isEmbedded }) == true
+        {
+            return
+        }
         let kind: String
         if structFields(of: type)?.contains(where: { $0.name == name }) == true {
             kind = "field"

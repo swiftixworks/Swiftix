@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "encoding", "encoding/base64", "encoding/json", "flag", "fmt", "io", "io/fs", "log", "math/rand", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "container/heap", "container/list", "container/ring", "context", "encoding", "encoding/base64", "encoding/binary", "encoding/json", "flag", "fmt", "hash", "hash/crc32", "hash/fnv", "io", "io/fs", "log", "math/bits", "math/rand", "net", "net/http", "net/url", "os", "os/signal", "path", "path/filepath", "runtime", "sort", "strconv", "strings", "sync", "sync/atomic", "syscall", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -58,6 +58,14 @@ enum GoSourceLibraryText {
             "RawURLEncoding", "StdEncoding", "StdPadding", "URLEncoding", "decodedLen",
             "invalidIndex",
         ],
+        "encoding/binary": [
+            "Append", "AppendByteOrder", "AppendUvarint", "AppendVarint", "BigEndian", "ByteOrder",
+            "Decode", "Encode", "LittleEndian", "MaxVarintLen16", "MaxVarintLen32",
+            "MaxVarintLen64", "NativeEndian", "PutUvarint", "PutVarint", "Read", "ReadUvarint",
+            "ReadVarint", "Size", "Uvarint", "Varint", "Write", "bigEndian", "coder", "decodeFast",
+            "decoder", "encodeFast", "encoder", "ensure", "errBufferTooSmall", "errOverflow",
+            "intDataSize", "littleEndian", "nativeEndian", "typeString",
+        ],
         "encoding/json": [
             "Compact", "Decoder", "Delim", "Encoder", "HTMLEscape", "Indent",
             "InvalidUnmarshalError", "Marshal", "MarshalIndent", "Marshaler", "MarshalerError",
@@ -92,12 +100,40 @@ enum GoSourceLibraryText {
         "fmt": [
             "Formatter", "GoStringer", "State", "Stringer",
         ],
+        "hash": [
+            "Hash", "Hash32", "Hash64",
+        ],
+        "hash/crc32": [
+            "Castagnoli", "Checksum", "ChecksumIEEE", "IEEE", "IEEETable", "Koopman", "MakeTable",
+            "New", "NewIEEE", "Size", "Table", "Update", "archAvailableCastagnoli",
+            "archAvailableIEEE", "archInitCastagnoli", "archInitIEEE", "archUpdateCastagnoli",
+            "archUpdateIEEE", "boolFlag", "byteorderBEAppendUint32", "byteorderBEAppendUint64",
+            "byteorderBEUint32", "byteorderBEUint64", "byteorderLEUint32", "castagnoliInitOnce",
+            "castagnoliTable", "castagnoliTable8", "digest", "haveCastagnoli", "ieeeInitOnce",
+            "ieeeTable8", "magic", "marshaledSize", "simpleMakeTable", "simplePopulateTable",
+            "simpleUpdate", "slicing8Cutoff", "slicing8Table", "slicingMakeTable", "slicingUpdate",
+            "tableSum", "update", "updateCastagnoli", "updateIEEE",
+        ],
+        "hash/fnv": [
+            "New128", "New128a", "New32", "New32a", "New64", "New64a", "byteorderBEAppendUint32",
+            "byteorderBEAppendUint64", "byteorderBEUint32", "byteorderBEUint64",
+            "byteorderLEUint32", "magic128", "magic128a", "magic32", "magic32a", "magic64",
+            "magic64a", "marshaledSize128", "marshaledSize32", "marshaledSize64", "offset128Higher",
+            "offset128Lower", "offset32", "offset64", "prime128Lower", "prime128Shift", "prime32",
+            "prime64", "sum128", "sum128a", "sum32", "sum32a", "sum64", "sum64a",
+        ],
         "io": [
-            "Closer", "Copy", "Discard", "ErrClosedPipe", "ErrNoProgress", "ErrShortBuffer",
-            "ErrShortWrite", "ErrUnexpectedEOF", "NopCloser", "ReadAll", "ReadAtLeast",
-            "ReadCloser", "ReadFull", "ReadWriteCloser", "ReadWriter", "Reader", "ReaderFrom",
-            "StringWriter", "WriteCloser", "WriteString", "Writer", "WriterTo", "discard",
-            "nopCloser",
+            "ByteReader", "ByteScanner", "ByteWriter", "Closer", "Copy", "CopyBuffer", "CopyN",
+            "Discard", "ErrClosedPipe", "ErrNoProgress", "ErrShortBuffer", "ErrShortWrite",
+            "ErrUnexpectedEOF", "LimitReader", "LimitedReader", "MultiReader", "MultiWriter",
+            "NewOffsetWriter", "NewSectionReader", "NopCloser", "OffsetWriter", "Pipe",
+            "PipeReader", "PipeWriter", "ReadAll", "ReadAtLeast", "ReadCloser", "ReadFull",
+            "ReadSeekCloser", "ReadSeeker", "ReadWriteCloser", "ReadWriteSeeker", "ReadWriter",
+            "Reader", "ReaderAt", "ReaderFrom", "RuneReader", "RuneScanner", "SectionReader",
+            "Seeker", "StringWriter", "TeeReader", "WriteCloser", "WriteSeeker", "WriteString",
+            "Writer", "WriterAt", "WriterTo", "blackHolePool", "copyBuffer", "discard", "eofReader",
+            "errInvalidWrite", "errOffset", "errWhence", "multiReader", "multiWriter", "nopCloser",
+            "nopCloserWriterTo", "onceError", "pipe", "teeReader",
         ],
         "io/fs": [
             "DirEntry", "ErrClosed", "ErrExist", "ErrInvalid", "ErrNotExist", "ErrPermission", "FS",
@@ -114,6 +150,19 @@ enum GoSourceLibraryText {
             "Lmicroseconds", "Lmsgprefix", "Logger", "Lshortfile", "LstdFlags", "Ltime", "New",
             "Output", "Panic", "Panicf", "Panicln", "Prefix", "Print", "Printf", "Println",
             "SetFlags", "SetOutput", "SetPrefix", "Writer", "header", "standardError", "std",
+        ],
+        "math/bits": [
+            "Add", "Add32", "Add64", "Div", "Div32", "Div64", "LeadingZeros", "LeadingZeros16",
+            "LeadingZeros32", "LeadingZeros64", "LeadingZeros8", "Len", "Len16", "Len32", "Len64",
+            "Len8", "Mul", "Mul32", "Mul64", "OnesCount", "OnesCount16", "OnesCount32",
+            "OnesCount64", "OnesCount8", "Rem", "Rem32", "Rem64", "Reverse", "Reverse16",
+            "Reverse32", "Reverse64", "Reverse8", "ReverseBytes", "ReverseBytes16",
+            "ReverseBytes32", "ReverseBytes64", "RotateLeft", "RotateLeft16", "RotateLeft32",
+            "RotateLeft64", "RotateLeft8", "Sub", "Sub32", "Sub64", "TrailingZeros",
+            "TrailingZeros16", "TrailingZeros32", "TrailingZeros64", "TrailingZeros8", "UintSize",
+            "deBruijn32", "deBruijn32tab", "deBruijn64", "deBruijn64tab", "divideByZero", "len8tab",
+            "m0", "m1", "m2", "m3", "m4", "ntz8tab", "overflowError", "pop8tab", "rev8tab",
+            "uintSize",
         ],
         "math/rand": [
             "ExpFloat64", "Float32", "Float64", "Int", "Int31", "Int31n", "Int63", "Int63n", "Intn",
@@ -269,7 +318,7 @@ enum GoSourceLibraryText {
             "titleCase",
         ],
         "sync": [
-            "Map", "Once", "Pool",
+            "Map", "Once", "OnceFunc", "Pool",
         ],
         "sync/atomic": [
             "AddInt32", "AddInt64", "AddUint32", "AddUint64", "Bool", "CompareAndSwapInt32",
@@ -307,12 +356,17 @@ enum GoSourceLibraryText {
         case "context": return Self.context
         case "encoding": return Self.encoding
         case "encoding/base64": return Self.encodingBase64
+        case "encoding/binary": return Self.encodingBinary
         case "encoding/json": return Self.encodingJson
         case "flag": return Self.flag
         case "fmt": return Self.fmt
+        case "hash": return Self.hash
+        case "hash/crc32": return Self.hashCrc32
+        case "hash/fnv": return Self.hashFnv
         case "io": return Self.io
         case "io/fs": return Self.ioFs
         case "log": return Self.log
+        case "math/bits": return Self.mathBits
         case "math/rand": return Self.mathRand
         case "net": return Self.net
         case "net/http": return Self.netHttp
@@ -3925,6 +3979,970 @@ func decodedLen(n int, padChar rune) int {
 }
 
 extension GoSourceLibraryText {
+    static let encodingBinary: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/binary/binary.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package binary implements simple translation between numbers and byte
+// sequences and encoding and decoding of varints.
+//
+// Numbers are translated by reading and writing fixed-size values.
+// A fixed-size value is either a fixed-size arithmetic
+// type (bool, int8, uint8, int16, float32, complex64, ...)
+// or an array or struct containing only fixed-size values.
+//
+// The varint functions encode and decode single integer values using
+// a variable-length encoding; smaller values require fewer bytes.
+// For a specification, see
+// https://developers.google.com/protocol-buffers/docs/encoding.
+//
+// This package favors simplicity over efficiency. Clients that require
+// high-performance serialization, especially for large data structures,
+// should look at more advanced solutions such as the [encoding/gob]
+// package or [google.golang.org/protobuf] for protocol buffers.
+package binary
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"math"
+)
+
+var errBufferTooSmall = errors.New("buffer too small")
+
+// A ByteOrder specifies how to convert byte slices into
+// 16-, 32-, or 64-bit unsigned integers.
+//
+// It is implemented by [LittleEndian], [BigEndian], and [NativeEndian].
+type ByteOrder interface {
+	Uint16([]byte) uint16
+	Uint32([]byte) uint32
+	Uint64([]byte) uint64
+	PutUint16([]byte, uint16)
+	PutUint32([]byte, uint32)
+	PutUint64([]byte, uint64)
+	String() string
+}
+
+// AppendByteOrder specifies how to append 16-, 32-, or 64-bit unsigned integers
+// into a byte slice.
+//
+// It is implemented by [LittleEndian], [BigEndian], and [NativeEndian].
+type AppendByteOrder interface {
+	AppendUint16([]byte, uint16) []byte
+	AppendUint32([]byte, uint32) []byte
+	AppendUint64([]byte, uint64) []byte
+	String() string
+}
+
+// LittleEndian is the little-endian implementation of [ByteOrder] and [AppendByteOrder].
+var LittleEndian littleEndian
+
+// BigEndian is the big-endian implementation of [ByteOrder] and [AppendByteOrder].
+var BigEndian bigEndian
+
+type littleEndian struct{}
+
+// Uint16 returns the uint16 representation of b[0:2].
+func (littleEndian) Uint16(b []byte) uint16 {
+	_ = b[1] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint16(b[0]) | uint16(b[1])<<8
+}
+
+// PutUint16 stores v into b[0:2].
+func (littleEndian) PutUint16(b []byte, v uint16) {
+	_ = b[1] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+}
+
+// AppendUint16 appends the bytes of v to b and returns the appended slice.
+func (littleEndian) AppendUint16(b []byte, v uint16) []byte {
+	return append(b,
+		byte(v),
+		byte(v>>8),
+	)
+}
+
+// Uint32 returns the uint32 representation of b[0:4].
+func (littleEndian) Uint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+// PutUint32 stores v into b[0:4].
+func (littleEndian) PutUint32(b []byte, v uint32) {
+	_ = b[3] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
+
+// AppendUint32 appends the bytes of v to b and returns the appended slice.
+func (littleEndian) AppendUint32(b []byte, v uint32) []byte {
+	return append(b,
+		byte(v),
+		byte(v>>8),
+		byte(v>>16),
+		byte(v>>24),
+	)
+}
+
+// Uint64 returns the uint64 representation of b[0:8].
+func (littleEndian) Uint64(b []byte) uint64 {
+	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
+
+// PutUint64 stores v into b[0:8].
+func (littleEndian) PutUint64(b []byte, v uint64) {
+	_ = b[7] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+	b[4] = byte(v >> 32)
+	b[5] = byte(v >> 40)
+	b[6] = byte(v >> 48)
+	b[7] = byte(v >> 56)
+}
+
+// AppendUint64 appends the bytes of v to b and returns the appended slice.
+func (littleEndian) AppendUint64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v),
+		byte(v>>8),
+		byte(v>>16),
+		byte(v>>24),
+		byte(v>>32),
+		byte(v>>40),
+		byte(v>>48),
+		byte(v>>56),
+	)
+}
+
+func (littleEndian) String() string { return "LittleEndian" }
+
+func (littleEndian) GoString() string { return "binary.LittleEndian" }
+
+type bigEndian struct{}
+
+// Uint16 returns the uint16 representation of b[0:2].
+func (bigEndian) Uint16(b []byte) uint16 {
+	_ = b[1] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint16(b[1]) | uint16(b[0])<<8
+}
+
+// PutUint16 stores v into b[0:2].
+func (bigEndian) PutUint16(b []byte, v uint16) {
+	_ = b[1] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v >> 8)
+	b[1] = byte(v)
+}
+
+// AppendUint16 appends the bytes of v to b and returns the appended slice.
+func (bigEndian) AppendUint16(b []byte, v uint16) []byte {
+	return append(b,
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+// Uint32 returns the uint32 representation of b[0:4].
+func (bigEndian) Uint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+}
+
+// PutUint32 stores v into b[0:4].
+func (bigEndian) PutUint32(b []byte, v uint32) {
+	_ = b[3] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+}
+
+// AppendUint32 appends the bytes of v to b and returns the appended slice.
+func (bigEndian) AppendUint32(b []byte, v uint32) []byte {
+	return append(b,
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+// Uint64 returns the uint64 representation of b[0:8].
+func (bigEndian) Uint64(b []byte) uint64 {
+	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
+		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
+}
+
+// PutUint64 stores v into b[0:8].
+func (bigEndian) PutUint64(b []byte, v uint64) {
+	_ = b[7] // early bounds check to guarantee safety of writes below
+	b[0] = byte(v >> 56)
+	b[1] = byte(v >> 48)
+	b[2] = byte(v >> 40)
+	b[3] = byte(v >> 32)
+	b[4] = byte(v >> 24)
+	b[5] = byte(v >> 16)
+	b[6] = byte(v >> 8)
+	b[7] = byte(v)
+}
+
+// AppendUint64 appends the bytes of v to b and returns the appended slice.
+func (bigEndian) AppendUint64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v>>56),
+		byte(v>>48),
+		byte(v>>40),
+		byte(v>>32),
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+func (bigEndian) String() string { return "BigEndian" }
+
+func (bigEndian) GoString() string { return "binary.BigEndian" }
+
+func (nativeEndian) String() string { return "NativeEndian" }
+
+func (nativeEndian) GoString() string { return "binary.NativeEndian" }
+
+// Read reads structured binary data from r into data.
+// Data must be a pointer to a fixed-size value or a slice
+// of fixed-size values.
+// Bytes read from r are decoded using the specified byte order
+// and written to successive fields of the data.
+// When decoding boolean values, a zero byte is decoded as false, and
+// any other non-zero byte is decoded as true.
+// When reading into structs, the field data for fields with
+// blank (_) field names is skipped; i.e., blank field names
+// may be used for padding.
+// When reading into a struct, all non-blank fields must be exported
+// or Read may panic.
+//
+// The error is [io.EOF] only if no bytes were read.
+// If an [io.EOF] happens after reading some but not all the bytes,
+// Read returns [io.ErrUnexpectedEOF].
+func Read(r io.Reader, order ByteOrder, data any) error {
+	// Fast path for basic types and slices.
+	if n, _ := intDataSize(data); n != 0 {
+		bs := make([]byte, n)
+		if _, err := io.ReadFull(r, bs); err != nil {
+			return err
+		}
+
+		if decodeFast(bs, order, data) {
+			return nil
+		}
+	}
+
+	// Go falls back to reflect here for any other type, which this
+	// library has not.
+	return errors.New("binary.Read: invalid type " + typeString(data))
+}
+
+// Decode decodes binary data from buf into data according to
+// the given byte order.
+// It returns an error if buf is too small, otherwise the number of
+// bytes consumed from buf.
+func Decode(buf []byte, order ByteOrder, data any) (int, error) {
+	if n, _ := intDataSize(data); n != 0 {
+		if len(buf) < n {
+			return 0, errBufferTooSmall
+		}
+
+		if decodeFast(buf, order, data) {
+			return n, nil
+		}
+	}
+
+	// Go falls back to reflect here for any other type, which this
+	// library has not.
+	return 0, errors.New("binary.Decode: invalid type " + typeString(data))
+}
+
+func decodeFast(bs []byte, order ByteOrder, data any) bool {
+	switch data := data.(type) {
+	case *bool:
+		*data = bs[0] != 0
+	case *int8:
+		*data = int8(bs[0])
+	case *uint8:
+		*data = bs[0]
+	case *int16:
+		*data = int16(order.Uint16(bs))
+	case *uint16:
+		*data = order.Uint16(bs)
+	case *int32:
+		*data = int32(order.Uint32(bs))
+	case *uint32:
+		*data = order.Uint32(bs)
+	case *int64:
+		*data = int64(order.Uint64(bs))
+	case *uint64:
+		*data = order.Uint64(bs)
+	case *float32:
+		*data = math.Float32frombits(order.Uint32(bs))
+	case *float64:
+		*data = math.Float64frombits(order.Uint64(bs))
+	case []bool:
+		for i, x := range bs { // Easier to loop over the input for 8-bit values.
+			data[i] = x != 0
+		}
+	case []int8:
+		for i, x := range bs {
+			data[i] = int8(x)
+		}
+	case []uint8:
+		copy(data, bs)
+	case []int16:
+		for i := range data {
+			data[i] = int16(order.Uint16(bs[2*i:]))
+		}
+	case []uint16:
+		for i := range data {
+			data[i] = order.Uint16(bs[2*i:])
+		}
+	case []int32:
+		for i := range data {
+			data[i] = int32(order.Uint32(bs[4*i:]))
+		}
+	case []uint32:
+		for i := range data {
+			data[i] = order.Uint32(bs[4*i:])
+		}
+	case []int64:
+		for i := range data {
+			data[i] = int64(order.Uint64(bs[8*i:]))
+		}
+	case []uint64:
+		for i := range data {
+			data[i] = order.Uint64(bs[8*i:])
+		}
+	case []float32:
+		for i := range data {
+			data[i] = math.Float32frombits(order.Uint32(bs[4*i:]))
+		}
+	case []float64:
+		for i := range data {
+			data[i] = math.Float64frombits(order.Uint64(bs[8*i:]))
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+// Write writes the binary representation of data into w.
+// Data must be a fixed-size value or a slice of fixed-size
+// values, or a pointer to such data.
+// Boolean values encode as one byte: 1 for true, and 0 for false.
+// Bytes written to w are encoded using the specified byte order
+// and read from successive fields of the data.
+// When writing structs, zero values are written for fields
+// with blank (_) field names.
+func Write(w io.Writer, order ByteOrder, data any) error {
+	// Fast path for basic types and slices.
+	if n, bs := intDataSize(data); n != 0 {
+		if bs == nil {
+			bs = make([]byte, n)
+			encodeFast(bs, order, data)
+		}
+
+		_, err := w.Write(bs)
+		return err
+	}
+
+	// Go falls back to reflect here for any other type, which this
+	// library has not.
+	return errors.New("binary.Write: some values are not fixed-sized in type " + typeString(data))
+}
+
+// Encode encodes the binary representation of data into buf according to
+// the given byte order.
+// It returns an error if buf is too small, otherwise the number of
+// bytes written into buf.
+func Encode(buf []byte, order ByteOrder, data any) (int, error) {
+	// Fast path for basic types and slices.
+	if n, _ := intDataSize(data); n != 0 {
+		if len(buf) < n {
+			return 0, errBufferTooSmall
+		}
+
+		encodeFast(buf, order, data)
+		return n, nil
+	}
+
+	// Go falls back to reflect here for any other type, which this
+	// library has not.
+	return 0, errors.New("binary.Encode: some values are not fixed-sized in type " + typeString(data))
+}
+
+// Append appends the binary representation of data to buf.
+// buf may be nil, in which case a new buffer will be allocated.
+// See [Write] on which data are acceptable.
+// It returns the (possibly extended) buffer containing data or an error.
+func Append(buf []byte, order ByteOrder, data any) ([]byte, error) {
+	// Fast path for basic types and slices.
+	if n, _ := intDataSize(data); n != 0 {
+		buf, pos := ensure(buf, n)
+		encodeFast(pos, order, data)
+		return buf, nil
+	}
+
+	// Go falls back to reflect here for any other type, which this
+	// library has not.
+	return nil, errors.New("binary.Append: some values are not fixed-sized in type " + typeString(data))
+}
+
+func encodeFast(bs []byte, order ByteOrder, data any) {
+	switch v := data.(type) {
+	case *bool:
+		if *v {
+			bs[0] = 1
+		} else {
+			bs[0] = 0
+		}
+	case bool:
+		if v {
+			bs[0] = 1
+		} else {
+			bs[0] = 0
+		}
+	case []bool:
+		for i, x := range v {
+			if x {
+				bs[i] = 1
+			} else {
+				bs[i] = 0
+			}
+		}
+	case *int8:
+		bs[0] = byte(*v)
+	case int8:
+		bs[0] = byte(v)
+	case []int8:
+		for i, x := range v {
+			bs[i] = byte(x)
+		}
+	case *uint8:
+		bs[0] = *v
+	case uint8:
+		bs[0] = v
+	case []uint8:
+		copy(bs, v)
+	case *int16:
+		order.PutUint16(bs, uint16(*v))
+	case int16:
+		order.PutUint16(bs, uint16(v))
+	case []int16:
+		for i, x := range v {
+			order.PutUint16(bs[2*i:], uint16(x))
+		}
+	case *uint16:
+		order.PutUint16(bs, *v)
+	case uint16:
+		order.PutUint16(bs, v)
+	case []uint16:
+		for i, x := range v {
+			order.PutUint16(bs[2*i:], x)
+		}
+	case *int32:
+		order.PutUint32(bs, uint32(*v))
+	case int32:
+		order.PutUint32(bs, uint32(v))
+	case []int32:
+		for i, x := range v {
+			order.PutUint32(bs[4*i:], uint32(x))
+		}
+	case *uint32:
+		order.PutUint32(bs, *v)
+	case uint32:
+		order.PutUint32(bs, v)
+	case []uint32:
+		for i, x := range v {
+			order.PutUint32(bs[4*i:], x)
+		}
+	case *int64:
+		order.PutUint64(bs, uint64(*v))
+	case int64:
+		order.PutUint64(bs, uint64(v))
+	case []int64:
+		for i, x := range v {
+			order.PutUint64(bs[8*i:], uint64(x))
+		}
+	case *uint64:
+		order.PutUint64(bs, *v)
+	case uint64:
+		order.PutUint64(bs, v)
+	case []uint64:
+		for i, x := range v {
+			order.PutUint64(bs[8*i:], x)
+		}
+	case *float32:
+		order.PutUint32(bs, math.Float32bits(*v))
+	case float32:
+		order.PutUint32(bs, math.Float32bits(v))
+	case []float32:
+		for i, x := range v {
+			order.PutUint32(bs[4*i:], math.Float32bits(x))
+		}
+	case *float64:
+		order.PutUint64(bs, math.Float64bits(*v))
+	case float64:
+		order.PutUint64(bs, math.Float64bits(v))
+	case []float64:
+		for i, x := range v {
+			order.PutUint64(bs[8*i:], math.Float64bits(x))
+		}
+	}
+}
+
+// Size returns how many bytes [Write] would generate to encode the value v, which
+// must be a fixed-size value or a slice of fixed-size values, or a pointer to such data.
+// If v is neither of these, Size returns -1.
+func Size(v any) int {
+	switch data := v.(type) {
+	case bool, int8, uint8:
+		return 1
+	case *bool:
+		if data == nil {
+			return -1
+		}
+		return 1
+	case *int8:
+		if data == nil {
+			return -1
+		}
+		return 1
+	case *uint8:
+		if data == nil {
+			return -1
+		}
+		return 1
+	case []bool:
+		return len(data)
+	case []int8:
+		return len(data)
+	case []uint8:
+		return len(data)
+	case int16, uint16:
+		return 2
+	case *int16:
+		if data == nil {
+			return -1
+		}
+		return 2
+	case *uint16:
+		if data == nil {
+			return -1
+		}
+		return 2
+	case []int16:
+		return 2 * len(data)
+	case []uint16:
+		return 2 * len(data)
+	case int32, uint32:
+		return 4
+	case *int32:
+		if data == nil {
+			return -1
+		}
+		return 4
+	case *uint32:
+		if data == nil {
+			return -1
+		}
+		return 4
+	case []int32:
+		return 4 * len(data)
+	case []uint32:
+		return 4 * len(data)
+	case int64, uint64:
+		return 8
+	case *int64:
+		if data == nil {
+			return -1
+		}
+		return 8
+	case *uint64:
+		if data == nil {
+			return -1
+		}
+		return 8
+	case []int64:
+		return 8 * len(data)
+	case []uint64:
+		return 8 * len(data)
+	case float32:
+		return 4
+	case *float32:
+		if data == nil {
+			return -1
+		}
+		return 4
+	case float64:
+		return 8
+	case *float64:
+		if data == nil {
+			return -1
+		}
+		return 8
+	case []float32:
+		return 4 * len(data)
+	case []float64:
+		return 8 * len(data)
+	}
+	// Go measures any other type with reflect, which this library has not.
+	return -1
+}
+
+type coder struct {
+	order  ByteOrder
+	buf    []byte
+	offset int
+}
+
+type decoder coder
+type encoder coder
+
+func (d *decoder) bool() bool {
+	x := d.buf[d.offset]
+	d.offset++
+	return x != 0
+}
+
+func (e *encoder) bool(x bool) {
+	if x {
+		e.buf[e.offset] = 1
+	} else {
+		e.buf[e.offset] = 0
+	}
+	e.offset++
+}
+
+func (d *decoder) uint8() uint8 {
+	x := d.buf[d.offset]
+	d.offset++
+	return x
+}
+
+func (e *encoder) uint8(x uint8) {
+	e.buf[e.offset] = x
+	e.offset++
+}
+
+func (d *decoder) uint16() uint16 {
+	x := d.order.Uint16(d.buf[d.offset : d.offset+2])
+	d.offset += 2
+	return x
+}
+
+func (e *encoder) uint16(x uint16) {
+	e.order.PutUint16(e.buf[e.offset:e.offset+2], x)
+	e.offset += 2
+}
+
+func (d *decoder) uint32() uint32 {
+	x := d.order.Uint32(d.buf[d.offset : d.offset+4])
+	d.offset += 4
+	return x
+}
+
+func (e *encoder) uint32(x uint32) {
+	e.order.PutUint32(e.buf[e.offset:e.offset+4], x)
+	e.offset += 4
+}
+
+func (d *decoder) uint64() uint64 {
+	x := d.order.Uint64(d.buf[d.offset : d.offset+8])
+	d.offset += 8
+	return x
+}
+
+func (e *encoder) uint64(x uint64) {
+	e.order.PutUint64(e.buf[e.offset:e.offset+8], x)
+	e.offset += 8
+}
+
+func (d *decoder) int8() int8 { return int8(d.uint8()) }
+
+func (e *encoder) int8(x int8) { e.uint8(uint8(x)) }
+
+func (d *decoder) int16() int16 { return int16(d.uint16()) }
+
+func (e *encoder) int16(x int16) { e.uint16(uint16(x)) }
+
+func (d *decoder) int32() int32 { return int32(d.uint32()) }
+
+func (e *encoder) int32(x int32) { e.uint32(uint32(x)) }
+
+func (d *decoder) int64() int64 { return int64(d.uint64()) }
+
+func (e *encoder) int64(x int64) { e.uint64(uint64(x)) }
+
+// intDataSize returns the size of the data required to represent the data when encoded,
+// and optionally a byte slice containing the encoded data if no conversion is necessary.
+// It returns zero, nil if the type cannot be implemented by the fast path in Read or Write.
+func intDataSize(data any) (int, []byte) {
+	switch data := data.(type) {
+	case bool, int8, uint8, *bool, *int8, *uint8:
+		return 1, nil
+	case []bool:
+		return len(data), nil
+	case []int8:
+		return len(data), nil
+	case []uint8:
+		return len(data), data
+	case int16, uint16, *int16, *uint16:
+		return 2, nil
+	case []int16:
+		return 2 * len(data), nil
+	case []uint16:
+		return 2 * len(data), nil
+	case int32, uint32, *int32, *uint32:
+		return 4, nil
+	case []int32:
+		return 4 * len(data), nil
+	case []uint32:
+		return 4 * len(data), nil
+	case int64, uint64, *int64, *uint64:
+		return 8, nil
+	case []int64:
+		return 8 * len(data), nil
+	case []uint64:
+		return 8 * len(data), nil
+	case float32, *float32:
+		return 4, nil
+	case float64, *float64:
+		return 8, nil
+	case []float32:
+		return 4 * len(data), nil
+	case []float64:
+		return 8 * len(data), nil
+	}
+	return 0, nil
+}
+
+// ensure grows buf to length len(buf) + n and returns the grown buffer
+// and a slice starting at the original length of buf (that is, buf2[len(buf):]).
+func ensure(buf []byte, n int) (buf2, pos []byte) {
+	l := len(buf)
+	buf = append(buf, make([]byte, n)...)
+	return buf, buf[l:]
+}
+
+// typeString is what Go's reflect.TypeOf(data).String() says.
+func typeString(data any) string {
+	return fmt.Sprintf("%T", data)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/binary/native_endian_little.go",
+            text: #"""
+// Copyright 2023 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package binary
+
+type nativeEndian struct {
+	littleEndian
+}
+
+// NativeEndian is the native-endian implementation of [ByteOrder] and [AppendByteOrder].
+var NativeEndian nativeEndian
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/encoding/binary/varint.go",
+            text: #"""
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package binary
+
+// This file implements "varint" encoding of 64-bit integers.
+// The encoding is:
+// - unsigned integers are serialized 7 bits at a time, starting with the
+//   least significant bits
+// - the most significant bit (msb) in each output byte indicates if there
+//   is a continuation byte (msb = 1)
+// - signed integers are mapped to unsigned integers using "zig-zag"
+//   encoding: Positive values x are written as 2*x + 0, negative values
+//   are written as 2*(^x) + 1; that is, negative numbers are complemented
+//   and whether to complement is encoded in bit 0.
+//
+// Design note:
+// At most 10 bytes are needed for 64-bit values. The encoding could
+// be more dense: a full 64-bit value needs an extra byte just to hold bit 63.
+// Instead, the msb of the previous byte could be used to hold bit 63 since we
+// know there can't be more than 64 bits. This is a trivial improvement and
+// would reduce the maximum encoding length to 9 bytes. However, it breaks the
+// invariant that the msb is always the "continuation bit" and thus makes the
+// format incompatible with a varint encoding for larger numbers (say 128-bit).
+
+import (
+	"errors"
+	"io"
+)
+
+// MaxVarintLenN is the maximum length of a varint-encoded N-bit integer.
+const (
+	MaxVarintLen16 = 3
+	MaxVarintLen32 = 5
+	MaxVarintLen64 = 10
+)
+
+// AppendUvarint appends the varint-encoded form of x,
+// as generated by [PutUvarint], to buf and returns the extended buffer.
+func AppendUvarint(buf []byte, x uint64) []byte {
+	for x >= 0x80 {
+		buf = append(buf, byte(x)|0x80)
+		x >>= 7
+	}
+	return append(buf, byte(x))
+}
+
+// PutUvarint encodes a uint64 into buf and returns the number of bytes written.
+// If the buffer is too small, PutUvarint will panic.
+func PutUvarint(buf []byte, x uint64) int {
+	i := 0
+	for x >= 0x80 {
+		buf[i] = byte(x) | 0x80
+		x >>= 7
+		i++
+	}
+	buf[i] = byte(x)
+	return i + 1
+}
+
+// Uvarint decodes a uint64 from buf and returns that value and the
+// number of bytes read (> 0). If an error occurred, the value is 0
+// and the number of bytes n is <= 0 meaning:
+//   - n == 0: buf too small;
+//   - n < 0: value larger than 64 bits (overflow) and -n is the number of
+//     bytes read.
+func Uvarint(buf []byte) (uint64, int) {
+	var x uint64
+	var s uint
+	for i, b := range buf {
+		if i == MaxVarintLen64 {
+			// Catch byte reads past MaxVarintLen64.
+			// See issue https://golang.org/issues/41185
+			return 0, -(i + 1) // overflow
+		}
+		if b < 0x80 {
+			if i == MaxVarintLen64-1 && b > 1 {
+				return 0, -(i + 1) // overflow
+			}
+			return x | uint64(b)<<s, i + 1
+		}
+		x |= uint64(b&0x7f) << s
+		s += 7
+	}
+	return 0, 0
+}
+
+// AppendVarint appends the varint-encoded form of x,
+// as generated by [PutVarint], to buf and returns the extended buffer.
+func AppendVarint(buf []byte, x int64) []byte {
+	ux := uint64(x) << 1
+	if x < 0 {
+		ux = ^ux
+	}
+	return AppendUvarint(buf, ux)
+}
+
+// PutVarint encodes an int64 into buf and returns the number of bytes written.
+// If the buffer is too small, PutVarint will panic.
+func PutVarint(buf []byte, x int64) int {
+	ux := uint64(x) << 1
+	if x < 0 {
+		ux = ^ux
+	}
+	return PutUvarint(buf, ux)
+}
+
+// Varint decodes an int64 from buf and returns that value and the
+// number of bytes read (> 0). If an error occurred, the value is 0
+// and the number of bytes n is <= 0 with the following meaning:
+//   - n == 0: buf too small;
+//   - n < 0: value larger than 64 bits (overflow)
+//     and -n is the number of bytes read.
+func Varint(buf []byte) (int64, int) {
+	ux, n := Uvarint(buf) // ok to continue in presence of error
+	x := int64(ux >> 1)
+	if ux&1 != 0 {
+		x = ^x
+	}
+	return x, n
+}
+
+var errOverflow = errors.New("binary: varint overflows a 64-bit integer")
+
+// ReadUvarint reads an encoded unsigned integer from r and returns it as a uint64.
+// The error is [io.EOF] only if no bytes were read.
+// If an [io.EOF] happens after reading some but not all the bytes,
+// ReadUvarint returns [io.ErrUnexpectedEOF].
+func ReadUvarint(r io.ByteReader) (uint64, error) {
+	var x uint64
+	var s uint
+	for i := 0; i < MaxVarintLen64; i++ {
+		b, err := r.ReadByte()
+		if err != nil {
+			if i > 0 && err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return x, err
+		}
+		if b < 0x80 {
+			if i == MaxVarintLen64-1 && b > 1 {
+				return x, errOverflow
+			}
+			return x | uint64(b)<<s, nil
+		}
+		x |= uint64(b&0x7f) << s
+		s += 7
+	}
+	return x, errOverflow
+}
+
+// ReadVarint reads an encoded signed integer from r and returns it as an int64.
+// The error is [io.EOF] only if no bytes were read.
+// If an [io.EOF] happens after reading some but not all the bytes,
+// ReadVarint returns [io.ErrUnexpectedEOF].
+func ReadVarint(r io.ByteReader) (int64, error) {
+	ux, err := ReadUvarint(r) // ok to continue in presence of error
+	x := int64(ux >> 1)
+	if ux&1 != 0 {
+		x = ^x
+	}
+	return x, err
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
     static let encodingJson: [GoSourceFile] = [
         GoSourceFile(
             path: "$GOROOT/src/encoding/json/decode.go",
@@ -6040,97 +7058,1226 @@ type GoStringer interface {
 }
 
 extension GoSourceLibraryText {
+    static let hash: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/hash/hash.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package hash provides interfaces for hash functions.
+package hash
+
+import "io"
+
+// Hash is the common interface implemented by all hash functions.
+//
+// Hash implementations in the standard library (e.g. [hash/crc32] and
+// [crypto/sha256]) implement the [encoding.BinaryMarshaler], [encoding.BinaryAppender]
+// and [encoding.BinaryUnmarshaler] interfaces. Marshaling a hash implementation
+// allows its internal state to be saved and used for additional processing
+// later, without having to re-write the data previously written to the hash.
+// The hash state may contain portions of the input in its original form,
+// which users are expected to handle for any possible security implications.
+//
+// Compatibility: Any future changes to hash or crypto packages will endeavor
+// to maintain compatibility with state encoded using previous versions.
+// That is, any released versions of the packages should be able to
+// decode data written with any previously released version,
+// subject to issues such as security fixes.
+// See the Go compatibility document for background: https://golang.org/doc/go1compat
+type Hash interface {
+	// Write (via the embedded io.Writer interface) adds more data to the running hash.
+	// It never returns an error.
+	io.Writer
+
+	// Sum appends the current hash to b and returns the resulting slice.
+	// It does not change the underlying hash state.
+	Sum(b []byte) []byte
+
+	// Reset resets the Hash to its initial state.
+	Reset()
+
+	// Size returns the number of bytes Sum will return.
+	Size() int
+
+	// BlockSize returns the hash's underlying block size.
+	// The Write method must be able to accept any amount
+	// of data, but it may operate more efficiently if all writes
+	// are a multiple of the block size.
+	BlockSize() int
+}
+
+// Hash32 is the common interface implemented by all 32-bit hash functions.
+type Hash32 interface {
+	Hash
+	Sum32() uint32
+}
+
+// Hash64 is the common interface implemented by all 64-bit hash functions.
+type Hash64 interface {
+	Hash
+	Sum64() uint64
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let hashCrc32: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/hash/crc32/byteorder.go",
+            text: #"""
+package crc32
+
+// The helpers of internal/byteorder this package uses.
+
+func byteorderLEUint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+func byteorderBEUint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+}
+
+func byteorderBEUint64(b []byte) uint64 {
+	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
+		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
+}
+
+func byteorderBEAppendUint32(b []byte, v uint32) []byte {
+	return append(b,
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+func byteorderBEAppendUint64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v>>56),
+		byte(v>>48),
+		byte(v>>40),
+		byte(v>>32),
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/hash/crc32/crc32.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package crc32 implements the 32-bit cyclic redundancy check, or CRC-32,
+// checksum. See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for
+// information.
+//
+// Polynomials are represented in LSB-first form also known as reversed representation.
+//
+// See https://en.wikipedia.org/wiki/Mathematics_of_cyclic_redundancy_checks#Reversed_representations_and_reciprocal_polynomials
+// for information.
+package crc32
+
+import (
+	"errors"
+	"hash"
+	"sync"
+)
+
+// The size of a CRC-32 checksum in bytes.
+const Size = 4
+
+// Predefined polynomials.
+const (
+	// IEEE is by far and away the most common CRC-32 polynomial.
+	// Used by ethernet (IEEE 802.3), v.42, fddi, gzip, zip, png, ...
+	IEEE = 0xedb88320
+
+	// Castagnoli's polynomial, used in iSCSI.
+	// Has better error detection characteristics than IEEE.
+	// https://dx.doi.org/10.1109/26.231911
+	Castagnoli = 0x82f63b78
+
+	// Koopman's polynomial.
+	// Also has better error detection characteristics than IEEE.
+	// https://dx.doi.org/10.1109/DSN.2002.1028931
+	Koopman = 0xeb31d82e
+)
+
+// Table is a 256-word table representing the polynomial for efficient processing.
+type Table [256]uint32
+
+// This file makes use of functions implemented in architecture-specific files.
+// The interface that they implement is as follows:
+//
+//    // archAvailableIEEE reports whether an architecture-specific CRC32-IEEE
+//    // algorithm is available.
+//    archAvailableIEEE() bool
+//
+//    // archInitIEEE initializes the architecture-specific CRC3-IEEE algorithm.
+//    // It can only be called if archAvailableIEEE() returns true.
+//    archInitIEEE()
+//
+//    // archUpdateIEEE updates the given CRC32-IEEE. It can only be called if
+//    // archInitIEEE() was previously called.
+//    archUpdateIEEE(crc uint32, p []byte) uint32
+//
+//    // archAvailableCastagnoli reports whether an architecture-specific
+//    // CRC32-C algorithm is available.
+//    archAvailableCastagnoli() bool
+//
+//    // archInitCastagnoli initializes the architecture-specific CRC32-C
+//    // algorithm. It can only be called if archAvailableCastagnoli() returns
+//    // true.
+//    archInitCastagnoli()
+//
+//    // archUpdateCastagnoli updates the given CRC32-C. It can only be called
+//    // if archInitCastagnoli() was previously called.
+//    archUpdateCastagnoli(crc uint32, p []byte) uint32
+
+// castagnoliTable points to a lazily initialized Table for the Castagnoli
+// polynomial. MakeTable will always return this value when asked to make a
+// Castagnoli table so we can compare against it to find when the caller is
+// using this polynomial.
+var castagnoliTable *Table
+var castagnoliTable8 *slicing8Table
+var updateCastagnoli func(crc uint32, p []byte) uint32
+var haveCastagnoli boolFlag
+
+var castagnoliInitOnce = sync.OnceFunc(func() {
+	castagnoliTable = simpleMakeTable(Castagnoli)
+
+	if archAvailableCastagnoli() {
+		archInitCastagnoli()
+		updateCastagnoli = archUpdateCastagnoli
+	} else {
+		// Initialize the slicing-by-8 table.
+		castagnoliTable8 = slicingMakeTable(Castagnoli)
+		updateCastagnoli = func(crc uint32, p []byte) uint32 {
+			return slicingUpdate(crc, castagnoliTable8, p)
+		}
+	}
+
+	haveCastagnoli.Store(true)
+})
+
+// IEEETable is the table for the [IEEE] polynomial.
+var IEEETable = simpleMakeTable(IEEE)
+
+// ieeeTable8 is the slicing8Table for IEEE
+var ieeeTable8 *slicing8Table
+var updateIEEE func(crc uint32, p []byte) uint32
+
+var ieeeInitOnce = sync.OnceFunc(func() {
+	if archAvailableIEEE() {
+		archInitIEEE()
+		updateIEEE = archUpdateIEEE
+	} else {
+		// Initialize the slicing-by-8 table.
+		ieeeTable8 = slicingMakeTable(IEEE)
+		updateIEEE = func(crc uint32, p []byte) uint32 {
+			return slicingUpdate(crc, ieeeTable8, p)
+		}
+	}
+})
+
+// MakeTable returns a [Table] constructed from the specified polynomial.
+// The contents of this [Table] must not be modified.
+func MakeTable(poly uint32) *Table {
+	switch poly {
+	case IEEE:
+		ieeeInitOnce()
+		return IEEETable
+	case Castagnoli:
+		castagnoliInitOnce()
+		return castagnoliTable
+	default:
+		return simpleMakeTable(poly)
+	}
+}
+
+// digest represents the partial evaluation of a checksum.
+type digest struct {
+	crc uint32
+	tab *Table
+}
+
+// New creates a new [hash.Hash32] computing the CRC-32 checksum using the
+// polynomial represented by the [Table]. Its Sum method will lay the
+// value out in big-endian byte order. The returned Hash32 also
+// implements [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to
+// marshal and unmarshal the internal state of the hash.
+func New(tab *Table) hash.Hash32 {
+	if tab == IEEETable {
+		ieeeInitOnce()
+	}
+	return &digest{0, tab}
+}
+
+// NewIEEE creates a new [hash.Hash32] computing the CRC-32 checksum using
+// the [IEEE] polynomial. Its Sum method will lay the value out in
+// big-endian byte order. The returned Hash32 also implements
+// [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to marshal
+// and unmarshal the internal state of the hash.
+func NewIEEE() hash.Hash32 { return New(IEEETable) }
+
+func (d *digest) Size() int { return Size }
+
+func (d *digest) BlockSize() int { return 1 }
+
+func (d *digest) Reset() { d.crc = 0 }
+
+const (
+	magic         = "crc\x01"
+	marshaledSize = len(magic) + 4 + 4
+)
+
+func (d *digest) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic...)
+	b = byteorderBEAppendUint32(b, tableSum(d.tab))
+	b = byteorderBEAppendUint32(b, d.crc)
+	return b, nil
+}
+
+func (d *digest) MarshalBinary() ([]byte, error) {
+	return d.AppendBinary(make([]byte, 0, marshaledSize))
+
+}
+
+func (d *digest) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic) || string(b[:len(magic)]) != magic {
+		return errors.New("hash/crc32: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize {
+		return errors.New("hash/crc32: invalid hash state size")
+	}
+	if tableSum(d.tab) != byteorderBEUint32(b[4:]) {
+		return errors.New("hash/crc32: tables do not match")
+	}
+	d.crc = byteorderBEUint32(b[8:])
+	return nil
+}
+
+func update(crc uint32, tab *Table, p []byte, checkInitIEEE bool) uint32 {
+	switch {
+	case haveCastagnoli.Load() && tab == castagnoliTable:
+		return updateCastagnoli(crc, p)
+	case tab == IEEETable:
+		if checkInitIEEE {
+			ieeeInitOnce()
+		}
+		return updateIEEE(crc, p)
+	default:
+		return simpleUpdate(crc, tab, p)
+	}
+}
+
+// Update returns the result of adding the bytes in p to the crc.
+func Update(crc uint32, tab *Table, p []byte) uint32 {
+	// Unfortunately, because IEEETable is exported, IEEE may be used without a
+	// call to MakeTable. We have to make sure it gets initialized in that case.
+	return update(crc, tab, p, true)
+}
+
+func (d *digest) Write(p []byte) (n int, err error) {
+	// We only create digest objects through New() which takes care of
+	// initialization in this case.
+	d.crc = update(d.crc, d.tab, p, false)
+	return len(p), nil
+}
+
+func (d *digest) Sum32() uint32 { return d.crc }
+
+func (d *digest) Sum(in []byte) []byte {
+	s := d.Sum32()
+	return append(in, byte(s>>24), byte(s>>16), byte(s>>8), byte(s))
+}
+
+// Checksum returns the CRC-32 checksum of data
+// using the polynomial represented by the [Table].
+func Checksum(data []byte, tab *Table) uint32 { return Update(0, tab, data) }
+
+// ChecksumIEEE returns the CRC-32 checksum of data
+// using the [IEEE] polynomial.
+func ChecksumIEEE(data []byte) uint32 {
+	ieeeInitOnce()
+	return updateIEEE(0, data)
+}
+
+// tableSum returns the IEEE checksum of table t.
+func tableSum(t *Table) uint32 {
+	var a [1024]byte
+	b := a[:0]
+	if t != nil {
+		for _, x := range t {
+			b = byteorderBEAppendUint32(b, x)
+		}
+	}
+	return ChecksumIEEE(b)
+}
+
+// boolFlag is what Go's atomic.Bool is to haveCastagnoli: a flag that
+// once set stays set, read without the lock.
+type boolFlag struct{ v bool }
+
+func (b *boolFlag) Load() bool   { return b.v }
+func (b *boolFlag) Store(v bool) { b.v = v }
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/hash/crc32/crc32_generic.go",
+            text: #"""
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// This file contains CRC32 algorithms that are not specific to any architecture
+// and don't use hardware acceleration.
+//
+// The simple (and slow) CRC32 implementation only uses a 256*4 bytes table.
+//
+// The slicing-by-8 algorithm is a faster implementation that uses a bigger
+// table (8*256*4 bytes).
+
+package crc32
+
+// simpleMakeTable allocates and constructs a Table for the specified
+// polynomial. The table is suitable for use with the simple algorithm
+// (simpleUpdate).
+func simpleMakeTable(poly uint32) *Table {
+	t := new(Table)
+	simplePopulateTable(poly, t)
+	return t
+}
+
+// simplePopulateTable constructs a Table for the specified polynomial, suitable
+// for use with simpleUpdate.
+func simplePopulateTable(poly uint32, t *Table) {
+	for i := 0; i < 256; i++ {
+		crc := uint32(i)
+		for j := 0; j < 8; j++ {
+			if crc&1 == 1 {
+				crc = (crc >> 1) ^ poly
+			} else {
+				crc >>= 1
+			}
+		}
+		t[i] = crc
+	}
+}
+
+// simpleUpdate uses the simple algorithm to update the CRC, given a table that
+// was previously computed using simpleMakeTable.
+func simpleUpdate(crc uint32, tab *Table, p []byte) uint32 {
+	crc = ^crc
+	for _, v := range p {
+		crc = tab[byte(crc)^v] ^ (crc >> 8)
+	}
+	return ^crc
+}
+
+// Use slicing-by-8 when payload >= this value.
+const slicing8Cutoff = 16
+
+// slicing8Table is array of 8 Tables, used by the slicing-by-8 algorithm.
+type slicing8Table [8]Table
+
+// slicingMakeTable constructs a slicing8Table for the specified polynomial. The
+// table is suitable for use with the slicing-by-8 algorithm (slicingUpdate).
+func slicingMakeTable(poly uint32) *slicing8Table {
+	t := new(slicing8Table)
+	simplePopulateTable(poly, &t[0])
+	for i := 0; i < 256; i++ {
+		crc := t[0][i]
+		for j := 1; j < 8; j++ {
+			crc = t[0][crc&0xFF] ^ (crc >> 8)
+			t[j][i] = crc
+		}
+	}
+	return t
+}
+
+// slicingUpdate uses the slicing-by-8 algorithm to update the CRC, given a
+// table that was previously computed using slicingMakeTable.
+func slicingUpdate(crc uint32, tab *slicing8Table, p []byte) uint32 {
+	if len(p) >= slicing8Cutoff {
+		crc = ^crc
+		for len(p) > 8 {
+			crc ^= byteorderLEUint32(p)
+			crc = tab[0][p[7]] ^ tab[1][p[6]] ^ tab[2][p[5]] ^ tab[3][p[4]] ^
+				tab[4][crc>>24] ^ tab[5][(crc>>16)&0xFF] ^
+				tab[6][(crc>>8)&0xFF] ^ tab[7][crc&0xFF]
+			p = p[8:]
+		}
+		crc = ^crc
+	}
+	if len(p) == 0 {
+		return crc
+	}
+	return simpleUpdate(crc, &tab[0], p)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/hash/crc32/crc32_otherarch.go",
+            text: #"""
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package crc32
+
+func archAvailableIEEE() bool                    { return false }
+func archInitIEEE()                              { panic("not available") }
+func archUpdateIEEE(crc uint32, p []byte) uint32 { panic("not available") }
+
+func archAvailableCastagnoli() bool                    { return false }
+func archInitCastagnoli()                              { panic("not available") }
+func archUpdateCastagnoli(crc uint32, p []byte) uint32 { panic("not available") }
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let hashFnv: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/hash/fnv/byteorder.go",
+            text: #"""
+package fnv
+
+// The helpers of internal/byteorder this package uses.
+
+func byteorderLEUint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+func byteorderBEUint32(b []byte) uint32 {
+	_ = b[3] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint32(b[3]) | uint32(b[2])<<8 | uint32(b[1])<<16 | uint32(b[0])<<24
+}
+
+func byteorderBEUint64(b []byte) uint64 {
+	_ = b[7] // bounds check hint to compiler; see golang.org/issue/14808
+	return uint64(b[7]) | uint64(b[6])<<8 | uint64(b[5])<<16 | uint64(b[4])<<24 |
+		uint64(b[3])<<32 | uint64(b[2])<<40 | uint64(b[1])<<48 | uint64(b[0])<<56
+}
+
+func byteorderBEAppendUint32(b []byte, v uint32) []byte {
+	return append(b,
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+func byteorderBEAppendUint64(b []byte, v uint64) []byte {
+	return append(b,
+		byte(v>>56),
+		byte(v>>48),
+		byte(v>>40),
+		byte(v>>32),
+		byte(v>>24),
+		byte(v>>16),
+		byte(v>>8),
+		byte(v),
+	)
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/hash/fnv/fnv.go",
+            text: #"""
+// Copyright 2011 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package fnv implements FNV-1 and FNV-1a, non-cryptographic hash functions
+// created by Glenn Fowler, Landon Curt Noll, and Phong Vo.
+// See
+// https://en.wikipedia.org/wiki/Fowler-Noll-Vo_hash_function.
+//
+// All the hash.Hash implementations returned by this package also
+// implement encoding.BinaryMarshaler and encoding.BinaryUnmarshaler to
+// marshal and unmarshal the internal state of the hash.
+package fnv
+
+import (
+	"errors"
+	"hash"
+	"math/bits"
+)
+
+type (
+	sum32   uint32
+	sum32a  uint32
+	sum64   uint64
+	sum64a  uint64
+	sum128  [2]uint64
+	sum128a [2]uint64
+)
+
+const (
+	offset32        = 2166136261
+	offset64        = 14695981039346656037
+	offset128Lower  = 0x62b821756295c58d
+	offset128Higher = 0x6c62272e07bb0142
+	prime32         = 16777619
+	prime64         = 1099511628211
+	prime128Lower   = 0x13b
+	prime128Shift   = 24
+)
+
+// New32 returns a new 32-bit FNV-1 [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New32() hash.Hash32 {
+	var s sum32 = offset32
+	return &s
+}
+
+// New32a returns a new 32-bit FNV-1a [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New32a() hash.Hash32 {
+	var s sum32a = offset32
+	return &s
+}
+
+// New64 returns a new 64-bit FNV-1 [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New64() hash.Hash64 {
+	var s sum64 = offset64
+	return &s
+}
+
+// New64a returns a new 64-bit FNV-1a [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New64a() hash.Hash64 {
+	var s sum64a = offset64
+	return &s
+}
+
+// New128 returns a new 128-bit FNV-1 [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New128() hash.Hash {
+	var s sum128
+	s[0] = offset128Higher
+	s[1] = offset128Lower
+	return &s
+}
+
+// New128a returns a new 128-bit FNV-1a [hash.Hash].
+// Its Sum method will lay the value out in big-endian byte order.
+func New128a() hash.Hash {
+	var s sum128a
+	s[0] = offset128Higher
+	s[1] = offset128Lower
+	return &s
+}
+
+func (s *sum32) Reset()   { *s = offset32 }
+func (s *sum32a) Reset()  { *s = offset32 }
+func (s *sum64) Reset()   { *s = offset64 }
+func (s *sum64a) Reset()  { *s = offset64 }
+func (s *sum128) Reset()  { s[0] = offset128Higher; s[1] = offset128Lower }
+func (s *sum128a) Reset() { s[0] = offset128Higher; s[1] = offset128Lower }
+
+func (s *sum32) Sum32() uint32  { return uint32(*s) }
+func (s *sum32a) Sum32() uint32 { return uint32(*s) }
+func (s *sum64) Sum64() uint64  { return uint64(*s) }
+func (s *sum64a) Sum64() uint64 { return uint64(*s) }
+
+func (s *sum32) Write(data []byte) (int, error) {
+	hash := *s
+	for _, c := range data {
+		hash *= prime32
+		hash ^= sum32(c)
+	}
+	*s = hash
+	return len(data), nil
+}
+
+func (s *sum32a) Write(data []byte) (int, error) {
+	hash := *s
+	for _, c := range data {
+		hash ^= sum32a(c)
+		hash *= prime32
+	}
+	*s = hash
+	return len(data), nil
+}
+
+func (s *sum64) Write(data []byte) (int, error) {
+	hash := *s
+	for _, c := range data {
+		hash *= prime64
+		hash ^= sum64(c)
+	}
+	*s = hash
+	return len(data), nil
+}
+
+func (s *sum64a) Write(data []byte) (int, error) {
+	hash := *s
+	for _, c := range data {
+		hash ^= sum64a(c)
+		hash *= prime64
+	}
+	*s = hash
+	return len(data), nil
+}
+
+func (s *sum128) Write(data []byte) (int, error) {
+	for _, c := range data {
+		// Compute the multiplication
+		s0, s1 := bits.Mul64(prime128Lower, s[1])
+		s0 += s[1]<<prime128Shift + prime128Lower*s[0]
+		// Update the values
+		s[1] = s1
+		s[0] = s0
+		s[1] ^= uint64(c)
+	}
+	return len(data), nil
+}
+
+func (s *sum128a) Write(data []byte) (int, error) {
+	for _, c := range data {
+		s[1] ^= uint64(c)
+		// Compute the multiplication
+		s0, s1 := bits.Mul64(prime128Lower, s[1])
+		s0 += s[1]<<prime128Shift + prime128Lower*s[0]
+		// Update the values
+		s[1] = s1
+		s[0] = s0
+	}
+	return len(data), nil
+}
+
+func (s *sum32) Size() int   { return 4 }
+func (s *sum32a) Size() int  { return 4 }
+func (s *sum64) Size() int   { return 8 }
+func (s *sum64a) Size() int  { return 8 }
+func (s *sum128) Size() int  { return 16 }
+func (s *sum128a) Size() int { return 16 }
+
+func (s *sum32) BlockSize() int   { return 1 }
+func (s *sum32a) BlockSize() int  { return 1 }
+func (s *sum64) BlockSize() int   { return 1 }
+func (s *sum64a) BlockSize() int  { return 1 }
+func (s *sum128) BlockSize() int  { return 1 }
+func (s *sum128a) BlockSize() int { return 1 }
+
+func (s *sum32) Sum(in []byte) []byte {
+	v := uint32(*s)
+	return byteorderBEAppendUint32(in, v)
+}
+
+func (s *sum32a) Sum(in []byte) []byte {
+	v := uint32(*s)
+	return byteorderBEAppendUint32(in, v)
+}
+
+func (s *sum64) Sum(in []byte) []byte {
+	v := uint64(*s)
+	return byteorderBEAppendUint64(in, v)
+}
+
+func (s *sum64a) Sum(in []byte) []byte {
+	v := uint64(*s)
+	return byteorderBEAppendUint64(in, v)
+}
+
+func (s *sum128) Sum(in []byte) []byte {
+	ret := byteorderBEAppendUint64(in, s[0])
+	return byteorderBEAppendUint64(ret, s[1])
+}
+
+func (s *sum128a) Sum(in []byte) []byte {
+	ret := byteorderBEAppendUint64(in, s[0])
+	return byteorderBEAppendUint64(ret, s[1])
+}
+
+const (
+	magic32          = "fnv\x01"
+	magic32a         = "fnv\x02"
+	magic64          = "fnv\x03"
+	magic64a         = "fnv\x04"
+	magic128         = "fnv\x05"
+	magic128a        = "fnv\x06"
+	marshaledSize32  = len(magic32) + 4
+	marshaledSize64  = len(magic64) + 8
+	marshaledSize128 = len(magic128) + 8*2
+)
+
+func (s *sum32) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic32...)
+	b = byteorderBEAppendUint32(b, uint32(*s))
+	return b, nil
+}
+
+func (s *sum32) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize32))
+}
+
+func (s *sum32a) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic32a...)
+	b = byteorderBEAppendUint32(b, uint32(*s))
+	return b, nil
+}
+
+func (s *sum32a) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize32))
+}
+
+func (s *sum64) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic64...)
+	b = byteorderBEAppendUint64(b, uint64(*s))
+	return b, nil
+}
+
+func (s *sum64) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize64))
+}
+
+func (s *sum64a) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic64a...)
+	b = byteorderBEAppendUint64(b, uint64(*s))
+	return b, nil
+}
+
+func (s *sum64a) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize64))
+}
+
+func (s *sum128) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic128...)
+	b = byteorderBEAppendUint64(b, s[0])
+	b = byteorderBEAppendUint64(b, s[1])
+	return b, nil
+}
+
+func (s *sum128) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize128))
+}
+
+func (s *sum128a) AppendBinary(b []byte) ([]byte, error) {
+	b = append(b, magic128a...)
+	b = byteorderBEAppendUint64(b, s[0])
+	b = byteorderBEAppendUint64(b, s[1])
+	return b, nil
+}
+
+func (s *sum128a) MarshalBinary() ([]byte, error) {
+	return s.AppendBinary(make([]byte, 0, marshaledSize128))
+}
+
+func (s *sum32) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic32) || string(b[:len(magic32)]) != magic32 {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize32 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	*s = sum32(byteorderBEUint32(b[4:]))
+	return nil
+}
+
+func (s *sum32a) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic32a) || string(b[:len(magic32a)]) != magic32a {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize32 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	*s = sum32a(byteorderBEUint32(b[4:]))
+	return nil
+}
+
+func (s *sum64) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic64) || string(b[:len(magic64)]) != magic64 {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize64 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	*s = sum64(byteorderBEUint64(b[4:]))
+	return nil
+}
+
+func (s *sum64a) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic64a) || string(b[:len(magic64a)]) != magic64a {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize64 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	*s = sum64a(byteorderBEUint64(b[4:]))
+	return nil
+}
+
+func (s *sum128) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic128) || string(b[:len(magic128)]) != magic128 {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize128 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	s[0] = byteorderBEUint64(b[4:])
+	s[1] = byteorderBEUint64(b[12:])
+	return nil
+}
+
+func (s *sum128a) UnmarshalBinary(b []byte) error {
+	if len(b) < len(magic128a) || string(b[:len(magic128a)]) != magic128a {
+		return errors.New("hash/fnv: invalid hash state identifier")
+	}
+	if len(b) != marshaledSize128 {
+		return errors.New("hash/fnv: invalid hash state size")
+	}
+	s[0] = byteorderBEUint64(b[4:])
+	s[1] = byteorderBEUint64(b[12:])
+	return nil
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
     static let io: [GoSourceFile] = [
         GoSourceFile(
             path: "$GOROOT/src/io/io.go",
             text: #"""
-// Package io is the part of io that is written in Go: the interfaces, and
-// the functions that call their methods. EOF and the Seek constants belong
-// to the run-time library, which this file imports under the same path.
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package io provides basic interfaces to I/O primitives.
+//
+// This is Go's io, written for this run-time library: EOF and the Seek
+// constants belong to the run-time library, which this file imports under
+// the same path.
+// Its primary job is to wrap existing implementations of such primitives,
+// such as those in package os, into shared public interfaces that
+// abstract the functionality, plus some other related primitives.
+//
+// Because these interfaces and primitives wrap lower-level operations with
+// various implementations, unless otherwise informed clients should not
+// assume they are safe for parallel execution.
 package io
 
 import (
 	"errors"
 	"io"
+	"sync"
 )
 
-// Reader is what bytes are read from. Read fills p from the start and says
-// how many bytes it stored; at the end of the data it returns EOF.
+// ErrShortWrite means that a write accepted fewer bytes than requested
+// but failed to return an explicit error.
+var ErrShortWrite = errors.New("short write")
+
+// errInvalidWrite means that a write returned an impossible count.
+var errInvalidWrite = errors.New("invalid write result")
+
+// ErrShortBuffer means that a read required a longer buffer than was provided.
+var ErrShortBuffer = errors.New("short buffer")
+
+// ErrUnexpectedEOF means that io.EOF was encountered in the
+// middle of reading a fixed-size block or data structure.
+var ErrUnexpectedEOF = errors.New("unexpected EOF")
+
+// ErrNoProgress is returned by some clients of a [Reader] when
+// many calls to Read have failed to return any data or error,
+// usually the sign of a broken [Reader] implementation.
+var ErrNoProgress = errors.New("multiple Read calls return no data or error")
+
+// Reader is the interface that wraps the basic Read method.
+//
+// Read reads up to len(p) bytes into p. It returns the number of bytes
+// read (0 <= n <= len(p)) and any error encountered. Even if Read
+// returns n < len(p), it may use all of p as scratch space during the call.
+// If some data is available but not len(p) bytes, Read conventionally
+// returns what is available instead of waiting for more.
+//
+// When Read encounters an error or end-of-file condition after
+// successfully reading n > 0 bytes, it returns the number of
+// bytes read. It may return the (non-nil) error from the same call
+// or return the error (and n == 0) from a subsequent call.
+// An instance of this general case is that a Reader returning
+// a non-zero number of bytes at the end of the input stream may
+// return either err == io.EOF or err == nil. The next Read should
+// return 0, io.EOF.
+//
+// Callers should always process the n > 0 bytes returned before
+// considering the error err. Doing so correctly handles I/O errors
+// that happen after reading some bytes and also both of the
+// allowed io.EOF behaviors.
+//
+// If len(p) == 0, Read should always return n == 0. It may return a
+// non-nil error if some error condition is known, such as io.EOF.
+//
+// Implementations of Read are discouraged from returning a
+// zero byte count with a nil error, except when len(p) == 0.
+// Callers should treat a return of 0 and nil as indicating that
+// nothing happened; in particular it does not indicate io.EOF.
+//
+// Implementations must not retain p.
 type Reader interface {
 	Read(p []byte) (n int, err error)
 }
 
-// Writer is what bytes are written to. Write takes all of p or returns the
-// error that stopped it.
+// Writer is the interface that wraps the basic Write method.
+//
+// Write writes len(p) bytes from p to the underlying data stream.
+// It returns the number of bytes written from p (0 <= n <= len(p))
+// and any error encountered that caused the write to stop early.
+// Write must return a non-nil error if it returns n < len(p).
+// Write must not modify the slice data, even temporarily.
+//
+// Implementations must not retain p.
 type Writer interface {
 	Write(p []byte) (n int, err error)
 }
 
-// Closer is something that is given back when it is no longer used.
+// Closer is the interface that wraps the basic Close method.
+//
+// The behavior of Close after the first call is undefined.
+// Specific implementations may document their own behavior.
 type Closer interface {
 	Close() error
 }
 
-// ReadCloser is a Reader that is closed after use, such as the body of an
-// HTTP message.
-type ReadCloser interface {
-	Read(p []byte) (n int, err error)
-	Close() error
+// Seeker is the interface that wraps the basic Seek method.
+//
+// Seek sets the offset for the next Read or Write to offset,
+// interpreted according to whence:
+// [io.SeekStart] means relative to the start of the file,
+// [io.SeekCurrent] means relative to the current offset, and
+// [io.SeekEnd] means relative to the end
+// (for example, offset = -2 specifies the penultimate byte of the file).
+// Seek returns the new offset relative to the start of the
+// file or an error, if any.
+//
+// Seeking to an offset before the start of the file is an error.
+// Seeking to any positive offset may be allowed, but if the new offset exceeds
+// the size of the underlying object the behavior of subsequent I/O operations
+// is implementation-dependent.
+type Seeker interface {
+	Seek(offset int64, whence int) (int64, error)
 }
 
-// WriteCloser is a Writer that is closed after use.
-type WriteCloser interface {
-	Write(p []byte) (n int, err error)
-	Close() error
-}
-
-// ReadWriter is both a Reader and a Writer.
+// ReadWriter is the interface that groups the basic Read and Write methods.
 type ReadWriter interface {
-	Read(p []byte) (n int, err error)
-	Write(p []byte) (n int, err error)
+	Reader
+	Writer
 }
 
-// ReadWriteCloser is a Reader, a Writer, and a Closer.
+// ReadCloser is the interface that groups the basic Read and Close methods.
+type ReadCloser interface {
+	Reader
+	Closer
+}
+
+// WriteCloser is the interface that groups the basic Write and Close methods.
+type WriteCloser interface {
+	Writer
+	Closer
+}
+
+// ReadWriteCloser is the interface that groups the basic Read, Write and Close methods.
 type ReadWriteCloser interface {
-	Read(p []byte) (n int, err error)
-	Write(p []byte) (n int, err error)
-	Close() error
+	Reader
+	Writer
+	Closer
 }
 
-// StringWriter is a writer that takes a string as it is.
-type StringWriter interface {
-	WriteString(s string) (n int, err error)
+// ReadSeeker is the interface that groups the basic Read and Seek methods.
+type ReadSeeker interface {
+	Reader
+	Seeker
 }
 
-// ReaderFrom is a writer that can fill itself from a reader: ReadFrom reads
-// r to its end and returns the number of bytes read.
+// ReadSeekCloser is the interface that groups the basic Read, Seek and Close
+// methods.
+type ReadSeekCloser interface {
+	Reader
+	Seeker
+	Closer
+}
+
+// WriteSeeker is the interface that groups the basic Write and Seek methods.
+type WriteSeeker interface {
+	Writer
+	Seeker
+}
+
+// ReadWriteSeeker is the interface that groups the basic Read, Write and Seek methods.
+type ReadWriteSeeker interface {
+	Reader
+	Writer
+	Seeker
+}
+
+// ReaderFrom is the interface that wraps the ReadFrom method.
+//
+// ReadFrom reads data from r until io.EOF or error.
+// The return value n is the number of bytes read.
+// Any error except io.EOF encountered during the read is also returned.
+//
+// The [Copy] function uses [ReaderFrom] if available.
 type ReaderFrom interface {
 	ReadFrom(r Reader) (n int64, err error)
 }
 
-// WriterTo is a reader that can empty itself into a writer: WriteTo writes
-// to w until there is no more and returns the number of bytes written.
+// WriterTo is the interface that wraps the WriteTo method.
+//
+// WriteTo writes data to w until there's no more data to write or
+// when an error occurs. The return value n is the number of bytes
+// written. Any error encountered during the write is also returned.
+//
+// The Copy function uses WriterTo if available.
 type WriterTo interface {
 	WriteTo(w Writer) (n int64, err error)
 }
 
-// ErrNoProgress is what a reader of a Reader returns when many calls of
-// Read in a row gave no data and no error.
-var ErrNoProgress = errors.New("multiple Read calls return no data or error")
+// ReaderAt is the interface that wraps the basic ReadAt method.
+//
+// ReadAt reads len(p) bytes into p starting at offset off in the
+// underlying input source. It returns the number of bytes
+// read (0 <= n <= len(p)) and any error encountered.
+//
+// When ReadAt returns n < len(p), it returns a non-nil error
+// explaining why more bytes were not returned. In this respect,
+// ReadAt is stricter than Read.
+//
+// Even if ReadAt returns n < len(p), it may use all of p as scratch
+// space during the call. If some data is available but not len(p) bytes,
+// ReadAt blocks until either all the data is available or an error occurs.
+// In this respect ReadAt is different from Read.
+//
+// If the n = len(p) bytes returned by ReadAt are at the end of the
+// input source, ReadAt may return either err == io.EOF or err == nil.
+//
+// If ReadAt is reading from an input source with a seek offset,
+// ReadAt should not affect nor be affected by the underlying
+// seek offset.
+//
+// Clients of ReadAt can execute parallel ReadAt calls on the
+// same input source.
+//
+// Implementations must not retain p.
+type ReaderAt interface {
+	ReadAt(p []byte, off int64) (n int, err error)
+}
 
-// ErrUnexpectedEOF is the end of the data where more was promised.
-var ErrUnexpectedEOF = errors.New("unexpected EOF")
+// WriterAt is the interface that wraps the basic WriteAt method.
+//
+// WriteAt writes len(p) bytes from p to the underlying data stream
+// at offset off. It returns the number of bytes written from p (0 <= n <= len(p))
+// and any error encountered that caused the write to stop early.
+// WriteAt must return a non-nil error if it returns n < len(p).
+//
+// If WriteAt is writing to a destination with a seek offset,
+// WriteAt should not affect nor be affected by the underlying
+// seek offset.
+//
+// Clients of WriteAt can execute parallel WriteAt calls on the same
+// destination if the ranges do not overlap.
+//
+// Implementations must not retain p.
+type WriterAt interface {
+	WriteAt(p []byte, off int64) (n int, err error)
+}
 
-// ErrClosedPipe is the error of a read or a write on a closed pipe.
-var ErrClosedPipe = errors.New("io: read/write on closed pipe")
+// ByteReader is the interface that wraps the ReadByte method.
+//
+// ReadByte reads and returns the next byte from the input or
+// any error encountered. If ReadByte returns an error, no input
+// byte was consumed, and the returned byte value is undefined.
+//
+// ReadByte provides an efficient interface for byte-at-time
+// processing. A [Reader] that does not implement  ByteReader
+// can be wrapped using bufio.NewReader to add this method.
+type ByteReader interface {
+	ReadByte() (byte, error)
+}
 
-// ErrShortBuffer is what ReadAtLeast says of a buffer smaller than the
-// least it was asked to read.
-var ErrShortBuffer = errors.New("short buffer")
+// ByteScanner is the interface that adds the UnreadByte method to the
+// basic ReadByte method.
+//
+// UnreadByte causes the next call to ReadByte to return the last byte read.
+// If the last operation was not a successful call to ReadByte, UnreadByte may
+// return an error, unread the last byte read (or the byte prior to the
+// last-unread byte), or (in implementations that support the [Seeker] interface)
+// seek to one byte before the current offset.
+type ByteScanner interface {
+	ByteReader
+	UnreadByte() error
+}
 
-// ReadAtLeast reads into buf until it has read at least min bytes. It
-// gives EOF only when nothing was read, ErrUnexpectedEOF when the data
-// ended before min, and drops an error that came with enough data.
+// ByteWriter is the interface that wraps the WriteByte method.
+type ByteWriter interface {
+	WriteByte(c byte) error
+}
+
+// RuneReader is the interface that wraps the ReadRune method.
+//
+// ReadRune reads a single encoded Unicode character
+// and returns the rune and its size in bytes. If no character is
+// available, err will be set.
+type RuneReader interface {
+	ReadRune() (r rune, size int, err error)
+}
+
+// RuneScanner is the interface that adds the UnreadRune method to the
+// basic ReadRune method.
+//
+// UnreadRune causes the next call to ReadRune to return the last rune read.
+// If the last operation was not a successful call to ReadRune, UnreadRune may
+// return an error, unread the last rune read (or the rune prior to the
+// last-unread rune), or (in implementations that support the [Seeker] interface)
+// seek to the start of the rune before the current offset.
+type RuneScanner interface {
+	RuneReader
+	UnreadRune() error
+}
+
+// StringWriter is the interface that wraps the WriteString method.
+type StringWriter interface {
+	WriteString(s string) (n int, err error)
+}
+
+// WriteString writes the contents of the string s to w, which accepts a slice of bytes.
+// If w implements [StringWriter], [StringWriter.WriteString] is invoked directly.
+// Otherwise, [Writer.Write] is called exactly once.
+func WriteString(w Writer, s string) (n int, err error) {
+	if sw, ok := w.(StringWriter); ok {
+		return sw.WriteString(s)
+	}
+	return w.Write([]byte(s))
+}
+
+// ReadAtLeast reads from r into buf until it has read at least min bytes.
+// It returns the number of bytes copied and an error if fewer bytes were read.
+// The error is io.EOF only if no bytes were read.
+// If an io.EOF happens after reading fewer than min bytes,
+// ReadAtLeast returns [ErrUnexpectedEOF].
+// If min is greater than the length of buf, ReadAtLeast returns [ErrShortBuffer].
+// On return, n >= min if and only if err == nil.
+// If r returns an error having read at least min bytes, the error is dropped.
 func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 	if len(buf) < min {
 		return 0, ErrShortBuffer
@@ -6145,28 +8292,372 @@ func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 	} else if n > 0 && err == io.EOF {
 		err = ErrUnexpectedEOF
 	}
-	return n, err
+	return
 }
 
-// ReadFull reads exactly len(buf) bytes into buf.
+// ReadFull reads exactly len(buf) bytes from r into buf.
+// It returns the number of bytes copied and an error if fewer bytes were read.
+// The error is io.EOF only if no bytes were read.
+// If an io.EOF happens after reading some but not all the bytes,
+// ReadFull returns [ErrUnexpectedEOF].
+// On return, n == len(buf) if and only if err == nil.
+// If r returns an error having read at least len(buf) bytes, the error is dropped.
 func ReadFull(r Reader, buf []byte) (n int, err error) {
 	return ReadAtLeast(r, buf, len(buf))
 }
 
-// ErrShortWrite is a Write that took fewer bytes than it was given and
-// reported no error.
-var ErrShortWrite = errors.New("short write")
-
-// WriteString writes s to w, through w's own WriteString when it has one.
-func WriteString(w Writer, s string) (n int, err error) {
-	if sw, ok := w.(StringWriter); ok {
-		return sw.WriteString(s)
+// CopyN copies n bytes (or until an error) from src to dst.
+// It returns the number of bytes copied and the earliest
+// error encountered while copying.
+// On return, written == n if and only if err == nil.
+//
+// If dst implements [ReaderFrom], the copy is implemented using it.
+func CopyN(dst Writer, src Reader, n int64) (written int64, err error) {
+	written, err = Copy(dst, LimitReader(src, n))
+	if written == n {
+		return n, nil
 	}
-	return w.Write([]byte(s))
+	if written < n && err == nil {
+		// src stopped early; must have been io.EOF.
+		err = io.EOF
+	}
+	return
 }
 
-// ReadAll reads r to its end and returns everything it read. Reaching the
-// end is not an error: only a failure to read is returned.
+// Copy copies from src to dst until either io.EOF is reached
+// on src or an error occurs. It returns the number of bytes
+// copied and the first error encountered while copying, if any.
+//
+// A successful Copy returns err == nil, not err == io.EOF.
+// Because Copy is defined to read from src until io.EOF, it does
+// not treat an io.EOF from Read as an error to be reported.
+//
+// If src implements [WriterTo],
+// the copy is implemented by calling src.WriteTo(dst).
+// Otherwise, if dst implements [ReaderFrom],
+// the copy is implemented by calling dst.ReadFrom(src).
+func Copy(dst Writer, src Reader) (written int64, err error) {
+	return copyBuffer(dst, src, nil)
+}
+
+// CopyBuffer is identical to Copy except that it stages through the
+// provided buffer (if one is required) rather than allocating a
+// temporary one. If buf is nil, one is allocated; otherwise if it has
+// zero length, CopyBuffer panics.
+//
+// If either src implements [WriterTo] or dst implements [ReaderFrom],
+// buf will not be used to perform the copy.
+func CopyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
+	if buf != nil && len(buf) == 0 {
+		panic("empty buffer in CopyBuffer")
+	}
+	return copyBuffer(dst, src, buf)
+}
+
+// copyBuffer is the actual implementation of Copy and CopyBuffer.
+// if buf is nil, one is allocated.
+func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
+	// If the reader has a WriteTo method, use it to do the copy.
+	// Avoids an allocation and a copy.
+	if wt, ok := src.(WriterTo); ok {
+		return wt.WriteTo(dst)
+	}
+	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
+	if rf, ok := dst.(ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	if buf == nil {
+		size := 32 * 1024
+		if l, ok := src.(*LimitedReader); ok && int64(size) > l.N {
+			if l.N < 1 {
+				size = 1
+			} else {
+				size = int(l.N)
+			}
+		}
+		buf = make([]byte, size)
+	}
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = errInvalidWrite
+				}
+			}
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+	return written, err
+}
+
+// LimitReader returns a Reader that reads from r
+// but stops with io.EOF after n bytes.
+// The underlying implementation is a *LimitedReader.
+func LimitReader(r Reader, n int64) Reader { return &LimitedReader{r, n} }
+
+// A LimitedReader reads from R but limits the amount of
+// data returned to just N bytes. Each call to Read
+// updates N to reflect the new amount remaining.
+// Read returns io.EOF when N <= 0 or when the underlying R returns io.EOF.
+type LimitedReader struct {
+	R Reader // underlying reader
+	N int64  // max bytes remaining
+}
+
+func (l *LimitedReader) Read(p []byte) (n int, err error) {
+	if l.N <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > l.N {
+		p = p[0:l.N]
+	}
+	n, err = l.R.Read(p)
+	l.N -= int64(n)
+	return
+}
+
+// NewSectionReader returns a [SectionReader] that reads from r
+// starting at offset off and stops with io.EOF after n bytes.
+func NewSectionReader(r ReaderAt, off int64, n int64) *SectionReader {
+	var remaining int64
+	const maxint64 = 1<<63 - 1
+	if off <= maxint64-n {
+		remaining = n + off
+	} else {
+		// Overflow, with no way to return error.
+		// Assume we can read up to an offset of 1<<63 - 1.
+		remaining = maxint64
+	}
+	return &SectionReader{r, off, off, remaining, n}
+}
+
+// SectionReader implements Read, Seek, and ReadAt on a section
+// of an underlying [ReaderAt].
+type SectionReader struct {
+	r     ReaderAt // constant after creation
+	base  int64    // constant after creation
+	off   int64
+	limit int64 // constant after creation
+	n     int64 // constant after creation
+}
+
+func (s *SectionReader) Read(p []byte) (n int, err error) {
+	if s.off >= s.limit {
+		return 0, io.EOF
+	}
+	if max := s.limit - s.off; int64(len(p)) > max {
+		p = p[0:max]
+	}
+	n, err = s.r.ReadAt(p, s.off)
+	s.off += int64(n)
+	return
+}
+
+var errWhence = errors.New("Seek: invalid whence")
+var errOffset = errors.New("Seek: invalid offset")
+
+func (s *SectionReader) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	default:
+		return 0, errWhence
+	case io.SeekStart:
+		offset += s.base
+	case io.SeekCurrent:
+		offset += s.off
+	case io.SeekEnd:
+		offset += s.limit
+	}
+	if offset < s.base {
+		return 0, errOffset
+	}
+	s.off = offset
+	return offset - s.base, nil
+}
+
+func (s *SectionReader) ReadAt(p []byte, off int64) (n int, err error) {
+	if off < 0 || off >= s.Size() {
+		return 0, io.EOF
+	}
+	off += s.base
+	if max := s.limit - off; int64(len(p)) > max {
+		p = p[0:max]
+		n, err = s.r.ReadAt(p, off)
+		if err == nil {
+			err = io.EOF
+		}
+		return n, err
+	}
+	return s.r.ReadAt(p, off)
+}
+
+// Size returns the size of the section in bytes.
+func (s *SectionReader) Size() int64 { return s.limit - s.base }
+
+// Outer returns the underlying [ReaderAt] and offsets for the section.
+//
+// The returned values are the same that were passed to [NewSectionReader]
+// when the [SectionReader] was created.
+func (s *SectionReader) Outer() (r ReaderAt, off int64, n int64) {
+	return s.r, s.base, s.n
+}
+
+// An OffsetWriter maps writes at offset base to offset base+off in the underlying writer.
+type OffsetWriter struct {
+	w    WriterAt
+	base int64 // the original offset
+	off  int64 // the current offset
+}
+
+// NewOffsetWriter returns an [OffsetWriter] that writes to w
+// starting at offset off.
+func NewOffsetWriter(w WriterAt, off int64) *OffsetWriter {
+	return &OffsetWriter{w, off, off}
+}
+
+func (o *OffsetWriter) Write(p []byte) (n int, err error) {
+	n, err = o.w.WriteAt(p, o.off)
+	o.off += int64(n)
+	return
+}
+
+func (o *OffsetWriter) WriteAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, errOffset
+	}
+
+	off += o.base
+	return o.w.WriteAt(p, off)
+}
+
+func (o *OffsetWriter) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	default:
+		return 0, errWhence
+	case io.SeekStart:
+		offset += o.base
+	case io.SeekCurrent:
+		offset += o.off
+	}
+	if offset < o.base {
+		return 0, errOffset
+	}
+	o.off = offset
+	return offset - o.base, nil
+}
+
+// TeeReader returns a [Reader] that writes to w what it reads from r.
+// All reads from r performed through it are matched with
+// corresponding writes to w. There is no internal buffering -
+// the write must complete before the read completes.
+// Any error encountered while writing is reported as a read error.
+func TeeReader(r Reader, w Writer) Reader {
+	return &teeReader{r, w}
+}
+
+type teeReader struct {
+	r Reader
+	w Writer
+}
+
+func (t *teeReader) Read(p []byte) (n int, err error) {
+	n, err = t.r.Read(p)
+	if n > 0 {
+		if n, err := t.w.Write(p[:n]); err != nil {
+			return n, err
+		}
+	}
+	return
+}
+
+// Discard is a [Writer] on which all Write calls succeed
+// without doing anything.
+var Discard Writer = discard{}
+
+type discard struct{}
+
+// discard implements ReaderFrom as an optimization so Copy to
+// io.Discard can avoid doing unnecessary work.
+var _ ReaderFrom = discard{}
+
+func (discard) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (discard) WriteString(s string) (int, error) {
+	return len(s), nil
+}
+
+var blackHolePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 8192)
+		return &b
+	},
+}
+
+func (discard) ReadFrom(r Reader) (n int64, err error) {
+	bufp := blackHolePool.Get().(*[]byte)
+	readSize := 0
+	for {
+		readSize, err = r.Read(*bufp)
+		n += int64(readSize)
+		if err != nil {
+			blackHolePool.Put(bufp)
+			if err == io.EOF {
+				return n, nil
+			}
+			return
+		}
+	}
+}
+
+// NopCloser returns a [ReadCloser] with a no-op Close method wrapping
+// the provided [Reader] r.
+// If r implements [WriterTo], the returned [ReadCloser] will implement [WriterTo]
+// by forwarding calls to r.
+func NopCloser(r Reader) ReadCloser {
+	if _, ok := r.(WriterTo); ok {
+		return nopCloserWriterTo{r}
+	}
+	return nopCloser{r}
+}
+
+type nopCloser struct {
+	Reader
+}
+
+func (nopCloser) Close() error { return nil }
+
+type nopCloserWriterTo struct {
+	Reader
+}
+
+func (nopCloserWriterTo) Close() error { return nil }
+
+func (c nopCloserWriterTo) WriteTo(w Writer) (n int64, err error) {
+	return c.Reader.(WriterTo).WriteTo(w)
+}
+
+// ReadAll reads from r until an error or io.EOF and returns the data it read.
+// A successful call returns err == nil, not err == io.EOF. Because ReadAll is
+// defined to read from src until io.EOF, it does not treat an io.EOF from Read
+// as an error to be reported.
 func ReadAll(r Reader) ([]byte, error) {
 	b := make([]byte, 0, 512)
 	for {
@@ -6178,75 +8669,365 @@ func ReadAll(r Reader) ([]byte, error) {
 			}
 			return b, err
 		}
+
 		if len(b) == cap(b) {
-			// Full: have append make room, and keep the length.
+			// Add more capacity (let append pick how much).
 			b = append(b, 0)[:len(b)]
 		}
 	}
 }
 
-// Copy writes to dst what it reads from src until src ends, and returns
-// the number of bytes written. The end of src is not an error.
-func Copy(dst Writer, src Reader) (written int, err error) {
-	// A source that writes itself out, or a destination that reads for
-	// itself, does the whole copy without a buffer between them.
-	if wt, ok := src.(WriterTo); ok {
-		n, err := wt.WriteTo(dst)
-		return int(n), err
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/multi.go",
+            text: #"""
+// Copyright 2010 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package io
+
+import "io"
+
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+type multiReader struct {
+	readers []Reader
+}
+
+func (mr *multiReader) Read(p []byte) (n int, err error) {
+	for len(mr.readers) > 0 {
+		// Optimization to flatten nested multiReaders (Issue 13558).
+		if len(mr.readers) == 1 {
+			if r, ok := mr.readers[0].(*multiReader); ok {
+				mr.readers = r.readers
+				continue
+			}
+		}
+		n, err = mr.readers[0].Read(p)
+		if err == io.EOF {
+			// Use eofReader instead of nil to avoid nil panic
+			// after performing flatten (Issue 18232).
+			mr.readers[0] = eofReader{} // permit earlier GC
+			mr.readers = mr.readers[1:]
+		}
+		if n > 0 || err != io.EOF {
+			if err == io.EOF && len(mr.readers) > 0 {
+				// Don't return io.EOF yet. More readers remain.
+				err = nil
+			}
+			return
+		}
 	}
-	if rf, ok := dst.(ReaderFrom); ok {
-		n, err := rf.ReadFrom(src)
-		return int(n), err
+	return 0, io.EOF
+}
+
+func (mr *multiReader) WriteTo(w Writer) (sum int64, err error) {
+	return mr.writeToWithBuffer(w, make([]byte, 1024*32))
+}
+
+func (mr *multiReader) writeToWithBuffer(w Writer, buf []byte) (sum int64, err error) {
+	for i, r := range mr.readers {
+		var n int64
+		if subMr, ok := r.(*multiReader); ok { // reuse buffer with nested multiReaders
+			n, err = subMr.writeToWithBuffer(w, buf)
+		} else {
+			n, err = copyBuffer(w, r, buf)
+		}
+		sum += n
+		if err != nil {
+			mr.readers = mr.readers[i:] // permit resume / retry after error
+			return sum, err
+		}
+		mr.readers[i] = nil // permit early GC
 	}
-	buf := make([]byte, 4096)
-	for {
-		nr, rerr := src.Read(buf)
-		if nr > 0 {
-			nw, werr := dst.Write(buf[:nr])
-			if nw < 0 || nw > nr {
-				nw = 0
-				if werr == nil {
-					werr = errors.New("invalid write result")
-				}
-			}
-			written += nw
-			if werr != nil {
-				return written, werr
-			}
-			if nw != nr {
-				return written, ErrShortWrite
-			}
+	mr.readers = nil
+	return sum, nil
+}
+
+var _ WriterTo = (*multiReader)(nil)
+
+// MultiReader returns a Reader that's the logical concatenation of
+// the provided input readers. They're read sequentially. Once all
+// inputs have returned io.EOF, Read will return io.EOF.  If any of the readers
+// return a non-nil, non-io.EOF error, Read will return that error.
+func MultiReader(readers ...Reader) Reader {
+	r := make([]Reader, len(readers))
+	copy(r, readers)
+	return &multiReader{r}
+}
+
+type multiWriter struct {
+	writers []Writer
+}
+
+func (t *multiWriter) Write(p []byte) (n int, err error) {
+	for _, w := range t.writers {
+		n, err = w.Write(p)
+		if err != nil {
+			return
 		}
-		if rerr == io.EOF {
-			return written, nil
+		if n != len(p) {
+			err = ErrShortWrite
+			return
 		}
-		if rerr != nil {
-			return written, rerr
+	}
+	return len(p), nil
+}
+
+var _ StringWriter = (*multiWriter)(nil)
+
+func (t *multiWriter) WriteString(s string) (n int, err error) {
+	var p []byte // lazily initialized if/when needed
+	for _, w := range t.writers {
+		if sw, ok := w.(StringWriter); ok {
+			n, err = sw.WriteString(s)
+		} else {
+			if p == nil {
+				p = []byte(s)
+			}
+			n, err = w.Write(p)
 		}
+		if err != nil {
+			return
+		}
+		if n != len(s) {
+			err = ErrShortWrite
+			return
+		}
+	}
+	return len(s), nil
+}
+
+// MultiWriter creates a writer that duplicates its writes to all the
+// provided writers, similar to the Unix tee(1) command.
+//
+// Each write is written to each listed writer, one at a time.
+// If a listed writer returns an error, that overall write operation
+// stops and returns the error; it does not continue down the list.
+func MultiWriter(writers ...Writer) Writer {
+	allWriters := make([]Writer, 0, len(writers))
+	for _, w := range writers {
+		if mw, ok := w.(*multiWriter); ok {
+			allWriters = append(allWriters, mw.writers...)
+		} else {
+			allWriters = append(allWriters, w)
+		}
+	}
+	return &multiWriter{allWriters}
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/io/pipe.go",
+            text: #"""
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Pipe adapter to connect code expecting an io.Reader
+// with code expecting an io.Writer.
+
+package io
+
+import (
+	"errors"
+	"io"
+	"sync"
+)
+
+// onceError is an object that will only store an error once.
+type onceError struct {
+	sync.Mutex // guards following
+	err        error
+}
+
+func (a *onceError) Store(err error) {
+	a.Lock()
+	defer a.Unlock()
+	if a.err != nil {
+		return
+	}
+	a.err = err
+}
+func (a *onceError) Load() error {
+	a.Lock()
+	defer a.Unlock()
+	return a.err
+}
+
+// ErrClosedPipe is the error used for read or write operations on a closed pipe.
+var ErrClosedPipe = errors.New("io: read/write on closed pipe")
+
+// A pipe is the shared pipe structure underlying PipeReader and PipeWriter.
+type pipe struct {
+	wrMu sync.Mutex // Serializes Write operations
+	wrCh chan []byte
+	rdCh chan int
+
+	once sync.Once // Protects closing done
+	done chan struct{}
+	rerr onceError
+	werr onceError
+}
+
+func (p *pipe) read(b []byte) (n int, err error) {
+	select {
+	case <-p.done:
+		return 0, p.readCloseError()
+	default:
+	}
+
+	select {
+	case bw := <-p.wrCh:
+		nr := copy(b, bw)
+		p.rdCh <- nr
+		return nr, nil
+	case <-p.done:
+		return 0, p.readCloseError()
 	}
 }
 
-type nopCloser struct {
-	r Reader
+func (p *pipe) closeRead(err error) error {
+	if err == nil {
+		err = ErrClosedPipe
+	}
+	p.rerr.Store(err)
+	p.once.Do(func() { close(p.done) })
+	return nil
 }
 
-func (c nopCloser) Read(p []byte) (n int, err error) { return c.r.Read(p) }
+func (p *pipe) write(b []byte) (n int, err error) {
+	select {
+	case <-p.done:
+		return 0, p.writeCloseError()
+	default:
+		p.wrMu.Lock()
+		defer p.wrMu.Unlock()
+	}
 
-func (c nopCloser) Close() error { return nil }
-
-// NopCloser gives r a Close that does nothing.
-func NopCloser(r Reader) ReadCloser {
-	return nopCloser{r: r}
+	for once := true; once || len(b) > 0; once = false {
+		select {
+		case p.wrCh <- b:
+			nw := <-p.rdCh
+			b = b[nw:]
+			n += nw
+		case <-p.done:
+			return n, p.writeCloseError()
+		}
+	}
+	return n, nil
 }
 
-type discard struct{}
+func (p *pipe) closeWrite(err error) error {
+	if err == nil {
+		err = io.EOF
+	}
+	p.werr.Store(err)
+	p.once.Do(func() { close(p.done) })
+	return nil
+}
 
-func (d discard) Write(p []byte) (int, error) { return len(p), nil }
+// readCloseError is considered internal to the pipe type.
+func (p *pipe) readCloseError() error {
+	rerr := p.rerr.Load()
+	if werr := p.werr.Load(); rerr == nil && werr != nil {
+		return werr
+	}
+	return ErrClosedPipe
+}
 
-func (d discard) WriteString(s string) (int, error) { return len(s), nil }
+// writeCloseError is considered internal to the pipe type.
+func (p *pipe) writeCloseError() error {
+	werr := p.werr.Load()
+	if rerr := p.rerr.Load(); werr == nil && rerr != nil {
+		return rerr
+	}
+	return ErrClosedPipe
+}
 
-// Discard accepts every write and keeps nothing.
-var Discard Writer = discard{}
+// A PipeReader is the read half of a pipe.
+type PipeReader struct{ pipe }
+
+// Read implements the standard Read interface:
+// it reads data from the pipe, blocking until a writer
+// arrives or the write end is closed.
+// If the write end is closed with an error, that error is
+// returned as err; otherwise err is io.EOF.
+func (r *PipeReader) Read(data []byte) (n int, err error) {
+	return r.pipe.read(data)
+}
+
+// Close closes the reader; subsequent writes to the
+// write half of the pipe will return the error [ErrClosedPipe].
+func (r *PipeReader) Close() error {
+	return r.CloseWithError(nil)
+}
+
+// CloseWithError closes the reader; subsequent writes
+// to the write half of the pipe will return the error err.
+//
+// CloseWithError never overwrites the previous error if it exists
+// and always returns nil.
+func (r *PipeReader) CloseWithError(err error) error {
+	return r.pipe.closeRead(err)
+}
+
+// A PipeWriter is the write half of a pipe.
+type PipeWriter struct{ r PipeReader }
+
+// Write implements the standard Write interface:
+// it writes data to the pipe, blocking until one or more readers
+// have consumed all the data or the read end is closed.
+// If the read end is closed with an error, that err is
+// returned as err; otherwise err is [ErrClosedPipe].
+func (w *PipeWriter) Write(data []byte) (n int, err error) {
+	return w.r.pipe.write(data)
+}
+
+// Close closes the writer; subsequent reads from the
+// read half of the pipe will return no bytes and io.EOF.
+func (w *PipeWriter) Close() error {
+	return w.CloseWithError(nil)
+}
+
+// CloseWithError closes the writer; subsequent reads from the
+// read half of the pipe will return no bytes and the error err,
+// or io.EOF if err is nil.
+//
+// CloseWithError never overwrites the previous error if it exists
+// and always returns nil.
+func (w *PipeWriter) CloseWithError(err error) error {
+	return w.r.pipe.closeWrite(err)
+}
+
+// Pipe creates a synchronous in-memory pipe.
+// It can be used to connect code expecting an [io.Reader]
+// with code expecting an [io.Writer].
+//
+// Reads and Writes on the pipe are matched one to one
+// except when multiple Reads are needed to consume a single Write.
+// That is, each Write to the [PipeWriter] blocks until it has satisfied
+// one or more Reads from the [PipeReader] that fully consume
+// the written data.
+// The data is copied directly from the Write to the corresponding
+// Read (or Reads); there is no internal buffering.
+//
+// It is safe to call Read and Write in parallel with each other or with Close.
+// Parallel calls to Read and parallel calls to Write are also safe:
+// the individual calls will be gated sequentially.
+func Pipe() (*PipeReader, *PipeWriter) {
+	pw := &PipeWriter{r: PipeReader{pipe: pipe{
+		wrCh: make(chan []byte),
+		rdCh: make(chan int),
+		done: make(chan struct{}),
+	}}}
+	return &pw.r, pw
+}
 
 """#),
     ]
@@ -7466,6 +10247,719 @@ func Panicln(v ...any) {
 	s := fmt.Sprintln(v...)
 	std.Output(2, s)
 	panic(s)
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let mathBits: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/math/bits/bits.go",
+            text: #"""
+// Copyright 2017 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//go:generate go run make_tables.go
+
+// Package bits implements bit counting and manipulation
+// functions for the predeclared unsigned integer types.
+//
+// Functions in this package may be implemented directly by
+// the compiler, for better performance. For those functions
+// the code in this package will not be used. Which
+// functions are implemented by the compiler depends on the
+// architecture and the Go release.
+package bits
+
+const uintSize = 32 << (^uint(0) >> 63) // 32 or 64
+
+// UintSize is the size of a uint in bits.
+const UintSize = uintSize
+
+// --- LeadingZeros ---
+
+// LeadingZeros returns the number of leading zero bits in x; the result is [UintSize] for x == 0.
+func LeadingZeros(x uint) int { return UintSize - Len(x) }
+
+// LeadingZeros8 returns the number of leading zero bits in x; the result is 8 for x == 0.
+func LeadingZeros8(x uint8) int { return 8 - Len8(x) }
+
+// LeadingZeros16 returns the number of leading zero bits in x; the result is 16 for x == 0.
+func LeadingZeros16(x uint16) int { return 16 - Len16(x) }
+
+// LeadingZeros32 returns the number of leading zero bits in x; the result is 32 for x == 0.
+func LeadingZeros32(x uint32) int { return 32 - Len32(x) }
+
+// LeadingZeros64 returns the number of leading zero bits in x; the result is 64 for x == 0.
+func LeadingZeros64(x uint64) int { return 64 - Len64(x) }
+
+// --- TrailingZeros ---
+
+// See http://keithandkatie.com/keith/papers/debruijn.html
+const deBruijn32 = 0x077CB531
+
+var deBruijn32tab = [32]byte{
+	0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
+	31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9,
+}
+
+const deBruijn64 = 0x03f79d71b4ca8b09
+
+var deBruijn64tab = [64]byte{
+	0, 1, 56, 2, 57, 49, 28, 3, 61, 58, 42, 50, 38, 29, 17, 4,
+	62, 47, 59, 36, 45, 43, 51, 22, 53, 39, 33, 30, 24, 18, 12, 5,
+	63, 55, 48, 27, 60, 41, 37, 16, 46, 35, 44, 21, 52, 32, 23, 11,
+	54, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19, 9, 13, 8, 7, 6,
+}
+
+// TrailingZeros returns the number of trailing zero bits in x; the result is [UintSize] for x == 0.
+func TrailingZeros(x uint) int {
+	if UintSize == 32 {
+		return TrailingZeros32(uint32(x))
+	}
+	return TrailingZeros64(uint64(x))
+}
+
+// TrailingZeros8 returns the number of trailing zero bits in x; the result is 8 for x == 0.
+func TrailingZeros8(x uint8) int {
+	return int(ntz8tab[x])
+}
+
+// TrailingZeros16 returns the number of trailing zero bits in x; the result is 16 for x == 0.
+func TrailingZeros16(x uint16) int {
+	if x == 0 {
+		return 16
+	}
+	// see comment in TrailingZeros64
+	return int(deBruijn32tab[uint32(x&-x)*deBruijn32>>(32-5)])
+}
+
+// TrailingZeros32 returns the number of trailing zero bits in x; the result is 32 for x == 0.
+func TrailingZeros32(x uint32) int {
+	if x == 0 {
+		return 32
+	}
+	// see comment in TrailingZeros64
+	return int(deBruijn32tab[(x&-x)*deBruijn32>>(32-5)])
+}
+
+// TrailingZeros64 returns the number of trailing zero bits in x; the result is 64 for x == 0.
+func TrailingZeros64(x uint64) int {
+	if x == 0 {
+		return 64
+	}
+	// If popcount is fast, replace code below with return popcount(^x & (x - 1)).
+	//
+	// x & -x leaves only the right-most bit set in the word. Let k be the
+	// index of that bit. Since only a single bit is set, the value is two
+	// to the power of k. Multiplying by a power of two is equivalent to
+	// left shifting, in this case by k bits. The de Bruijn (64 bit) constant
+	// is such that all six bit, consecutive substrings are distinct.
+	// Therefore, if we have a left shifted version of this constant we can
+	// find by how many bits it was shifted by looking at which six bit
+	// substring ended up at the top of the word.
+	// (Knuth, volume 4, section 7.3.1)
+	return int(deBruijn64tab[(x&-x)*deBruijn64>>(64-6)])
+}
+
+// --- OnesCount ---
+
+const m0 = 0x5555555555555555 // 01010101 ...
+const m1 = 0x3333333333333333 // 00110011 ...
+const m2 = 0x0f0f0f0f0f0f0f0f // 00001111 ...
+const m3 = 0x00ff00ff00ff00ff // etc.
+const m4 = 0x0000ffff0000ffff
+
+// OnesCount returns the number of one bits ("population count") in x.
+func OnesCount(x uint) int {
+	if UintSize == 32 {
+		return OnesCount32(uint32(x))
+	}
+	return OnesCount64(uint64(x))
+}
+
+// OnesCount8 returns the number of one bits ("population count") in x.
+func OnesCount8(x uint8) int {
+	return int(pop8tab[x])
+}
+
+// OnesCount16 returns the number of one bits ("population count") in x.
+func OnesCount16(x uint16) int {
+	return int(pop8tab[x>>8] + pop8tab[x&0xff])
+}
+
+// OnesCount32 returns the number of one bits ("population count") in x.
+func OnesCount32(x uint32) int {
+	return int(pop8tab[x>>24] + pop8tab[x>>16&0xff] + pop8tab[x>>8&0xff] + pop8tab[x&0xff])
+}
+
+// OnesCount64 returns the number of one bits ("population count") in x.
+func OnesCount64(x uint64) int {
+	// Implementation: Parallel summing of adjacent bits.
+	// See "Hacker's Delight", Chap. 5: Counting Bits.
+	// The following pattern shows the general approach:
+	//
+	//   x = x>>1&(m0&m) + x&(m0&m)
+	//   x = x>>2&(m1&m) + x&(m1&m)
+	//   x = x>>4&(m2&m) + x&(m2&m)
+	//   x = x>>8&(m3&m) + x&(m3&m)
+	//   x = x>>16&(m4&m) + x&(m4&m)
+	//   x = x>>32&(m5&m) + x&(m5&m)
+	//   return int(x)
+	//
+	// Masking (& operations) can be left away when there's no
+	// danger that a field's sum will carry over into the next
+	// field: Since the result cannot be > 64, 8 bits is enough
+	// and we can ignore the masks for the shifts by 8 and up.
+	// Per "Hacker's Delight", the first line can be simplified
+	// more, but it saves at best one instruction, so we leave
+	// it alone for clarity.
+	const m = 1<<64 - 1
+	x = x>>1&(m0&m) + x&(m0&m)
+	x = x>>2&(m1&m) + x&(m1&m)
+	x = (x>>4 + x) & (m2 & m)
+	x += x >> 8
+	x += x >> 16
+	x += x >> 32
+	return int(x) & (1<<7 - 1)
+}
+
+// --- RotateLeft ---
+
+// RotateLeft returns the value of x rotated left by (k mod [UintSize]) bits.
+// To rotate x right by k bits, call RotateLeft(x, -k).
+//
+// This function's execution time does not depend on the inputs.
+func RotateLeft(x uint, k int) uint {
+	if UintSize == 32 {
+		return uint(RotateLeft32(uint32(x), k))
+	}
+	return uint(RotateLeft64(uint64(x), k))
+}
+
+// RotateLeft8 returns the value of x rotated left by (k mod 8) bits.
+// To rotate x right by k bits, call RotateLeft8(x, -k).
+//
+// This function's execution time does not depend on the inputs.
+func RotateLeft8(x uint8, k int) uint8 {
+	const n = 8
+	s := uint(k) & (n - 1)
+	return x<<s | x>>(n-s)
+}
+
+// RotateLeft16 returns the value of x rotated left by (k mod 16) bits.
+// To rotate x right by k bits, call RotateLeft16(x, -k).
+//
+// This function's execution time does not depend on the inputs.
+func RotateLeft16(x uint16, k int) uint16 {
+	const n = 16
+	s := uint(k) & (n - 1)
+	return x<<s | x>>(n-s)
+}
+
+// RotateLeft32 returns the value of x rotated left by (k mod 32) bits.
+// To rotate x right by k bits, call RotateLeft32(x, -k).
+//
+// This function's execution time does not depend on the inputs.
+func RotateLeft32(x uint32, k int) uint32 {
+	const n = 32
+	s := uint(k) & (n - 1)
+	return x<<s | x>>(n-s)
+}
+
+// RotateLeft64 returns the value of x rotated left by (k mod 64) bits.
+// To rotate x right by k bits, call RotateLeft64(x, -k).
+//
+// This function's execution time does not depend on the inputs.
+func RotateLeft64(x uint64, k int) uint64 {
+	const n = 64
+	s := uint(k) & (n - 1)
+	return x<<s | x>>(n-s)
+}
+
+// --- Reverse ---
+
+// Reverse returns the value of x with its bits in reversed order.
+func Reverse(x uint) uint {
+	if UintSize == 32 {
+		return uint(Reverse32(uint32(x)))
+	}
+	return uint(Reverse64(uint64(x)))
+}
+
+// Reverse8 returns the value of x with its bits in reversed order.
+func Reverse8(x uint8) uint8 {
+	return rev8tab[x]
+}
+
+// Reverse16 returns the value of x with its bits in reversed order.
+func Reverse16(x uint16) uint16 {
+	return uint16(rev8tab[x>>8]) | uint16(rev8tab[x&0xff])<<8
+}
+
+// Reverse32 returns the value of x with its bits in reversed order.
+func Reverse32(x uint32) uint32 {
+	const m = 1<<32 - 1
+	x = x>>1&(m0&m) | x&(m0&m)<<1
+	x = x>>2&(m1&m) | x&(m1&m)<<2
+	x = x>>4&(m2&m) | x&(m2&m)<<4
+	return ReverseBytes32(x)
+}
+
+// Reverse64 returns the value of x with its bits in reversed order.
+func Reverse64(x uint64) uint64 {
+	const m = 1<<64 - 1
+	x = x>>1&(m0&m) | x&(m0&m)<<1
+	x = x>>2&(m1&m) | x&(m1&m)<<2
+	x = x>>4&(m2&m) | x&(m2&m)<<4
+	return ReverseBytes64(x)
+}
+
+// --- ReverseBytes ---
+
+// ReverseBytes returns the value of x with its bytes in reversed order.
+//
+// This function's execution time does not depend on the inputs.
+func ReverseBytes(x uint) uint {
+	if UintSize == 32 {
+		return uint(ReverseBytes32(uint32(x)))
+	}
+	return uint(ReverseBytes64(uint64(x)))
+}
+
+// ReverseBytes16 returns the value of x with its bytes in reversed order.
+//
+// This function's execution time does not depend on the inputs.
+func ReverseBytes16(x uint16) uint16 {
+	return x>>8 | x<<8
+}
+
+// ReverseBytes32 returns the value of x with its bytes in reversed order.
+//
+// This function's execution time does not depend on the inputs.
+func ReverseBytes32(x uint32) uint32 {
+	const m = 1<<32 - 1
+	x = x>>8&(m3&m) | x&(m3&m)<<8
+	return x>>16 | x<<16
+}
+
+// ReverseBytes64 returns the value of x with its bytes in reversed order.
+//
+// This function's execution time does not depend on the inputs.
+func ReverseBytes64(x uint64) uint64 {
+	const m = 1<<64 - 1
+	x = x>>8&(m3&m) | x&(m3&m)<<8
+	x = x>>16&(m4&m) | x&(m4&m)<<16
+	return x>>32 | x<<32
+}
+
+// --- Len ---
+
+// Len returns the minimum number of bits required to represent x; the result is 0 for x == 0.
+func Len(x uint) int {
+	if UintSize == 32 {
+		return Len32(uint32(x))
+	}
+	return Len64(uint64(x))
+}
+
+// Len8 returns the minimum number of bits required to represent x; the result is 0 for x == 0.
+func Len8(x uint8) int {
+	return int(len8tab[x])
+}
+
+// Len16 returns the minimum number of bits required to represent x; the result is 0 for x == 0.
+func Len16(x uint16) (n int) {
+	if x >= 1<<8 {
+		x >>= 8
+		n = 8
+	}
+	return n + int(len8tab[x])
+}
+
+// Len32 returns the minimum number of bits required to represent x; the result is 0 for x == 0.
+func Len32(x uint32) (n int) {
+	if x >= 1<<16 {
+		x >>= 16
+		n = 16
+	}
+	if x >= 1<<8 {
+		x >>= 8
+		n += 8
+	}
+	return n + int(len8tab[x])
+}
+
+// Len64 returns the minimum number of bits required to represent x; the result is 0 for x == 0.
+func Len64(x uint64) (n int) {
+	if x >= 1<<32 {
+		x >>= 32
+		n = 32
+	}
+	if x >= 1<<16 {
+		x >>= 16
+		n += 16
+	}
+	if x >= 1<<8 {
+		x >>= 8
+		n += 8
+	}
+	return n + int(len8tab[x])
+}
+
+// --- Add with carry ---
+
+// Add returns the sum with carry of x, y and carry: sum = x + y + carry.
+// The carry input must be 0 or 1; otherwise the behavior is undefined.
+// The carryOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Add(x, y, carry uint) (sum, carryOut uint) {
+	if UintSize == 32 {
+		s32, c32 := Add32(uint32(x), uint32(y), uint32(carry))
+		return uint(s32), uint(c32)
+	}
+	s64, c64 := Add64(uint64(x), uint64(y), uint64(carry))
+	return uint(s64), uint(c64)
+}
+
+// Add32 returns the sum with carry of x, y and carry: sum = x + y + carry.
+// The carry input must be 0 or 1; otherwise the behavior is undefined.
+// The carryOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Add32(x, y, carry uint32) (sum, carryOut uint32) {
+	sum64 := uint64(x) + uint64(y) + uint64(carry)
+	sum = uint32(sum64)
+	carryOut = uint32(sum64 >> 32)
+	return
+}
+
+// Add64 returns the sum with carry of x, y and carry: sum = x + y + carry.
+// The carry input must be 0 or 1; otherwise the behavior is undefined.
+// The carryOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Add64(x, y, carry uint64) (sum, carryOut uint64) {
+	sum = x + y + carry
+	// The sum will overflow if both top bits are set (x & y) or if one of them
+	// is (x | y), and a carry from the lower place happened. If such a carry
+	// happens, the top bit will be 1 + 0 + 1 = 0 (&^ sum).
+	carryOut = ((x & y) | ((x | y) &^ sum)) >> 63
+	return
+}
+
+// --- Subtract with borrow ---
+
+// Sub returns the difference of x, y and borrow: diff = x - y - borrow.
+// The borrow input must be 0 or 1; otherwise the behavior is undefined.
+// The borrowOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Sub(x, y, borrow uint) (diff, borrowOut uint) {
+	if UintSize == 32 {
+		d32, b32 := Sub32(uint32(x), uint32(y), uint32(borrow))
+		return uint(d32), uint(b32)
+	}
+	d64, b64 := Sub64(uint64(x), uint64(y), uint64(borrow))
+	return uint(d64), uint(b64)
+}
+
+// Sub32 returns the difference of x, y and borrow, diff = x - y - borrow.
+// The borrow input must be 0 or 1; otherwise the behavior is undefined.
+// The borrowOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Sub32(x, y, borrow uint32) (diff, borrowOut uint32) {
+	diff = x - y - borrow
+	// The difference will underflow if the top bit of x is not set and the top
+	// bit of y is set (^x & y) or if they are the same (^(x ^ y)) and a borrow
+	// from the lower place happens. If that borrow happens, the result will be
+	// 1 - 1 - 1 = 0 - 0 - 1 = 1 (& diff).
+	borrowOut = ((^x & y) | (^(x ^ y) & diff)) >> 31
+	return
+}
+
+// Sub64 returns the difference of x, y and borrow: diff = x - y - borrow.
+// The borrow input must be 0 or 1; otherwise the behavior is undefined.
+// The borrowOut output is guaranteed to be 0 or 1.
+//
+// This function's execution time does not depend on the inputs.
+func Sub64(x, y, borrow uint64) (diff, borrowOut uint64) {
+	diff = x - y - borrow
+	// See Sub32 for the bit logic.
+	borrowOut = ((^x & y) | (^(x ^ y) & diff)) >> 63
+	return
+}
+
+// --- Full-width multiply ---
+
+// Mul returns the full-width product of x and y: (hi, lo) = x * y
+// with the product bits' upper half returned in hi and the lower
+// half returned in lo.
+//
+// This function's execution time does not depend on the inputs.
+func Mul(x, y uint) (hi, lo uint) {
+	if UintSize == 32 {
+		h, l := Mul32(uint32(x), uint32(y))
+		return uint(h), uint(l)
+	}
+	h, l := Mul64(uint64(x), uint64(y))
+	return uint(h), uint(l)
+}
+
+// Mul32 returns the 64-bit product of x and y: (hi, lo) = x * y
+// with the product bits' upper half returned in hi and the lower
+// half returned in lo.
+//
+// This function's execution time does not depend on the inputs.
+func Mul32(x, y uint32) (hi, lo uint32) {
+	tmp := uint64(x) * uint64(y)
+	hi, lo = uint32(tmp>>32), uint32(tmp)
+	return
+}
+
+// Mul64 returns the 128-bit product of x and y: (hi, lo) = x * y
+// with the product bits' upper half returned in hi and the lower
+// half returned in lo.
+//
+// This function's execution time does not depend on the inputs.
+func Mul64(x, y uint64) (hi, lo uint64) {
+	const mask32 = 1<<32 - 1
+	x0 := x & mask32
+	x1 := x >> 32
+	y0 := y & mask32
+	y1 := y >> 32
+	w0 := x0 * y0
+	t := x1*y0 + w0>>32
+	w1 := t & mask32
+	w2 := t >> 32
+	w1 += x0 * y1
+	hi = x1*y1 + w2 + w1>>32
+	lo = x * y
+	return
+}
+
+// --- Full-width divide ---
+
+// Div returns the quotient and remainder of (hi, lo) divided by y:
+// quo = (hi, lo)/y, rem = (hi, lo)%y with the dividend bits' upper
+// half in parameter hi and the lower half in parameter lo.
+// Div panics for y == 0 (division by zero) or y <= hi (quotient overflow).
+func Div(hi, lo, y uint) (quo, rem uint) {
+	if UintSize == 32 {
+		q, r := Div32(uint32(hi), uint32(lo), uint32(y))
+		return uint(q), uint(r)
+	}
+	q, r := Div64(uint64(hi), uint64(lo), uint64(y))
+	return uint(q), uint(r)
+}
+
+// Div32 returns the quotient and remainder of (hi, lo) divided by y:
+// quo = (hi, lo)/y, rem = (hi, lo)%y with the dividend bits' upper
+// half in parameter hi and the lower half in parameter lo.
+// Div32 panics for y == 0 (division by zero) or y <= hi (quotient overflow).
+func Div32(hi, lo, y uint32) (quo, rem uint32) {
+	if y != 0 && y <= hi {
+		panic(overflowError{})
+	}
+	z := uint64(hi)<<32 | uint64(lo)
+	quo, rem = uint32(z/uint64(y)), uint32(z%uint64(y))
+	return
+}
+
+// Div64 returns the quotient and remainder of (hi, lo) divided by y:
+// quo = (hi, lo)/y, rem = (hi, lo)%y with the dividend bits' upper
+// half in parameter hi and the lower half in parameter lo.
+// Div64 panics for y == 0 (division by zero) or y <= hi (quotient overflow).
+func Div64(hi, lo, y uint64) (quo, rem uint64) {
+	if y == 0 {
+		panic(divideByZero())
+	}
+	if y <= hi {
+		panic(overflowError{})
+	}
+
+	// If high part is zero, we can directly return the results.
+	if hi == 0 {
+		return lo / y, lo % y
+	}
+
+	s := uint(LeadingZeros64(y))
+	y <<= s
+
+	const (
+		two32  = 1 << 32
+		mask32 = two32 - 1
+	)
+	yn1 := y >> 32
+	yn0 := y & mask32
+	un32 := hi<<s | lo>>(64-s)
+	un10 := lo << s
+	un1 := un10 >> 32
+	un0 := un10 & mask32
+	q1 := un32 / yn1
+	rhat := un32 - q1*yn1
+
+	for q1 >= two32 || q1*yn0 > two32*rhat+un1 {
+		q1--
+		rhat += yn1
+		if rhat >= two32 {
+			break
+		}
+	}
+
+	un21 := un32*two32 + un1 - q1*y
+	q0 := un21 / yn1
+	rhat = un21 - q0*yn1
+
+	for q0 >= two32 || q0*yn0 > two32*rhat+un0 {
+		q0--
+		rhat += yn1
+		if rhat >= two32 {
+			break
+		}
+	}
+
+	return q1*two32 + q0, (un21*two32 + un0 - q0*y) >> s
+}
+
+// Rem returns the remainder of (hi, lo) divided by y. Rem panics for
+// y == 0 (division by zero) but, unlike Div, it doesn't panic on a
+// quotient overflow.
+func Rem(hi, lo, y uint) uint {
+	if UintSize == 32 {
+		return uint(Rem32(uint32(hi), uint32(lo), uint32(y)))
+	}
+	return uint(Rem64(uint64(hi), uint64(lo), uint64(y)))
+}
+
+// Rem32 returns the remainder of (hi, lo) divided by y. Rem32 panics
+// for y == 0 (division by zero) but, unlike [Div32], it doesn't panic
+// on a quotient overflow.
+func Rem32(hi, lo, y uint32) uint32 {
+	return uint32((uint64(hi)<<32 | uint64(lo)) % uint64(y))
+}
+
+// Rem64 returns the remainder of (hi, lo) divided by y. Rem64 panics
+// for y == 0 (division by zero) but, unlike [Div64], it doesn't panic
+// on a quotient overflow.
+func Rem64(hi, lo, y uint64) uint64 {
+	// We scale down hi so that hi < y, then use Div64 to compute the
+	// rem with the guarantee that it won't panic on quotient overflow.
+	// Given that
+	//   hi ≡ hi%y    (mod y)
+	// we have
+	//   hi<<64 + lo ≡ (hi%y)<<64 + lo    (mod y)
+	_, rem := Div64(hi%y, lo, y)
+	return rem
+}
+
+// overflowError is the runtime's error of an integer overflow, which Go
+// reaches with a link name: a runtime.Error.
+type overflowError struct{}
+
+func (overflowError) Error() string { return "runtime error: integer overflow" }
+func (overflowError) RuntimeError() {}
+
+// divideByZero panics with the runtime's error of a division by zero, by
+// dividing by zero.
+func divideByZero() int {
+	zero := 0
+	return 1 / zero
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/math/bits/bits_tables.go",
+            text: #"""
+// Copyright 2017 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// The tables of Go's bits_tables.go, which make_tables.go writes as
+// strings of bytes: a string of this library must be valid UTF-8, so they
+// are arrays of bytes here, with the same values.
+
+package bits
+
+var ntz8tab = [256]uint8{
+	0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x06, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x07, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x06, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x05, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+	0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x03, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00,
+}
+
+var pop8tab = [256]uint8{
+	0x00, 0x01, 0x01, 0x02, 0x01, 0x02, 0x02, 0x03, 0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04,
+	0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05,
+	0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07,
+	0x01, 0x02, 0x02, 0x03, 0x02, 0x03, 0x03, 0x04, 0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07,
+	0x02, 0x03, 0x03, 0x04, 0x03, 0x04, 0x04, 0x05, 0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06,
+	0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07,
+	0x03, 0x04, 0x04, 0x05, 0x04, 0x05, 0x05, 0x06, 0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07,
+	0x04, 0x05, 0x05, 0x06, 0x05, 0x06, 0x06, 0x07, 0x05, 0x06, 0x06, 0x07, 0x06, 0x07, 0x07, 0x08,
+}
+
+var rev8tab = [256]uint8{
+	0x00, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10, 0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0,
+	0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58, 0xd8, 0x38, 0xb8, 0x78, 0xf8,
+	0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34, 0xb4, 0x74, 0xf4,
+	0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c, 0xfc,
+	0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2,
+	0x0a, 0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa,
+	0x06, 0x86, 0x46, 0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6,
+	0x0e, 0x8e, 0x4e, 0xce, 0x2e, 0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe,
+	0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61, 0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1,
+	0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19, 0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9,
+	0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55, 0xd5, 0x35, 0xb5, 0x75, 0xf5,
+	0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d, 0xbd, 0x7d, 0xfd,
+	0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73, 0xf3,
+	0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb,
+	0x07, 0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7,
+	0x0f, 0x8f, 0x4f, 0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff,
+}
+
+var len8tab = [256]uint8{
+	0x00, 0x01, 0x02, 0x02, 0x03, 0x03, 0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+	0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05,
+	0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06,
+	0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06,
+	0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+	0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+	0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+	0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+	0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
 }
 
 """#),
@@ -21432,6 +24926,38 @@ func (o *Once) doSlow(f func()) {
 
 func (o *Once) finish() {
 	o.done = true
+}
+
+// OnceFunc returns a function that invokes f only once. The returned function
+// may be called concurrently.
+//
+// If f panics, the returned function will panic with the same value on every call.
+func OnceFunc(f func()) func() {
+	var (
+		once  Once
+		valid bool
+		p     any
+	)
+	// Construct the inner closure just once to reduce costs on the fast path.
+	g := func() {
+		defer func() {
+			p = recover()
+			if !valid {
+				// Re-panic immediately so on the first call the user gets a
+				// complete stack trace into f.
+				panic(p)
+			}
+		}()
+		f()
+		f = nil      // Do not keep f alive after invoking it.
+		valid = true // Set only if f does not panic.
+	}
+	return func() {
+		once.Do(g)
+		if !valid {
+			panic(p)
+		}
+	}
 }
 
 """#),

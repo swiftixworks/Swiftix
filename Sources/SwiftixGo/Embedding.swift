@@ -361,6 +361,12 @@ struct GoEmbeddedShape: Sendable, Equatable {
 
 /// A field or method a struct type is lent, and how to reach it.
 struct GoPromotion: Sendable, Equatable {
+    /// Whether the checker is checking the selection a promotion wrote out,
+    /// whose embedded fields the program may not name itself: a field of
+    /// an unexported type of another package lends its exported methods all
+    /// the same.
+    @TaskLocal static var isCheckingPath = false
+
     /// The embedded fields to select before the name, outermost first.
     let path: [String]
     /// The type that has the field or method.
