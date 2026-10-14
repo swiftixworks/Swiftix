@@ -726,7 +726,7 @@ public final class Kernel {
               bytes >= 0, limitBytes >= 0, bytes <= limitBytes,
               heapCells >= 0, garbageCollections >= 0 else { return false }
         var otherBytes = 0
-        for candidate in processTable.all where candidate.isLive && candidate !== process {
+        for candidate in processTable.allInPlace where candidate.isLive && candidate !== process {
             guard candidate.runtimeMemoryBytes <= runtimeMemoryLimitBytes - otherBytes else {
                 return false
             }

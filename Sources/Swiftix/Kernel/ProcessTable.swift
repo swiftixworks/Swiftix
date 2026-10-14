@@ -10,6 +10,9 @@ final class ProcessTable {
 
     var count: Int { storage.count }
     var all: [Process] { Array(storage.values) }
+    /// The processes without copying them into an array, in the order of
+    /// `all`, for checks that run on every step of a process.
+    var allInPlace: Dictionary<PID, Process>.Values { storage.values }
 
     /// The most recently allocated pid (0 before the first spawn). Because pids
     /// are never reused, this is also the number of processes ever created.

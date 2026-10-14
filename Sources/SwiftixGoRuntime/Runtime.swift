@@ -247,28 +247,33 @@ public enum GoSelectCaseInstruction: Sendable, Equatable {
         target: Int)
 }
 
-public indirect enum GoValue: Sendable, Equatable, CustomStringConvertible {
+/// A value of the guest program.
+///
+/// Integers, truth values, strings, arrays and nil are stored inline, so
+/// pushing or storing one does not allocate; every other case is boxed,
+/// which keeps a value two words wide.
+public enum GoValue: Sendable, Equatable, CustomStringConvertible {
     case int(Int64)
     case string(String)
     case bool(Bool)
-    case structure(GoStructValue)
-    case pointer(GoPointer)
+    indirect case structure(GoStructValue)
+    indirect case pointer(GoPointer)
     case nilValue
     case array([GoValue])
-    case slice(GoSliceValue)
-    case map(GoMapValue)
-    case mapStorage(GoMapStorage)
-    case channel(GoChannelValue)
-    case channelStorage(GoChannelStorage)
-    case mutex(GoMutexValue)
-    case mutexStorage(GoMutexStorage)
-    case waitGroup(GoWaitGroupValue)
-    case waitGroupStorage(GoWaitGroupStorage)
-    case context(GoContextValue)
-    case contextStorage(GoContextStorage)
-    case netConn(GoNetConnValue)
-    case netListener(GoNetListenerValue)
-    case interface(GoInterfaceValue)
+    indirect case slice(GoSliceValue)
+    indirect case map(GoMapValue)
+    indirect case mapStorage(GoMapStorage)
+    indirect case channel(GoChannelValue)
+    indirect case channelStorage(GoChannelStorage)
+    indirect case mutex(GoMutexValue)
+    indirect case mutexStorage(GoMutexStorage)
+    indirect case waitGroup(GoWaitGroupValue)
+    indirect case waitGroupStorage(GoWaitGroupStorage)
+    indirect case context(GoContextValue)
+    indirect case contextStorage(GoContextStorage)
+    indirect case netConn(GoNetConnValue)
+    indirect case netListener(GoNetListenerValue)
+    indirect case interface(GoInterfaceValue)
 
     public var description: String {
         switch self {
@@ -8073,6 +8078,21 @@ private struct ManagedHeap {
     }
 
     private static func estimatedBytes(of root: GoValue, maximum: Int) throws -> Int {
+        // Most values stored are scalars and strings: measure them without
+        // the worklist below, with the same limit checks.
+        switch root {
+        case .int, .bool, .nilValue:
+            guard maximum >= 32 else { throw GoRuntimeError.resourceLimitExceeded("heap bytes") }
+            return 32
+        case .string(let string):
+            let count = string.utf8.count
+            guard maximum >= 32, count <= maximum - 32 else {
+                throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+            }
+            return 32 + count
+        default:
+            break
+        }
         var total = 0
         var worklist = [root]
 
@@ -8339,8 +8359,8 @@ private final class GoExecutionState {
     @exclusivity(unchecked) var executed = 0
     @exclusivity(unchecked) var lastEventLoopYieldInstruction = 0
     @exclusivity(unchecked) var currentGoroutineID = 0
-    @exclusivity(unchecked) var goroutines: [Int: GoroutineContext] = [:]
-    @exclusivity(unchecked) var runQueue: [Int] = []
+    @exclusivity(unchecked) var goroutines = GoIntTable<GoroutineContext>()
+    @exclusivity(unchecked) var runQueue = GoRunQueue()
     @exclusivity(unchecked) var currentBlocked = false
     /// True once the current goroutine's context is already stored in
     /// `goroutines` (parked, and possibly woken again) within this
