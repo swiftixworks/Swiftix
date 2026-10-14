@@ -400,6 +400,24 @@ format, behavior and platform changes are recorded here.
   `undefined: fmt.Stringer`). `fmt` calls a `Format` method under every verb
   and a `GoString` method under `%#v`; the state is a `*fmt.pp` with `Write`,
   `Width`, `Precision`, and `Flag`.
+- Swiftix Go `encoding/json`: `Marshal`, `MarshalIndent`, `Unmarshal`,
+  `Valid`, `Compact`, `Indent`, `HTMLEscape`, `NewEncoder` (`Encode`,
+  `SetIndent`, `SetEscapeHTML`), `NewDecoder` (`Decode`, `UseNumber`,
+  `DisallowUnknownFields`, `More`, `Buffered`, `Token`, `InputOffset`),
+  `RawMessage`, `Number`, `Marshaler`, `Unmarshaler`, and Go's error types
+  with their messages and offsets. Struct tags (`omitempty`, `omitzero`,
+  `string`, `-`), embedding by Go's rules, maps sorted by key, `[]byte` as
+  base64, `time.Time`, and the program's `MarshalJSON`, `MarshalText`,
+  `UnmarshalJSON`, `UnmarshalText` (also on map keys), and `IsZero`. Values
+  nested ten thousand deep are read and written. The walk over a value is
+  native and driven by its run-time type, so marshalling a 1 KB document
+  takes about 0.1 ms (was `package encoding/json is not available`).
+- Swiftix Go `encoding` (`TextMarshaler`, `TextUnmarshaler`,
+  `BinaryMarshaler`, `BinaryUnmarshaler`) and `encoding/base64` (`StdEncoding`,
+  `URLEncoding`, `RawStdEncoding`, `RawURLEncoding`, `NewEncoding`,
+  `WithPadding`, `Strict`, `Encode`, `Decode`, `EncodeToString`,
+  `DecodeString`, `AppendEncode`, `AppendDecode`, `EncodedLen`, `DecodedLen`,
+  `CorruptInputError`) (was `package encoding/base64 is not available`).
 
 
 ### Changed
