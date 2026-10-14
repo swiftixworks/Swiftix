@@ -82,37 +82,7 @@ struct GoNetServerTests {
     /// values, so `errors.Is` matches a connection refused and a missing
     /// file to the numbers and sentinels Go matches them to.
     @Test func networkAndFileErrorsWrapSyscallNumbers() throws {
-        try expectGo(
-            #"""
-            package main
-
-            import (
-            	"errors"
-            	"fmt"
-            	"net"
-            	"os"
-            	"syscall"
-            )
-
-            func main() {
-            	_, err := net.Dial("tcp", "127.0.0.1:1")
-            	var se *os.SyscallError
-            	fmt.Println(err, errors.As(err, &se), errors.Is(err, syscall.ECONNREFUSED))
-            	_, err = os.Open("nope")
-            	fmt.Println(err, os.IsNotExist(err), errors.Is(err, os.ErrNotExist))
-            	var pe *os.PathError
-            	if errors.As(err, &pe) {
-            		fmt.Println(pe.Op, pe.Path, pe.Err == syscall.ENOENT)
-            	}
-            }
-
-            """#,
-            #"""
-            dial tcp 127.0.0.1:1: connect: connection refused true true
-            open nope: no such file or directory true true
-            open nope true
-
-            """#)
+        try expectGo(syscallErrorsSource, syscallErrorsExpected)
     }
 
     /// An echo server that closes a connection idle for 200 ms, through a
@@ -464,5 +434,36 @@ te <nil>
 0 true
 true
 0 EOF
+
+"""#
+
+private let syscallErrorsSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"syscall"
+)
+
+func main() {
+	_, err := net.Dial("tcp", "127.0.0.1:1")
+	var se *os.SyscallError
+	fmt.Println(err, errors.As(err, &se), errors.Is(err, syscall.ECONNREFUSED))
+	_, err = os.Open("nope")
+	fmt.Println(err, os.IsNotExist(err), errors.Is(err, os.ErrNotExist))
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		fmt.Println(pe.Op, pe.Path, pe.Err == syscall.ENOENT)
+	}
+}
+"""#
+
+private let syscallErrorsExpected = #"""
+dial tcp 127.0.0.1:1: connect: connection refused true true
+open nope: no such file or directory true true
+open nope true
 
 """#
