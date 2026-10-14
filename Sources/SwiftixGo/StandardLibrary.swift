@@ -315,18 +315,20 @@ extension GoStandardLibrary {
             return GoNativeFunction(
                 symbol: "$os.File.Read", goName: "os.File.Read",
                 parameters: [file, bytes], results: results)
+        // Offsets are int64, as in Go.
         case "ReadAt":
             return GoNativeFunction(
                 symbol: "$os.File.ReadAt", goName: "os.File.ReadAt",
-                parameters: [file, bytes, .int], results: results)
+                parameters: [file, bytes, GoNumericKind.int64.type], results: results)
         case "WriteAt":
             return GoNativeFunction(
                 symbol: "$os.File.WriteAt", goName: "os.File.WriteAt",
-                parameters: [file, bytes, .int], results: results)
+                parameters: [file, bytes, GoNumericKind.int64.type], results: results)
         case "Seek":
             return GoNativeFunction(
                 symbol: "$os.File.Seek", goName: "os.File.Seek",
-                parameters: [file, .int, .int], results: results)
+                parameters: [file, GoNumericKind.int64.type, .int],
+                results: [GoNumericKind.int64.type, GoPredeclared.errorType])
         case "Close":
             return GoNativeFunction(
                 symbol: "$os.File.Close", goName: "os.File.Close",

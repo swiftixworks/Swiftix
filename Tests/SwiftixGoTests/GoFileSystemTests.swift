@@ -46,7 +46,7 @@ struct GoFileSystemTests: GoTestHarness {
             var f *os.File
             var err error
             var n int
-            var position int
+            var position int64
             if f != nil || err != nil || n != 0 || position != 0 {
                 return
             }
@@ -203,7 +203,7 @@ struct GoFileSystemTests: GoTestHarness {
                         for i := 0; i < len(page); i++ {
                             page[i] = byte(number*16 + i)
                         }
-                        n, err = f.WriteAt(page, number*16)
+                        n, err = f.WriteAt(page, int64(number*16))
                         if n != 16 || err != nil {
                             fmt.Println("write failed", n, err)
                         }
@@ -628,7 +628,7 @@ struct GoFileSystemTests: GoTestHarness {
                 == "not enough arguments in call to os.OpenFile\n\thave (string, int)\n\twant (string, int, fs.FileMode)")
         #expect(
             diagnostic("fmt.Println(os.Stdout.Seek(0))")
-                == "not enough arguments in call to os.Stdout.Seek\n\thave (number)\n\twant (int, int)")
+                == "not enough arguments in call to os.Stdout.Seek\n\thave (number)\n\twant (int64, int)")
         #expect(diagnostic("var count int = os.Stdout.Close()\nfmt.Println(count)") != nil)
         #expect(diagnostic("var count int = io.EOF\nfmt.Println(count)") != nil)
         #expect(diagnostic("var flag string = os.O_APPEND\nfmt.Println(flag)") != nil)

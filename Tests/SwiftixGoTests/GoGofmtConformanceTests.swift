@@ -31,6 +31,13 @@ struct GoGofmtConformanceTests {
         #expect(try GoFormatter.format(GoSourceFile(path: "main.go", text: expected)) == expected)
     }
 
+    /// A comment between the arguments of a call that gives a package
+    /// variable its value is part of the value, and has no empty line put
+    /// before it as a comment between declarations does.
+    @Test func commentsInsideAPackageVariablesValue() throws {
+        try expectGofmt(commentsInsideValueSource, commentsInsideValueSource)
+    }
+
     /// A comment on the line before a `case` or a `default` goes where the
     /// label goes before the first clause, and after the statements of a
     /// clause only when it stood in the label's column.
@@ -2585,5 +2592,35 @@ func f(b byte, x int) int {
 }
 
 func main() { _ = f(1, 2) }
+
+"""#
+
+private let commentsInsideValueSource = #"""
+package main
+
+import "strings"
+
+var a = strings.NewReplacer(
+	"&", "&amp;",
+	// one
+	"x", "y",
+)
+
+var b = f(
+	1,
+	// two
+	2,
+)
+
+var c = f(
+	1, 2,
+	3, 4,
+	// three
+	5, 6,
+)
+
+func f(x ...int) int { return 0 }
+
+func main() { _, _, _ = a, b, c }
 
 """#

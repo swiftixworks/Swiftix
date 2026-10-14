@@ -1132,6 +1132,12 @@ type Server struct {
 	// Addr is ":http", port 80.
 	Addr string
 
+	// ErrorLog specifies an optional logger for errors accepting
+	// connections, unexpected behavior from handlers, and
+	// underlying FileSystem errors.
+	// If nil, logging is done via the log package's standard logger.
+	ErrorLog *log.Logger
+
 	// Handler answers the requests. A nil Handler is DefaultServeMux.
 	Handler Handler
 
@@ -1200,11 +1206,27 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	}
 }
 
-// logf reports what the server cannot tell a client, through the standard
-// logger of the log package, as Go does: a program that sets its output or
-// its flags sets them for these lines too.
+// logf reports what the server cannot tell a client, through ErrorLog or
+// the standard logger of the log package, as Go does: a program that sets
+// its output or its flags sets them for these lines too.
 func (srv *Server) logf(format string, args ...any) {
-	log.Printf(format, args...)
+	if srv.ErrorLog != nil {
+		srv.ErrorLog.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+// logf prints to the ErrorLog of the *Server associated with request r
+// via ServerContextKey. If there's no associated server, or if ErrorLog
+// is nil, logging is done via the log package's standard logger.
+func logf(r *Request, format string, args ...any) {
+	s, _ := r.Context().Value(ServerContextKey).(*Server)
+	if s != nil && s.ErrorLog != nil {
+		s.ErrorLog.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
