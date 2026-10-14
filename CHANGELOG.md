@@ -576,6 +576,9 @@ format, behavior and platform changes are recorded here.
   image.
 - The Go tool reports `go1.24-swiftix.0.5`, so images cached by an earlier
   tool are built again rather than replayed.
+- `go run` and `go test` no longer stop a program after 1,000,000 VM
+  instructions (`instruction limit exceeded`); like Go's, they bound no CPU
+  time. Embedding hosts that call `GoVirtualMachine.run` keep the budget.
 - `strconv.Atoi`, `ParseInt`, `ParseUint`, and `ParseFloat` fail with Go's
   `*strconv.NumError` (`Func`, `Num`, and `Err` as Go's), so `errors.Is(err,
   strconv.ErrRange)` and `errors.As` work; they are Go text around the native

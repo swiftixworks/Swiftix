@@ -209,7 +209,8 @@ SwiftixGoHost      host-file adapter and CLI
     outstanding still fails with the deadlock error and status 1.
 - `runProgram`, `run`, `go run`, and `go test` complete synchronously inside one
   step: they drive the event loop while goroutines wait (so `time.Sleep`
-  advances logical time), keep the 1,000,000-instruction and output budgets,
+  advances logical time), keep the output budget and, except for `go run` and
+  `go test`, which bound no CPU time as Go's do, the 1,000,000-instruction one,
   send `fmt.Print*` to their output sink, send other descriptors to the
   process when there is one (otherwise to the same sink), and report a wait on
   input the host has not delivered as a deadlock. `startProgram` is the older

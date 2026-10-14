@@ -61,7 +61,9 @@ extension ProcessContext: GoToolContext {
         arguments: [String],
         write: @escaping (String) throws -> Void
     ) throws -> Int32 {
-        try GoVirtualMachine().run(
+        // `go run` and `go test` bound no CPU time, as Go's do: a program
+        // that loops forever runs until it is interrupted.
+        try GoVirtualMachine(maximumInstructions: .max).run(
             executable,
             eventLoop: eventLoop,
             processContext: self,
