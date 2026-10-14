@@ -554,6 +554,11 @@ format, behavior and platform changes are recorded here.
   image.
 - The Go tool reports `go1.24-swiftix.0.5`, so images cached by an earlier
   tool are built again rather than replayed.
+- `strconv.Atoi`, `ParseInt`, `ParseUint`, and `ParseFloat` fail with Go's
+  `*strconv.NumError` (`Func`, `Num`, and `Err` as Go's), so `errors.Is(err,
+  strconv.ErrRange)` and `errors.As` work; they are Go text around the native
+  readers, and a program that calls one is about 4 KB larger. The coreutils
+  package is rebuilt for it.
 
 
 ### Fixed
@@ -688,6 +693,12 @@ format, behavior and platform changes are recorded here.
 - `gofmt` writes `<-chan T` after a result list or a name without a blank
   inside the arrow (`func f() <-chan int`; it wrote `<- chan int`).
 - `strings.Reader.Size` returns an `int64`, as in Go.
+- `strconv.Atoi` out of range returns the nearest value with `value out of
+  range` (was `0` and `invalid syntax`), and quotes its input as Go does.
+- A package-level variable initialized by a call to a function that declares
+  a variable of the same name (`var n, err = f()` where `f` has `x, err :=
+  g()`) is no initialization cycle.
+
 
 ## 0.13.1 — 2026-10-08
 
