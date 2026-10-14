@@ -6094,6 +6094,14 @@ extension IRLowerer {
 
 private enum BytecodeEmitter {
     static func emit(_ program: GoIRProgram) -> GoExecutable {
+        #if SWIFTIX_GO_TEMPORARIES
+        return GoTemporaryElimination.apply(to: emitInstructions(program))
+        #else
+        return emitInstructions(program)
+        #endif
+    }
+
+    static func emitInstructions(_ program: GoIRProgram) -> GoExecutable {
         GoExecutable(
             entryPoint: program.entryPoint,
             initializers: program.initializers,
