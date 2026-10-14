@@ -1311,7 +1311,10 @@ private struct FormatPrinter {
 
     mutating func handle(_ token: FormatToken, next: FormatToken?) {
         if token.kind == .lineComment {
-            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty && groups.isEmpty
+            // Inside the parentheses of a declaration's value, a comment is
+            // part of the value.
+            let isStandaloneTopLevelComment =
+                braceDepth == 0 && parenthesisDepth == 0 && lineIsEmpty && groups.isEmpty
             beginTopLevelCommentIfNeeded(isStandaloneTopLevelComment)
             if !lineIsEmpty {
                 // A comment after code is a column of its own, aligned with
@@ -1356,7 +1359,10 @@ private struct FormatPrinter {
             return
         }
         if token.kind == .blockComment {
-            let isStandaloneTopLevelComment = braceDepth == 0 && lineIsEmpty && groups.isEmpty
+            // Inside the parentheses of a declaration's value, a comment is
+            // part of the value.
+            let isStandaloneTopLevelComment =
+                braceDepth == 0 && parenthesisDepth == 0 && lineIsEmpty && groups.isEmpty
             beginTopLevelCommentIfNeeded(isStandaloneTopLevelComment)
             if !lineIsEmpty, next.map({ $0.leadingNewlines > 0 }) ?? true {
                 // The last thing on its line, it is a column like a `//`
