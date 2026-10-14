@@ -57,8 +57,8 @@ enum GoLibraryValue {
         case .fmtPrint, .fmtPrintln: signature = ([operands], [.int, failure])
         case .timeAfter, .timeTick: signature = ([GoLibraryTypes.duration], [ticks])
         case .timeSleep: signature = ([GoLibraryTypes.duration], [])
-        case .netDial: signature = ([.string, .string], [.named("net.Conn"), failure])
-        case .netListen: signature = ([.string, .string], [.named("net.Listener"), failure])
+        case .netDial: signature = ([.string, .string], [.named(GoLibraryTypes.connectionName), failure])
+        case .netListen: signature = ([.string, .string], [.named(GoLibraryTypes.listenerName), failure])
         case .netLookupHost: signature = ([.string], [.slice(.string), failure])
         case .httpHandleFunc, .httpListenAndServe, .httpGet: return nil
         case .runtimeGC: signature = ([], [])
@@ -100,10 +100,10 @@ enum GoLibraryValue {
         case ("context.Context", "Done"):
             signature = ([], [.channel(direction: .receiveOnly, element: .int)])
         case ("context.Context", "Err"): signature = ([], [failure])
-        case ("net.Conn", "Read"), ("net.Conn", "Write"):
+        case (GoLibraryTypes.connectionName, "Read"), (GoLibraryTypes.connectionName, "Write"):
             signature = ([.slice(GoPredeclared.byte)], [.int, failure])
-        case ("net.Conn", "Close"), ("net.Listener", "Close"): signature = ([], [failure])
-        case ("net.Listener", "Accept"): signature = ([], [.named("net.Conn"), failure])
+        case (GoLibraryTypes.connectionName, "Close"), (GoLibraryTypes.listenerName, "Close"): signature = ([], [failure])
+        case (GoLibraryTypes.listenerName, "Accept"): signature = ([], [.named(GoLibraryTypes.connectionName), failure])
         default: return nil
         }
         return GoLibrarySignature(

@@ -166,8 +166,12 @@ enum GoLibraryTypes {
 
     // MARK: Handles
 
-    static let connectionName = "net.Conn"
-    static let listenerName = "net.Listener"
+    /// The handle types of the earlier `net`, under names no program can
+    /// write: `net.Conn` and `net.Listener` are Go text now (`GoNetLibrary`),
+    /// and only the natives `net.Dial` and `net.Listen`, which the text
+    /// replaced, gave a value of these.
+    static let connectionName = "net·Conn"
+    static let listenerName = "net·Listener"
     /// What a `net.Conn` and a `net.Listener` hold, as Go names the types
     /// and as the VM names the owners of their methods.
     static let connectionTypeName = "*net.TCPConn"

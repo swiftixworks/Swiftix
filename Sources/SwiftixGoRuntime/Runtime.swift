@@ -906,6 +906,8 @@ public struct GoVirtualMachine: Sendable {
         // descriptor, and the descriptors closed since (`GoParkedNetWait`).
         var parkedNetWaits: [Int: [GoParkedNetWait]] = [:]
         var closedNetDescriptors: Set<Int> = []
+        // The deadlines and received bytes of each connection of `net`.
+        var netConnections: [Int: GoNetConnectionState] = [:]
         var descriptorWrites: [Int: [PendingDescriptorWrite]] = [:]
         var standardInputCarry: [UInt8] = []
         var completedNormally = false
@@ -4093,6 +4095,358 @@ public struct GoVirtualMachine: Sendable {
 
         /// Run a native of `net/http`: see `GoHTTP`. Returns `false` when
         /// `name` is not such a function.
+        /// The natives of `net` (`GoNetNatives`): each names a descriptor
+        /// by its number and gives a code for what went wrong.
+        func executeNetNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let expectedCount = GoNetNatives.argumentCounts[name] else { return false }
+            guard argumentCount == expectedCount, vm.stack.count >= argumentCount else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: expectedCount, actual: argumentCount)
+            }
+            let start = vm.stack.count - argumentCount
+            let operands = Array(vm.stack[start...])
+            vm.stack.removeSubrange(start...)
+            func integer(_ index: Int) throws -> Int64 {
+                guard case .int(let value) = operands[index] else { throw GoRuntimeError.typeMismatch }
+                return value
+            }
+            func text(_ index: Int) throws -> String {
+                guard case .string(let value) = operands[index] else {
+                    throw GoRuntimeError.typeMismatch
+                }
+                return value
+            }
+            func descriptor() throws -> Int {
+                guard let fd = Int(exactly: try integer(0)) else { throw GoRuntimeError.typeMismatch }
+                return fd
+            }
+            switch name {
+            case "$net.listen": try netListen(ip: try text(0), port: try integer(1))
+            case "$net.accept": try netAccept(try descriptor())
+            case "$net.dial": try netDial(ip: try text(0), port: try integer(1))
+            case "$net.read": try netRead(try descriptor(), into: operands[1])
+            case "$net.write": try netWrite(try descriptor(), from: operands[1])
+            case "$net.close": try netClose(try descriptor())
+            default: netSetDeadline(try descriptor(), which: try integer(1), at: try integer(2))
+            }
+            return true
+        }
+
+        /// The address of this end of a connection to `remote`, in dotted
+        /// form: the loopback address for a peer on it, else the address of
+        /// the interface on the peer's network.
+        func netLocalAddress(toward remote: IPv4Address) -> String {
+            let text = "\(remote)"
+            if text.hasPrefix("127.") { return "127.0.0.1" }
+            let interfaces = processContext?.snapshotNetworkConfiguration().interfaces ?? []
+            if let own = interfaces.first(where: { $0.address == remote }) { return "\(own.address)" }
+            return interfaces.first { !"\($0.address)".hasPrefix("127.") }.map { "\($0.address)" } ?? text
+        }
+
+        func netListen(ip: String, port: Int64) throws {
+            let failure = { (code: Int64) in [GoValue.int(-1), .int(0), .int(code)] }
+            guard let processContext, let requested = UInt16(exactly: port) else {
+                vm.stack.append(contentsOf: failure(GoNetNatives.unavailable))
+                return
+            }
+            // An address must be the loopback one or an interface's.
+            if !ip.isEmpty, !ip.hasPrefix("127.") {
+                let interfaces = processContext.snapshotNetworkConfiguration().interfaces
+                guard interfaces.contains(where: { "\($0.address)" == ip }) else {
+                    vm.stack.append(contentsOf: failure(GoNetNatives.noAddress))
+                    return
+                }
+            }
+            // A port of 0 is the first free one from a fixed start.
+            let candidates =
+                requested == 0
+                ? Array(GoNetNatives.firstChosenPort..<GoNetNatives.firstChosenPort + 1000) : [requested]
+            for candidate in candidates {
+                guard let fd = processContext.tcpSocket() else {
+                    vm.stack.append(contentsOf: failure(GoNetNatives.unavailable))
+                    return
+                }
+                processContext.bind(fd, address: IPv4Address(ip), port: candidate)
+                if processContext.tcpListen(fd, port: candidate) {
+                    closedNetDescriptors.remove(fd)
+                    netConnections[fd] = nil
+                    vm.stack.append(contentsOf: [.int(Int64(fd)), .int(Int64(candidate)), .int(0)])
+                    return
+                }
+                processContext.close(fd)
+            }
+            vm.stack.append(contentsOf: failure(GoNetNatives.addressInUse))
+        }
+
+        func netAccept(_ fd: Int) throws {
+            let failure = { (code: Int64) in
+                [GoValue.int(-1), .string(""), .string(""), .int(0), .int(code)]
+            }
+            guard let processContext else {
+                vm.stack.append(contentsOf: failure(GoNetNatives.unavailable))
+                return
+            }
+            if closedNetDescriptors.contains(fd) {
+                vm.stack.append(contentsOf: failure(GoNetNatives.closed))
+                return
+            }
+            let acceptingID = vm.currentGoroutineID
+            let parked = GoParkedNetWait(
+                goroutine: acceptingID, resultsOnClose: failure(GoNetNatives.closed))
+            parkedNetWaits[fd, default: []].append(parked)
+            beginHostWait()
+            processContext.tcpAccept(fd) { accepted in
+                if parked.abandoned {
+                    // The listener was closed meanwhile.
+                    processContext.close(accepted)
+                    return
+                }
+                defer { endHostWait() }
+                parkedNetWaits[fd]?.removeAll { $0 === parked }
+                closedNetDescriptors.remove(accepted)
+                netConnections[accepted] = nil
+                guard executionIsActive, asynchronousError == nil else { return }
+                let peer = processContext.tcpPeer(accepted)
+                let values: [GoValue] = [
+                    .int(Int64(accepted)),
+                    .string(peer.map { netLocalAddress(toward: $0.address) } ?? ""),
+                    .string(peer.map { "\($0.address)" } ?? ""),
+                    .int(Int64(peer?.port ?? 0)), .int(0),
+                ]
+                do {
+                    try wakeGoroutine(acceptingID, values: values)
+                } catch {
+                    recordAsynchronousFailure(error)
+                }
+            }
+            vm.currentBlocked = true
+        }
+
+        func netDial(ip: String, port: Int64) throws {
+            let failure = { (code: Int64) in [GoValue.int(-1), .string(""), .int(0), .int(code)] }
+            guard let processContext, let address = IPv4Address(ip),
+                let remotePort = UInt16(exactly: port), let fd = processContext.tcpSocket()
+            else {
+                vm.stack.append(contentsOf: failure(GoNetNatives.unavailable))
+                return
+            }
+            closedNetDescriptors.remove(fd)
+            netConnections[fd] = nil
+            let dialingID = vm.currentGoroutineID
+            beginHostWait()
+            processContext.tcpConnect(fd, to: address, port: remotePort) {
+                defer { endHostWait() }
+                guard executionIsActive, asynchronousError == nil else { return }
+                // The kernel resumes for a failed handshake as well; the
+                // socket's readiness tells the outcomes apart.
+                let readiness = processContext.readiness(fd) ?? []
+                var values: [GoValue]
+                if readiness.contains(.error) {
+                    processContext.close(fd)
+                    values = failure(GoNetNatives.refused)
+                } else if !readiness.contains(.writable) {
+                    processContext.close(fd)
+                    values = failure(GoNetNatives.timedOut)
+                } else {
+                    values = [
+                        .int(Int64(fd)), .string(netLocalAddress(toward: address)),
+                        .int(Int64(processContext.tcpLocalPort(fd) ?? 0)), .int(0),
+                    ]
+                }
+                do {
+                    try wakeGoroutine(dialingID, values: values)
+                } catch {
+                    recordAsynchronousFailure(error)
+                }
+            }
+            vm.currentBlocked = true
+        }
+
+        /// The state of connection `fd`, made when it is first needed.
+        func netConnection(_ fd: Int) -> GoNetConnectionState {
+            if let state = netConnections[fd] { return state }
+            let state = GoNetConnectionState()
+            netConnections[fd] = state
+            return state
+        }
+
+        /// The slice a `[]byte` operand is, or nil for a nil slice.
+        func netBuffer(_ operand: GoValue) throws -> GoSliceValue? {
+            switch operand {
+            case .slice(let buffer):
+                guard buffer.length <= resourceLimits.maximumNetworkTransferBytes else {
+                    throw GoRuntimeError.resourceLimitExceeded("network transfer bytes")
+                }
+                return buffer
+            case .nilValue: return nil
+            default: throw GoRuntimeError.typeMismatch
+            }
+        }
+
+        func netRead(_ fd: Int, into operand: GoValue) throws {
+            let buffer = try netBuffer(operand)
+            guard processContext != nil else {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.unavailable)])
+                return
+            }
+            if closedNetDescriptors.contains(fd) {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.closed)])
+                return
+            }
+            guard let buffer, buffer.length > 0 else {
+                vm.stack.append(contentsOf: [.int(0), .int(0)])
+                return
+            }
+            let state = netConnection(fd)
+            if let deadline = state.readDeadline, deadline <= runtimeTimestamp() {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.timeout)])
+                return
+            }
+            if !state.received.isEmpty || state.sawEnd {
+                vm.stack.append(contentsOf: try takeReceived(state, into: buffer))
+                return
+            }
+            let wait = GoParkedNetWait(
+                goroutine: vm.currentGoroutineID,
+                resultsOnClose: [.int(0), .int(GoNetNatives.closed)])
+            parkedNetWaits[fd, default: []].append(wait)
+            let reader = GoNetReader(buffer: buffer, wait: wait, deadline: state.readDeadline)
+            state.readers.append(reader)
+            beginHostWait()
+            if let deadline = reader.deadline { armReadDeadline(fd, state, reader, deadline) }
+            receive(fd, state)
+            vm.currentBlocked = true
+        }
+
+        /// What a `Read` into `buffer` gets of what `state` has received:
+        /// the count and the code.
+        func takeReceived(_ state: GoNetConnectionState, into buffer: GoSliceValue) throws -> [GoValue] {
+            guard !state.received.isEmpty else { return [.int(0), .int(GoNetNatives.endOfFile)] }
+            let count = min(buffer.length, state.received.count)
+            let range = try validatedSliceRange(buffer)
+            guard case .array(var backing) = try read(pointer: buffer.backing, heap: vm.heap) else {
+                throw GoRuntimeError.invalidSliceBounds
+            }
+            for offset in 0..<count {
+                backing[range.lowerBound + offset] = .int(Int64(state.received[offset]))
+            }
+            try writePointer(.array(backing), through: buffer.backing, heap: &vm.heap)
+            state.received.removeFirst(count)
+            return [.int(Int64(count)), .int(0)]
+        }
+
+        /// Starts a receive of the kernel for the first reader of `fd`,
+        /// unless one is outstanding. What it brings goes to the readers,
+        /// and what they leave stays for the next.
+        func receive(_ fd: Int, _ state: GoNetConnectionState) {
+            guard !state.receiving, let first = state.readers.first, let processContext else { return }
+            state.receiving = true
+            let maxBytes = first.buffer.length
+            processContext.tcpRecv(fd, max: maxBytes) { bytes in
+                state.receiving = false
+                // The connection was closed meanwhile.
+                guard netConnections[fd] === state, executionIsActive, asynchronousError == nil
+                else { return }
+                guard bytes.count <= resourceLimits.maximumNetworkTransferBytes else {
+                    asynchronousError = .resourceLimitExceeded("network transfer bytes")
+                    return
+                }
+                if bytes.isEmpty { state.sawEnd = true } else { state.received += bytes }
+                var woken = 0
+                do {
+                    while let reader = state.readers.first {
+                        state.readers.removeFirst()
+                        parkedNetWaits[fd]?.removeAll { $0 === reader.wait }
+                        reader.wait.abandoned = true
+                        woken += 1
+                        try wakeGoroutine(
+                            reader.wait.goroutine, values: try takeReceived(state, into: reader.buffer))
+                        if state.received.isEmpty && !state.sawEnd { break }
+                    }
+                } catch {
+                    recordAsynchronousFailure(error)
+                }
+                receive(fd, state)
+                for _ in 0..<woken { endHostWait() }
+            }
+        }
+
+        /// Wakes `reader` with Go's timeout when `deadline` passes and it
+        /// still waits under it.
+        func armReadDeadline(
+            _ fd: Int, _ state: GoNetConnectionState, _ reader: GoNetReader, _ deadline: Int64
+        ) {
+            let delay = max(0, deadline &- runtimeTimestamp())
+            scheduleRuntimeWork(after: Double(delay) / 1_000_000_000) {
+                guard executionIsActive, asynchronousError == nil, !reader.wait.abandoned,
+                    reader.deadline == deadline,
+                    let index = state.readers.firstIndex(where: { $0 === reader })
+                else { return }
+                state.readers.remove(at: index)
+                parkedNetWaits[fd]?.removeAll { $0 === reader.wait }
+                reader.wait.abandoned = true
+                do {
+                    try wakeGoroutine(
+                        reader.wait.goroutine, values: [.int(0), .int(GoNetNatives.timeout)])
+                } catch {
+                    recordAsynchronousFailure(error)
+                }
+                endHostWait()
+            }
+        }
+
+        func netSetDeadline(_ fd: Int, which: Int64, at: Int64) {
+            guard !closedNetDescriptors.contains(fd) else { return }
+            let state = netConnection(fd)
+            let deadline = at == GoNetNatives.noDeadline ? nil : at
+            if which & GoNetNatives.readDeadline != 0 {
+                state.readDeadline = deadline
+                // A deadline applies to the reads that wait as well.
+                for reader in state.readers {
+                    reader.deadline = deadline
+                    if let deadline { armReadDeadline(fd, state, reader, deadline) }
+                }
+            }
+            if which & GoNetNatives.writeDeadline != 0 { state.writeDeadline = deadline }
+        }
+
+        func netWrite(_ fd: Int, from operand: GoValue) throws {
+            let buffer = try netBuffer(operand)
+            guard let processContext else {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.unavailable)])
+                return
+            }
+            if closedNetDescriptors.contains(fd) {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.closed)])
+                return
+            }
+            if let deadline = netConnections[fd]?.writeDeadline, deadline <= runtimeTimestamp() {
+                vm.stack.append(contentsOf: [.int(0), .int(GoNetNatives.timeout)])
+                return
+            }
+            let bytes = try buffer.map { try sliceBytes(.slice($0)) } ?? []
+            if bytes.isEmpty {
+                vm.stack.append(contentsOf: [.int(0), .int(0)])
+                return
+            }
+            let sent = processContext.tcpSend(fd, bytes)
+            vm.stack.append(contentsOf: [
+                .int(sent ? Int64(bytes.count) : 0), .int(sent ? 0 : GoNetNatives.reset),
+            ])
+        }
+
+        func netClose(_ fd: Int) throws {
+            guard closedNetDescriptors.insert(fd).inserted else { return }
+            processContext?.close(fd)
+            netConnections[fd] = nil
+            // Whoever waits on the descriptor is woken, as by Go's Close.
+            for parked in parkedNetWaits.removeValue(forKey: fd) ?? [] {
+                parked.abandoned = true
+                endHostWait()
+                try wakeGoroutine(parked.goroutine, values: parked.resultsOnClose)
+            }
+        }
+
         func executeHTTPNative(_ name: String, argumentCount: Int) throws -> Bool {
             guard let expectedCount = GoHTTP.argumentCounts[name] else { return false }
             guard argumentCount == expectedCount else {
@@ -5309,6 +5663,7 @@ public struct GoVirtualMachine: Sendable {
                                 || executeHTTPNative(name, argumentCount: argumentCount)
                                 || executeURLNative(name, argumentCount: argumentCount)
                                 || executeBytesNative(name, argumentCount: argumentCount)
+                                || executeNetNative(name, argumentCount: argumentCount)
                         else {
                             throw GoRuntimeError.missingFunction(name)
                         }

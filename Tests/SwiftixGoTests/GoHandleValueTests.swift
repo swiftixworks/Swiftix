@@ -515,8 +515,9 @@ struct GoHandleValueTests: GoTestHarness {
                 == "10:6: assignment mismatch: 1 variable but w.Write returns 2 values")
     }
 
-    /// A call the compiler sees is the instruction it was, and a handle
-    /// converted to an interface is boxed with nothing. What looks a method up by
+    /// A call of a `net.Conn` method goes through the interface, `net.Conn`
+    /// being Go text now, and a value converted to an interface is boxed with
+    /// nothing. What looks a method up by
     /// the name of the dynamic type finds a function of the VM.
     @Test func theVMNamesWhatAHandleHoldsAndHasItsMethods() throws {
         let executable = try GoCompiler.compile(sources: [
@@ -535,8 +536,8 @@ struct GoHandleValueTests: GoTestHarness {
         ])
         let main = try #require(executable.functions.first { $0.name == "main" })
 
-        #expect(main.instructions.contains(.netRead))
-        #expect(main.instructions.contains(.netClose))
+        #expect(main.instructions.contains(.callInterface("Read", argumentCount: 1)))
+        #expect(main.instructions.contains(.callInterface("Close", argumentCount: 0)))
         #expect(!main.instructions.contains { instruction in
             if case .makeInterface = instruction { return true }
             return false

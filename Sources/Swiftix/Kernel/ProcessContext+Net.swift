@@ -457,6 +457,12 @@ extension ProcessContext {
         return (connection.remoteIP, connection.remotePort)
     }
 
+    /// The local port of a connected TCP descriptor: the ephemeral port a
+    /// connection the process opened was given.
+    public func tcpLocalPort(_ fd: Int) -> UInt16? {
+        (process.fileDescriptors.object(fd) as? TCPSocket)?.connection?.localPort
+    }
+
     /// The async ICMP echo with a caller-supplied payload. The payload-less
     /// frontend reports an 8-byte reply; `ping` needs Linux's 56-byte default so
     /// its `N bytes from` line is truthful.

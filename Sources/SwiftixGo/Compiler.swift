@@ -3393,7 +3393,7 @@ struct IRLowerer {
             case ("sync.WaitGroup", "Wait"):
                 operations.append(.waitGroupWait(waitGroup: receiver))
                 return nil
-            case ("net.Conn", "Write"):
+            case (GoLibraryTypes.connectionName, "Write"):
                 guard let data = arguments.first else { break }
                 let buf = try lower(data)
                 let nDest = allocateRegister()
@@ -3402,7 +3402,7 @@ struct IRLowerer {
                     nDestination: nDest, errDestination: errDest,
                     conn: receiver, buf: buf))
                 return nDest
-            case ("net.Conn", "Read"):
+            case (GoLibraryTypes.connectionName, "Read"):
                 guard let data = arguments.first else { break }
                 let buf = try lower(data)
                 let nDest = allocateRegister()
@@ -3411,18 +3411,18 @@ struct IRLowerer {
                     nDestination: nDest, errDestination: errDest,
                     conn: receiver, buf: buf))
                 return nDest
-            case ("net.Conn", "Close"):
+            case (GoLibraryTypes.connectionName, "Close"):
                 let errDest = allocateRegister()
                 operations.append(.netClose(errDestination: errDest, conn: receiver))
                 return errDest
-            case ("net.Listener", "Accept"):
+            case (GoLibraryTypes.listenerName, "Accept"):
                 let connDest = allocateRegister()
                 let errDest = allocateRegister()
                 operations.append(.netAccept(
                     connDestination: connDest, errDestination: errDest,
                     listener: receiver))
                 return connDest
-            case ("net.Listener", "Close"):
+            case (GoLibraryTypes.listenerName, "Close"):
                 let errDest = allocateRegister()
                 operations.append(.netClose(errDestination: errDest, conn: receiver))
                 return errDest
@@ -3736,9 +3736,9 @@ struct IRLowerer {
         {
             switch builtin {
             case .netDial:
-                return [.named("net.Conn"), GoPredeclared.errorType]
+                return [.named(GoLibraryTypes.connectionName), GoPredeclared.errorType]
             case .netListen:
-                return [.named("net.Listener"), GoPredeclared.errorType]
+                return [.named(GoLibraryTypes.listenerName), GoPredeclared.errorType]
             case .netLookupHost:
                 return [.slice(.string), GoPredeclared.errorType]
             case .httpGet:
@@ -3760,10 +3760,10 @@ struct IRLowerer {
             let receiverName = syncReceiverName(receiverType)
         {
             switch (receiverName, member) {
-            case ("net.Conn", "Read"), ("net.Conn", "Write"):
+            case (GoLibraryTypes.connectionName, "Read"), (GoLibraryTypes.connectionName, "Write"):
                 return [.int, GoPredeclared.errorType]
-            case ("net.Listener", "Accept"):
-                return [.named("net.Conn"), GoPredeclared.errorType]
+            case (GoLibraryTypes.listenerName, "Accept"):
+                return [.named(GoLibraryTypes.connectionName), GoPredeclared.errorType]
             default:
                 break
             }
@@ -3891,7 +3891,7 @@ struct IRLowerer {
                 receiver = dereferenced
             }
             switch (receiverName, member) {
-            case ("net.Conn", "Read"):
+            case (GoLibraryTypes.connectionName, "Read"):
                 let buf = try lower(arguments[0])
                 let nDest = allocateRegister()
                 let errDest = allocateRegister()
@@ -3899,7 +3899,7 @@ struct IRLowerer {
                     nDestination: nDest, errDestination: errDest,
                     conn: receiver, buf: buf))
                 return [nDest, errDest]
-            case ("net.Conn", "Write"):
+            case (GoLibraryTypes.connectionName, "Write"):
                 let buf = try lower(arguments[0])
                 let nDest = allocateRegister()
                 let errDest = allocateRegister()
@@ -3907,7 +3907,7 @@ struct IRLowerer {
                     nDestination: nDest, errDestination: errDest,
                     conn: receiver, buf: buf))
                 return [nDest, errDest]
-            case ("net.Listener", "Accept"):
+            case (GoLibraryTypes.listenerName, "Accept"):
                 let connDest = allocateRegister()
                 let errDest = allocateRegister()
                 operations.append(.netAccept(
@@ -4717,11 +4717,11 @@ struct IRLowerer {
         switch type {
         case .named(let name)
             where name == "sync.Mutex" || name == "sync.WaitGroup"
-                || name == "net.Conn" || name == "net.Listener":
+                || name == GoLibraryTypes.connectionName || name == GoLibraryTypes.listenerName:
             return name
         case .pointer(.named(let name))
             where name == "sync.Mutex" || name == "sync.WaitGroup"
-                || name == "net.Conn" || name == "net.Listener":
+                || name == GoLibraryTypes.connectionName || name == GoLibraryTypes.listenerName:
             return name
         default:
             return nil

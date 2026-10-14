@@ -21,7 +21,7 @@ extension GoStandardLibrary {
         // as a line of a log begins (1).
         case "formatTime": signature = ([.int, .int], .string)
         // `conn.RemoteAddr().String()`.
-        case "remoteAddr": signature = ([.named("net.Conn")], .string)
+        case "remoteAddr": signature = ([.named(GoLibraryTypes.connectionName)], .string)
         // Whether a method or a header name is a token of RFC 7230.
         case "validToken": signature = ([.string], .bool)
         // Whether a header value has no control byte but the tab.

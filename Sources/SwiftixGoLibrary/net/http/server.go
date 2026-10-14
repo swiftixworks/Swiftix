@@ -970,7 +970,7 @@ const errorHeaders = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection:
 // serve reads the requests of a connection and runs the handler for each,
 // until the client or the response ends the connection.
 func (c *conn) serve() {
-	c.remoteAddr = native.remoteAddr(c.rwc)
+	c.remoteAddr = c.rwc.RemoteAddr().String()
 	defer func() {
 		if err := recover(); err != nil && !isAbortHandler(err) {
 			c.server.logf("http: panic serving %v: %v", c.remoteAddr, err)

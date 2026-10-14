@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "log", "net/http", "net/url", "sort", "strconv", "strings", "sync", "sync/atomic", "time"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "log", "net", "net/http", "net/url", "os", "sort", "strconv", "strings", "sync", "sync/atomic", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -52,6 +52,19 @@ enum GoSourceLibraryText {
             "Lmicroseconds", "Lmsgprefix", "Logger", "Lshortfile", "LstdFlags", "Ltime", "New",
             "Output", "Panic", "Panicf", "Panicln", "Prefix", "Print", "Printf", "Println",
             "SetFlags", "SetOutput", "SetPrefix", "Writer", "header", "standardError", "std",
+        ],
+        "net": [
+            "Addr", "AddrError", "Conn", "DNSError", "Dial", "DialTimeout", "ErrClosed", "Error",
+            "IP", "IPv4", "IPv4len", "IPv6len", "IPv6loopback", "IPv6unspecified", "IPv6zero",
+            "JoinHostPort", "Listen", "Listener", "OpError", "ParseIP", "ResolveTCPAddr",
+            "SplitHostPort", "TCPAddr", "TCPConn", "TCPListener", "UnknownNetworkError",
+            "checkNetwork", "codeAddrInUse", "codeClosed", "codeEOF", "codeError", "codeNoAddress",
+            "codeRefused", "codeReset", "codeTimedOut", "codeTimeout", "codeUnavailable", "conn",
+            "dialTCP", "errAddrInUse", "errConnRefused", "errConnReset", "errConnTimedOut",
+            "errInvalid", "errNetClosing", "errNoAddress", "errUnavailable", "hexDigit", "hexValue",
+            "hostIPv4", "indexByte", "isConnError", "isZeros", "lastIndexByte", "listenTCP",
+            "netFD", "newTCPConn", "parseIPv4", "parseIPv6", "parsePort", "readDeadline",
+            "resolveTCPAddr", "temporary", "timeout", "writeDeadline",
         ],
         "net/http": [
             "CanonicalHeaderKey", "Client", "ConnState", "DefaultClient", "DefaultMaxHeaderBytes",
@@ -116,6 +129,10 @@ enum GoSourceLibraryText {
             "encodeZone", "getScheme", "parse", "parseAuthority", "parseHost", "parseQuery",
             "resolvePath", "splitHostPort", "unescape", "validOptionalPort", "validUserinfo",
         ],
+        "os": [
+            "ErrDeadlineExceeded", "NewSyscallError", "SyscallError", "deadlineExceededError",
+            "timeout",
+        ],
         "sort": [
             "Find", "IntSlice", "Interface", "IntsAreSorted", "IsSorted", "Reverse", "Search",
             "SearchInts", "SearchStrings", "Slice", "SliceIsSorted", "SliceStable", "Sort",
@@ -171,8 +188,10 @@ enum GoSourceLibraryText {
         case "context": return context
         case "io": return io
         case "log": return log
+        case "net": return net
         case "net/http": return netHttp
         case "net/url": return netUrl
+        case "os": return os
         case "sort": return sort
         case "strconv": return strconv
         case "strings": return strings
@@ -3346,6 +3365,1079 @@ func Panicln(v ...any) {
 	s := fmt.Sprintln(v...)
 	std.Output(2, s)
 	panic(s)
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let net: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/net/ip.go",
+            text: #"""
+package net
+
+import "strconv"
+
+// IP address lengths (bytes).
+const (
+	IPv4len = 4
+	IPv6len = 16
+)
+
+// An IP is a single IP address, a slice of bytes: 4 bytes for IPv4, 16 for
+// IPv6, with an IPv4 address in IPv6 form as well.
+type IP []byte
+
+// Well-known IPv6 addresses.
+var (
+	IPv6zero        = IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	IPv6unspecified = IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	IPv6loopback    = IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+)
+
+// IPv4 returns the IP address (in 16-byte form) of the IPv4 address
+// a.b.c.d.
+func IPv4(a, b, c, d byte) IP {
+	return IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d}
+}
+
+func isZeros(p IP) bool {
+	for i := 0; i < len(p); i++ {
+		if p[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// To4 converts the IPv4 address ip to a 4-byte representation. If ip is
+// not an IPv4 address, To4 returns nil.
+func (ip IP) To4() IP {
+	if len(ip) == IPv4len {
+		return ip
+	}
+	if len(ip) == IPv6len && isZeros(ip[0:10]) && ip[10] == 0xff && ip[11] == 0xff {
+		return ip[12:16]
+	}
+	return nil
+}
+
+// To16 converts the IP address ip to a 16-byte representation. If ip is
+// not an IP address (it is the wrong length), To16 returns nil.
+func (ip IP) To16() IP {
+	if len(ip) == IPv4len {
+		return IPv4(ip[0], ip[1], ip[2], ip[3])
+	}
+	if len(ip) == IPv6len {
+		return ip
+	}
+	return nil
+}
+
+// IsUnspecified reports whether ip is an unspecified address, either the
+// IPv4 address "0.0.0.0" or the IPv6 address "::".
+func (ip IP) IsUnspecified() bool {
+	return ip.Equal(IPv4(0, 0, 0, 0)) || ip.Equal(IPv6unspecified)
+}
+
+// IsLoopback reports whether ip is a loopback address.
+func (ip IP) IsLoopback() bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 127
+	}
+	return ip.Equal(IPv6loopback)
+}
+
+// Equal reports whether ip and x are the same IP address. An IPv4 address
+// and that same address in IPv6 form are considered to be equal.
+func (ip IP) Equal(x IP) bool {
+	if len(ip) == len(x) {
+		return string(ip) == string(x)
+	}
+	if len(ip) == IPv4len && len(x) == IPv6len {
+		return string(x[0:12]) == string(IPv4(0, 0, 0, 0)[0:12]) && string(ip) == string(x[12:])
+	}
+	if len(ip) == IPv6len && len(x) == IPv4len {
+		return string(ip[0:12]) == string(IPv4(0, 0, 0, 0)[0:12]) && string(ip[12:]) == string(x)
+	}
+	return false
+}
+
+const hexDigit = "0123456789abcdef"
+
+// String returns the string form of the IP address ip: "<nil>" for an
+// address of length zero, dotted decimal ("192.0.2.1") for an IPv4
+// address, and RFC 5952 form ("2001:db8::1") for another.
+func (ip IP) String() string {
+	if len(ip) == 0 {
+		return "<nil>"
+	}
+	if len(ip) != IPv4len && len(ip) != IPv6len {
+		s := make([]byte, 0, 1+len(ip)*2)
+		s = append(s, '?')
+		for _, b := range ip {
+			s = append(s, hexDigit[b>>4], hexDigit[b&0xf])
+		}
+		return string(s)
+	}
+	if p4 := ip.To4(); len(p4) == IPv4len {
+		return strconv.Itoa(int(p4[0])) + "." + strconv.Itoa(int(p4[1])) + "." +
+			strconv.Itoa(int(p4[2])) + "." + strconv.Itoa(int(p4[3]))
+	}
+	// The longest run of two or more zero groups, the first of the
+	// longest, is written "::".
+	start, length := -1, 0
+	for i := 0; i < 8; {
+		j := i
+		for j < 8 && ip[2*j] == 0 && ip[2*j+1] == 0 {
+			j++
+		}
+		if j-i >= 2 && j-i > length {
+			start, length = i, j-i
+		}
+		if j == i {
+			j++
+		}
+		i = j
+	}
+	s := ""
+	for i := 0; i < 8; i++ {
+		if i == start {
+			s += "::"
+			i += length - 1
+			continue
+		}
+		if i > 0 && i != start+length {
+			s += ":"
+		}
+		group := int(ip[2*i])<<8 | int(ip[2*i+1])
+		s += strconv.FormatInt(int64(group), 16)
+	}
+	return s
+}
+
+// ParseIP parses s as an IP address, in IPv4 dotted decimal ("192.0.2.1")
+// or IPv6 ("2001:db8::68") form, and returns it in 16-byte form, or nil
+// when s is no valid address.
+func ParseIP(s string) IP {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.':
+			return parseIPv4(s)
+		case ':':
+			return parseIPv6(s)
+		}
+	}
+	return nil
+}
+
+func parseIPv4(s string) IP {
+	var p [IPv4len]byte
+	for i := 0; i < IPv4len; i++ {
+		if i > 0 {
+			if len(s) == 0 || s[0] != '.' {
+				return nil
+			}
+			s = s[1:]
+		}
+		n, digits := 0, 0
+		for digits < len(s) && '0' <= s[digits] && s[digits] <= '9' {
+			if digits > 0 && n == 0 {
+				return nil // a leading zero
+			}
+			n = n*10 + int(s[digits]-'0')
+			digits++
+			if n > 0xff {
+				return nil
+			}
+		}
+		if digits == 0 {
+			return nil
+		}
+		s = s[digits:]
+		p[i] = byte(n)
+	}
+	if len(s) != 0 {
+		return nil
+	}
+	return IPv4(p[0], p[1], p[2], p[3])
+}
+
+func parseIPv6(s string) IP {
+	ip := make(IP, IPv6len)
+	ellipsis := -1 // position of ellipsis in ip
+	if len(s) >= 2 && s[0] == ':' && s[1] == ':' {
+		ellipsis = 0
+		s = s[2:]
+		if len(s) == 0 {
+			return ip
+		}
+	}
+	i := 0
+	for i < IPv6len {
+		n, digits := 0, 0
+		for digits < len(s) && digits < 4 {
+			v := hexValue(s[digits])
+			if v < 0 {
+				break
+			}
+			n = n*16 + v
+			digits++
+		}
+		if digits == 0 {
+			return nil
+		}
+		if digits < len(s) && s[digits] == '.' {
+			// An IPv4 address ends it.
+			if ellipsis < 0 && i != IPv6len-IPv4len {
+				return nil
+			}
+			if i+IPv4len > IPv6len {
+				return nil
+			}
+			v4 := parseIPv4(s)
+			if v4 == nil {
+				return nil
+			}
+			copy(ip[i:], v4[12:])
+			i += IPv4len
+			s = ""
+			break
+		}
+		ip[i] = byte(n >> 8)
+		ip[i+1] = byte(n)
+		i += 2
+		s = s[digits:]
+		if len(s) == 0 {
+			break
+		}
+		if s[0] != ':' || len(s) == 1 {
+			return nil
+		}
+		s = s[1:]
+		if s[0] == ':' {
+			if ellipsis >= 0 {
+				return nil // a second ellipsis
+			}
+			ellipsis = i
+			s = s[1:]
+			if len(s) == 0 {
+				break
+			}
+		}
+	}
+	if len(s) != 0 {
+		return nil
+	}
+	if i < IPv6len {
+		if ellipsis < 0 {
+			return nil
+		}
+		n := IPv6len - i
+		for j := i - 1; j >= ellipsis; j-- {
+			ip[j+n] = ip[j]
+		}
+		for j := ellipsis + n - 1; j >= ellipsis; j-- {
+			ip[j] = 0
+		}
+	} else if ellipsis >= 0 {
+		return nil // an ellipsis must stand for at least one group
+	}
+	return ip
+}
+
+// hexValue is the value of the hexadecimal digit c, or -1.
+func hexValue(c byte) int {
+	switch {
+	case '0' <= c && c <= '9':
+		return int(c - '0')
+	case 'a' <= c && c <= 'f':
+		return int(c-'a') + 10
+	case 'A' <= c && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
+// TCPAddr represents the address of a TCP end point.
+type TCPAddr struct {
+	IP   IP
+	Port int
+	Zone string // IPv6 scoped addressing zone
+}
+
+// Network returns the address's network name, "tcp".
+func (a *TCPAddr) Network() string { return "tcp" }
+
+func (a *TCPAddr) String() string {
+	if a == nil {
+		return "<nil>"
+	}
+	ip := ""
+	if len(a.IP) != 0 {
+		ip = a.IP.String()
+	}
+	if a.Zone != "" {
+		return JoinHostPort(ip+"%"+a.Zone, strconv.Itoa(a.Port))
+	}
+	return JoinHostPort(ip, strconv.Itoa(a.Port))
+}
+
+// ResolveTCPAddr returns an address of TCP end point. The host must be an
+// IP literal, localhost, or empty; the port a number.
+func ResolveTCPAddr(network, address string) (*TCPAddr, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	case "":
+		network = "tcp"
+	default:
+		return nil, UnknownNetworkError(network)
+	}
+	return resolveTCPAddr(address)
+}
+
+func resolveTCPAddr(address string) (*TCPAddr, error) {
+	host, service, err := SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	port, needsLookup := parsePort(service)
+	if needsLookup {
+		return nil, &DNSError{Err: "unknown port", Name: "tcp/" + service, IsNotFound: true}
+	}
+	if port < 0 || port > 0xFFFF {
+		return nil, &AddrError{Err: "invalid port", Addr: service}
+	}
+	if host == "" {
+		return &TCPAddr{Port: port}, nil
+	}
+	if host == "localhost" {
+		return &TCPAddr{IP: IPv4(127, 0, 0, 1), Port: port}, nil
+	}
+	ip := ParseIP(host)
+	if ip == nil {
+		return nil, &DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return &TCPAddr{IP: ip, Port: port}, nil
+}
+
+// parsePort parses service as a decimal integer and returns the
+// corresponding value as port. It is the caller's responsibility to
+// parse service as a non-decimal integer when needsLookup is true.
+func parsePort(service string) (port int, needsLookup bool) {
+	if service == "" {
+		// Lock in the legacy behavior that an empty string
+		// means port 0. See golang.org/issue/13610.
+		return 0, false
+	}
+	const (
+		max    = uint32(1<<32 - 1)
+		cutoff = uint32(1 << 30)
+	)
+	neg := false
+	if service[0] == '+' {
+		service = service[1:]
+	} else if service[0] == '-' {
+		neg = true
+		service = service[1:]
+	}
+	var n uint32
+	for i := 0; i < len(service); i++ {
+		d := service[i]
+		if '0' <= d && d <= '9' {
+			d -= '0'
+		} else {
+			return 0, true
+		}
+		if n >= cutoff {
+			n = max
+			break
+		}
+		n *= 10
+		nn := n + uint32(d)
+		if nn < n || nn > max {
+			n = max
+			break
+		}
+		n = nn
+	}
+	if !neg && n >= cutoff {
+		port = int(cutoff - 1)
+	} else if neg && n > cutoff {
+		port = int(cutoff)
+	} else {
+		port = int(n)
+	}
+	if neg {
+		port = -port
+	}
+	return port, false
+}
+
+// SplitHostPort splits a network address of the form "host:port",
+// "host%zone:port", "[host]:port" or "[host%zone]:port" into host or
+// host%zone and port.
+func SplitHostPort(hostport string) (host, port string, err error) {
+	const (
+		missingPort   = "missing port in address"
+		tooManyColons = "too many colons in address"
+	)
+	addrErr := func(addr, why string) (host, port string, err error) {
+		return "", "", &AddrError{Err: why, Addr: addr}
+	}
+	j, k := 0, 0
+
+	// The port starts after the last colon.
+	i := lastIndexByte(hostport, ':')
+	if i < 0 {
+		return addrErr(hostport, missingPort)
+	}
+
+	if hostport[0] == '[' {
+		// Expect the first ']' just before the last ':'.
+		end := indexByte(hostport, ']')
+		if end < 0 {
+			return addrErr(hostport, "missing ']' in address")
+		}
+		switch end + 1 {
+		case len(hostport):
+			// There can't be a ':' behind the ']' now.
+			return addrErr(hostport, missingPort)
+		case i:
+			// The expected result.
+		default:
+			// Either ']' isn't followed by a colon, or it is
+			// followed by a colon that is not the last one.
+			if hostport[end+1] == ':' {
+				return addrErr(hostport, tooManyColons)
+			}
+			return addrErr(hostport, missingPort)
+		}
+		host = hostport[1:end]
+		j, k = 1, end+1 // there can't be a '[' resp. ']' before these positions
+	} else {
+		host = hostport[:i]
+		if indexByte(host, ':') >= 0 {
+			return addrErr(hostport, tooManyColons)
+		}
+	}
+	if indexByte(hostport[j:], '[') >= 0 {
+		return addrErr(hostport, "unexpected '[' in address")
+	}
+	if indexByte(hostport[k:], ']') >= 0 {
+		return addrErr(hostport, "unexpected ']' in address")
+	}
+
+	port = hostport[i+1:]
+	return host, port, nil
+}
+
+// JoinHostPort combines host and port into a network address of the form
+// "host:port". If host contains a colon, as found in literal IPv6
+// addresses, then JoinHostPort returns "[host]:port".
+func JoinHostPort(host, port string) string {
+	// We assume that host is a literal IPv6 address if host has
+	// colons.
+	if indexByte(host, ':') >= 0 {
+		return "[" + host + "]:" + port
+	}
+	return host + ":" + port
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastIndexByte(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/net/net.go",
+            text: #"""
+// Package net is the part of Go's net that a TCP server and its clients
+// need, written for this run-time library: the interfaces Conn, Listener,
+// Addr, and Error, the types TCPConn, TCPListener, TCPAddr, and OpError,
+// Dial and Listen, and deadlines. A connection is a descriptor of the
+// kernel the VM serves through the natives of this package; everything
+// else is Go, so a program's own type can be a Conn, a struct that embeds
+// one is one, and an error is the value Go returns.
+package net
+
+import (
+	"errors"
+	"io"
+	"os"
+	"time"
+)
+
+// An Addr is the address of an end of a network connection.
+type Addr interface {
+	Network() string // name of the network (for example, "tcp", "udp")
+	String() string  // string form of address (for example, "192.0.2.1:25", "[2001:db8::1]:80")
+}
+
+// A Conn is a generic stream-oriented network connection. Its methods may
+// be called by several goroutines at once.
+type Conn interface {
+	// Read reads data from the connection. It fails with an error whose
+	// Timeout is true once a deadline set by SetDeadline or
+	// SetReadDeadline has passed.
+	Read(b []byte) (n int, err error)
+
+	// Write writes data to the connection.
+	Write(b []byte) (n int, err error)
+
+	// Close closes the connection. A Read or Write that waits is woken and
+	// fails.
+	Close() error
+
+	// LocalAddr returns the local network address.
+	LocalAddr() Addr
+
+	// RemoteAddr returns the remote network address.
+	RemoteAddr() Addr
+
+	// SetDeadline sets the read and write deadlines. A zero time means no
+	// deadline.
+	SetDeadline(t time.Time) error
+
+	// SetReadDeadline sets the deadline for Read calls, those that wait
+	// now included. A zero time means no deadline.
+	SetReadDeadline(t time.Time) error
+
+	// SetWriteDeadline sets the deadline for Write calls. A zero time
+	// means no deadline.
+	SetWriteDeadline(t time.Time) error
+}
+
+// A Listener is a generic network listener for stream-oriented protocols.
+type Listener interface {
+	// Accept waits for and returns the next connection to the listener.
+	Accept() (Conn, error)
+
+	// Close closes the listener. An Accept that waits is woken and fails.
+	Close() error
+
+	// Addr returns the listener's network address.
+	Addr() Addr
+}
+
+// An Error represents a network error.
+type Error interface {
+	error
+	Timeout() bool // Is the error a timeout?
+
+	// Deprecated: Temporary errors are not well-defined.
+	Temporary() bool
+}
+
+// ErrClosed is the error returned by an I/O call on a network connection
+// that has already been closed, or that is closed by another goroutine
+// before the I/O is completed.
+var ErrClosed error = errNetClosing{}
+
+// errNetClosing is the type of ErrClosed, as Go's internal/poll has it.
+type errNetClosing struct{}
+
+func (e errNetClosing) Error() string   { return "use of closed network connection" }
+func (e errNetClosing) Timeout() bool   { return false }
+func (e errNetClosing) Temporary() bool { return false }
+
+// OpError is the error type usually returned by functions in the net
+// package. It describes the operation, network type, and address of an
+// error.
+type OpError struct {
+	// Op is the operation which caused the error, such as
+	// "read" or "write".
+	Op string
+
+	// Net is the network type on which this error occurred,
+	// such as "tcp" or "udp6".
+	Net string
+
+	// For operations involving a remote network connection, like
+	// Dial, Read, or Write, Source is the corresponding local
+	// network address.
+	Source Addr
+
+	// Addr is the network address for which this error occurred.
+	// For local operations, like Listen or SetDeadline, Addr is
+	// the address of the local endpoint being manipulated.
+	// For operations involving a remote network connection, like
+	// Dial, Read, or Write, Addr is the remote address of that
+	// connection.
+	Addr Addr
+
+	// Err is the error that occurred during the operation.
+	// The Error method panics if the error is nil.
+	Err error
+}
+
+func (e *OpError) Unwrap() error { return e.Err }
+
+func (e *OpError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	s := e.Op
+	if e.Net != "" {
+		s += " " + e.Net
+	}
+	if e.Source != nil {
+		s += " " + e.Source.String()
+	}
+	if e.Addr != nil {
+		if e.Source != nil {
+			s += "->"
+		} else {
+			s += " "
+		}
+		s += e.Addr.String()
+	}
+	s += ": " + e.Err.Error()
+	return s
+}
+
+type timeout interface {
+	Timeout() bool
+}
+
+func (e *OpError) Timeout() bool {
+	if ne, ok := e.Err.(*os.SyscallError); ok {
+		t, ok := ne.Err.(timeout)
+		return ok && t.Timeout()
+	}
+	t, ok := e.Err.(timeout)
+	return ok && t.Timeout()
+}
+
+type temporary interface {
+	Temporary() bool
+}
+
+func (e *OpError) Temporary() bool {
+	// Treat ECONNRESET and ECONNABORTED as temporary errors when
+	// they come from calling accept. See issue 6163.
+	if e.Op == "accept" && isConnError(e.Err) {
+		return true
+	}
+
+	if ne, ok := e.Err.(*os.SyscallError); ok {
+		t, ok := ne.Err.(temporary)
+		return ok && t.Temporary()
+	}
+	t, ok := e.Err.(temporary)
+	return ok && t.Temporary()
+}
+
+func isConnError(err error) bool {
+	if se, ok := err.(*os.SyscallError); ok {
+		return se.Err == errConnReset
+	}
+	return false
+}
+
+// An AddrError reports an address that cannot be used.
+type AddrError struct {
+	Err  string
+	Addr string
+}
+
+func (e *AddrError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	s := e.Err
+	if e.Addr != "" {
+		s = "address " + e.Addr + ": " + s
+	}
+	return s
+}
+
+func (e *AddrError) Timeout() bool   { return false }
+func (e *AddrError) Temporary() bool { return false }
+
+// An UnknownNetworkError names a network Dial or Listen does not know.
+type UnknownNetworkError string
+
+func (e UnknownNetworkError) Error() string   { return "unknown network " + string(e) }
+func (e UnknownNetworkError) Timeout() bool   { return false }
+func (e UnknownNetworkError) Temporary() bool { return false }
+
+// DNSError represents a failure to look a name up. Only literal addresses
+// and localhost are known here, and the ports by number.
+type DNSError struct {
+	UnwrapErr   error  // error returned by the [DNSError.Unwrap] method, might be nil
+	Err         string // description of the error
+	Name        string // name looked for
+	Server      string // server used
+	IsTimeout   bool   // if true, timed out; not all timeouts set this
+	IsTemporary bool   // if true, error is temporary; not all errors set this
+
+	// IsNotFound is set to true when the requested name does not
+	// contain any records of the requested type (data not found),
+	// or the name itself was not found (NXDOMAIN).
+	IsNotFound bool
+}
+
+func (e *DNSError) Unwrap() error { return e.UnwrapErr }
+
+func (e *DNSError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	s := "lookup " + e.Name
+	if e.Server != "" {
+		s += " on " + e.Server
+	}
+	s += ": " + e.Err
+	return s
+}
+
+func (e *DNSError) Timeout() bool   { return e.IsTimeout }
+func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary }
+
+// What the natives report besides success, and the errors Go has for each.
+const (
+	codeEOF         = 1
+	codeTimeout     = 2
+	codeClosed      = 3
+	codeRefused     = 4
+	codeAddrInUse   = 5
+	codeUnavailable = 6
+	codeReset       = 7
+	codeTimedOut    = 8
+	codeNoAddress   = 9
+)
+
+var (
+	errConnRefused  = errors.New("connection refused")
+	errAddrInUse    = errors.New("address already in use")
+	errUnavailable  = errors.New("network is unreachable")
+	errConnReset    = errors.New("connection reset by peer")
+	errConnTimedOut = errors.New("connection timed out")
+	errInvalid      = errors.New("invalid argument")
+	errNoAddress    = errors.New("can't assign requested address")
+)
+
+// codeError is the error the natives' code stands for, from the system
+// call `call` when it is one.
+func codeError(call string, code int) error {
+	switch code {
+	case codeTimeout:
+		return os.ErrDeadlineExceeded
+	case codeClosed:
+		return ErrClosed
+	case codeRefused:
+		return os.NewSyscallError(call, errConnRefused)
+	case codeAddrInUse:
+		return os.NewSyscallError(call, errAddrInUse)
+	case codeReset:
+		return os.NewSyscallError(call, errConnReset)
+	case codeTimedOut:
+		return os.NewSyscallError(call, errConnTimedOut)
+	case codeNoAddress:
+		return os.NewSyscallError(call, errNoAddress)
+	}
+	return os.NewSyscallError(call, errUnavailable)
+}
+
+// A netFD is a descriptor of the kernel with the addresses of its ends.
+type netFD struct {
+	sysfd  int
+	net    string
+	laddr  Addr
+	raddr  Addr
+	closed bool
+}
+
+// conn is what TCPConn embeds in Go; the methods are on TCPConn here.
+type conn struct {
+	fd *netFD
+}
+
+// TCPConn is an implementation of the Conn interface for TCP network
+// connections.
+type TCPConn struct {
+	conn
+}
+
+func newTCPConn(sysfd int, network string, laddr, raddr *TCPAddr) *TCPConn {
+	return &TCPConn{conn{&netFD{sysfd: sysfd, net: network, laddr: laddr, raddr: raddr}}}
+}
+
+func (c *TCPConn) ok() bool { return c != nil && c.fd != nil }
+
+// opError is the error of `op` on the connection.
+func (c *TCPConn) opError(op string, err error) error {
+	return &OpError{Op: op, Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
+}
+
+// Read implements the Conn Read method.
+func (c *TCPConn) Read(b []byte) (int, error) {
+	if !c.ok() {
+		return 0, errInvalid
+	}
+	if c.fd.closed {
+		return 0, c.opError("read", ErrClosed)
+	}
+	n, code := native.read(c.fd.sysfd, b)
+	switch code {
+	case 0:
+		return n, nil
+	case codeEOF:
+		return n, io.EOF
+	}
+	return n, c.opError("read", codeError("read", code))
+}
+
+// Write implements the Conn Write method.
+func (c *TCPConn) Write(b []byte) (int, error) {
+	if !c.ok() {
+		return 0, errInvalid
+	}
+	if c.fd.closed {
+		return 0, c.opError("write", ErrClosed)
+	}
+	n, code := native.write(c.fd.sysfd, b)
+	if code != 0 {
+		return n, c.opError("write", codeError("write", code))
+	}
+	return n, nil
+}
+
+// Close closes the connection.
+func (c *TCPConn) Close() error {
+	if !c.ok() {
+		return errInvalid
+	}
+	if c.fd.closed {
+		return c.opError("close", ErrClosed)
+	}
+	c.fd.closed = true
+	native.close(c.fd.sysfd)
+	return nil
+}
+
+// LocalAddr returns the local network address.
+func (c *TCPConn) LocalAddr() Addr {
+	if !c.ok() {
+		return nil
+	}
+	return c.fd.laddr
+}
+
+// RemoteAddr returns the remote network address.
+func (c *TCPConn) RemoteAddr() Addr {
+	if !c.ok() {
+		return nil
+	}
+	return c.fd.raddr
+}
+
+// The deadlines a call of the native sets.
+const (
+	readDeadline  = 1
+	writeDeadline = 2
+)
+
+// SetDeadline implements the Conn SetDeadline method.
+func (c *TCPConn) SetDeadline(t time.Time) error {
+	return c.setDeadline(readDeadline|writeDeadline, t)
+}
+
+// SetReadDeadline implements the Conn SetReadDeadline method.
+func (c *TCPConn) SetReadDeadline(t time.Time) error {
+	return c.setDeadline(readDeadline, t)
+}
+
+// SetWriteDeadline implements the Conn SetWriteDeadline method.
+func (c *TCPConn) SetWriteDeadline(t time.Time) error {
+	return c.setDeadline(writeDeadline, t)
+}
+
+func (c *TCPConn) setDeadline(which int, t time.Time) error {
+	if !c.ok() {
+		return errInvalid
+	}
+	if c.fd.closed {
+		return c.opError("set", ErrClosed)
+	}
+	// The earliest instant stands for no deadline: a zero time.
+	at := int64(-1 << 63)
+	if !t.IsZero() {
+		at = t.UnixNano()
+	}
+	native.deadline(c.fd.sysfd, which, at)
+	return nil
+}
+
+// TCPListener is a TCP network listener.
+type TCPListener struct {
+	fd *netFD
+}
+
+func (l *TCPListener) ok() bool { return l != nil && l.fd != nil }
+
+func (l *TCPListener) opError(op string, err error) error {
+	return &OpError{Op: op, Net: l.fd.net, Source: nil, Addr: l.fd.laddr, Err: err}
+}
+
+// AcceptTCP accepts the next incoming call and returns the new connection.
+func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
+	if !l.ok() {
+		return nil, errInvalid
+	}
+	if l.fd.closed {
+		return nil, l.opError("accept", ErrClosed)
+	}
+	sysfd, local, remote, port, code := native.accept(l.fd.sysfd)
+	if code != 0 {
+		return nil, l.opError("accept", codeError("accept", code))
+	}
+	laddr := &TCPAddr{IP: ParseIP(local).To4(), Port: l.fd.laddr.(*TCPAddr).Port}
+	raddr := &TCPAddr{IP: ParseIP(remote).To4(), Port: port}
+	return newTCPConn(sysfd, l.fd.net, laddr, raddr), nil
+}
+
+// Accept implements the Accept method in the Listener interface; it waits
+// for the next call and returns a generic Conn.
+func (l *TCPListener) Accept() (Conn, error) {
+	c, err := l.AcceptTCP()
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// Close stops listening on the TCP address.
+func (l *TCPListener) Close() error {
+	if !l.ok() {
+		return errInvalid
+	}
+	if l.fd.closed {
+		return l.opError("close", ErrClosed)
+	}
+	l.fd.closed = true
+	native.close(l.fd.sysfd)
+	return nil
+}
+
+// Addr returns the listener's network address, a *TCPAddr.
+func (l *TCPListener) Addr() Addr { return l.fd.laddr }
+
+// checkNetwork is nil for a network of TCP, and the error Dial and Listen
+// return for another.
+func checkNetwork(op, network string) error {
+	switch network {
+	case "tcp", "tcp4":
+		return nil
+	case "tcp6", "udp", "udp4", "udp6", "ip", "ip4", "ip6", "unix", "unixgram", "unixpacket":
+		return &OpError{Op: op, Net: network, Err: errors.New("protocol not supported")}
+	}
+	return &OpError{Op: op, Net: network, Err: UnknownNetworkError(network)}
+}
+
+// Dial connects to the address on the named network. Only "tcp" and
+// "tcp4" are served, to an address that is an IPv4 literal, localhost, or
+// a port alone.
+func Dial(network, address string) (Conn, error) {
+	c, err := dialTCP(network, address)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// DialTimeout acts like Dial but takes a timeout. A connection over the
+// loopback interface is made or refused at once, so it is Dial.
+func DialTimeout(network, address string, timeout time.Duration) (Conn, error) {
+	return Dial(network, address)
+}
+
+func dialTCP(network, address string) (*TCPConn, error) {
+	if err := checkNetwork("dial", network); err != nil {
+		return nil, err
+	}
+	raddr, err := resolveTCPAddr(address)
+	if err != nil {
+		return nil, &OpError{Op: "dial", Net: network, Err: err}
+	}
+	ip, ok := hostIPv4(raddr.IP)
+	if !ok {
+		return nil, &OpError{Op: "dial", Net: network, Addr: raddr, Err: codeError("connect", codeUnavailable)}
+	}
+	sysfd, local, port, code := native.dial(ip, raddr.Port)
+	if code != 0 {
+		return nil, &OpError{Op: "dial", Net: network, Addr: raddr, Err: codeError("connect", code)}
+	}
+	laddr := &TCPAddr{IP: ParseIP(local).To4(), Port: port}
+	peer := &TCPAddr{IP: ParseIP(ip).To4(), Port: raddr.Port}
+	return newTCPConn(sysfd, network, laddr, peer), nil
+}
+
+// Listen announces on the local network address. Only "tcp" and "tcp4"
+// are served; a port of 0 chooses one.
+func Listen(network, address string) (Listener, error) {
+	l, err := listenTCP(network, address)
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+func listenTCP(network, address string) (*TCPListener, error) {
+	if err := checkNetwork("listen", network); err != nil {
+		return nil, err
+	}
+	addr, err := resolveTCPAddr(address)
+	if err != nil {
+		return nil, &OpError{Op: "listen", Net: network, Err: err}
+	}
+	ip := ""
+	listening := IPv6unspecified
+	if len(addr.IP) != 0 && !addr.IP.IsUnspecified() {
+		v4, ok := hostIPv4(addr.IP)
+		if !ok {
+			return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: os.NewSyscallError("bind", errNoAddress)}
+		}
+		ip = v4
+		listening = ParseIP(v4).To4()
+	}
+	sysfd, port, code := native.listen(ip, addr.Port)
+	if code != 0 {
+		return nil, &OpError{Op: "listen", Net: network, Addr: addr, Err: codeError("bind", code)}
+	}
+	laddr := &TCPAddr{IP: listening, Port: port}
+	return &TCPListener{fd: &netFD{sysfd: sysfd, net: network, laddr: laddr}}, nil
+}
+
+// hostIPv4 is the IPv4 address in dotted form that the kernel reaches for
+// ip: itself, or the loopback address for no address, the unspecified
+// one, and ::1. ok is false for any other IPv6 address.
+func hostIPv4(ip IP) (string, bool) {
+	if len(ip) == 0 || ip.IsUnspecified() || ip.Equal(IPv6loopback) {
+		return "127.0.0.1", true
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return "", false
+	}
+	return v4.String(), true
 }
 
 """#),
@@ -6985,7 +8077,7 @@ const errorHeaders = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection:
 // serve reads the requests of a connection and runs the handler for each,
 // until the client or the response ends the connection.
 func (c *conn) serve() {
-	c.remoteAddr = native.remoteAddr(c.rwc)
+	c.remoteAddr = c.rwc.RemoteAddr().String()
 	defer func() {
 		if err := recover(); err != nil && !isAbortHandler(err) {
 			c.server.logf("http: panic serving %v: %v", c.remoteAddr, err)
@@ -9573,6 +10665,66 @@ func (v Values) Encode() string {
 		}
 	}
 	return buf
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let os: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/os/deadline.go",
+            text: #"""
+package os
+
+// ErrDeadlineExceeded is returned for an expired deadline: by a Read or a
+// Write of a network connection whose deadline has passed. Its Timeout
+// method reports true.
+var ErrDeadlineExceeded error = &deadlineExceededError{}
+
+// deadlineExceededError is the type of ErrDeadlineExceeded, which Go
+// declares in internal/poll as DeadlineExceededError.
+type deadlineExceededError struct{}
+
+func (e *deadlineExceededError) Error() string   { return "i/o timeout" }
+func (e *deadlineExceededError) Timeout() bool   { return true }
+func (e *deadlineExceededError) Temporary() bool { return true }
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/os/syscall.go",
+            text: #"""
+package os
+
+// SyscallError records an error from a specific system call.
+type SyscallError struct {
+	Syscall string
+	Err     error
+}
+
+func (e *SyscallError) Error() string { return e.Syscall + ": " + e.Err.Error() }
+
+func (e *SyscallError) Unwrap() error { return e.Err }
+
+type timeout interface {
+	Timeout() bool
+}
+
+// Timeout reports whether this error represents a timeout.
+func (e *SyscallError) Timeout() bool {
+	t, ok := e.Err.(timeout)
+	return ok && t.Timeout()
+}
+
+// NewSyscallError returns, as an error, a new SyscallError with the given
+// system call name and error details. As a convenience, if err is nil,
+// NewSyscallError returns nil.
+func NewSyscallError(syscall string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &SyscallError{syscall, err}
 }
 
 """#),

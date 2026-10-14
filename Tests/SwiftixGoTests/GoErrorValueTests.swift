@@ -98,8 +98,8 @@ struct GoErrorValueTests: GoTestHarness {
 
         #expect(
             output == """
-                connect 10.0.0.1:6379: net: network not available
-                net: network not available net: network not available
+                connect 10.0.0.1:6379: dial tcp 10.0.0.1:6379: connect: network is unreachable
+                listen tcp :80: bind: network is unreachable listen tcp :80: bind: network is unreachable
                 net: network not available false
 
                 """)

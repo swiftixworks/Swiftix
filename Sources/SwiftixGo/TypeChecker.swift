@@ -593,7 +593,7 @@ public enum GoTypeChecker {
             case "error": return builtinErrorType()
             case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
-                "net.Conn", "net.Listener",
+                GoLibraryTypes.connectionName, GoLibraryTypes.listenerName,
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
                 return .named(name)
@@ -2870,12 +2870,12 @@ struct FunctionChecker {
                 try checkArguments(
                     arguments, of: callee, declared: [.string, .string],
                     position: position)
-                return .named("net.Conn")
+                return .named(GoLibraryTypes.connectionName)
             case "Listen":
                 try checkArguments(
                     arguments, of: callee, declared: [.string, .string],
                     position: position)
-                return .named("net.Listener")
+                return .named(GoLibraryTypes.listenerName)
             case "LookupHost":
                 try checkArguments(arguments, of: callee, declared: [.string], position: position)
                 return .slice(.string)
@@ -2955,7 +2955,7 @@ struct FunctionChecker {
                     break
                 }
             }
-            if syncReceiverName == "net.Conn" {
+            if syncReceiverName == GoLibraryTypes.connectionName {
                 switch name {
                 case "Read", "Write":
                     guard arguments.count == 1 else {
@@ -2978,11 +2978,11 @@ struct FunctionChecker {
                     break
                 }
             }
-            if syncReceiverName == "net.Listener" {
+            if syncReceiverName == GoLibraryTypes.listenerName {
                 switch name {
                 case "Accept":
                     try checkArguments(arguments, of: callee, declared: [], position: position)
-                    return .named("net.Conn")
+                    return .named(GoLibraryTypes.connectionName)
                 case "Close":
                     try checkArguments(arguments, of: callee, declared: [], position: position)
                     return GoPredeclared.errorType
@@ -3281,10 +3281,10 @@ struct FunctionChecker {
             return native.results
         }
         switch (baseType, name) {
-        case (.named("net.Conn"), "Read"), (.named("net.Conn"), "Write"):
+        case (.named(GoLibraryTypes.connectionName), "Read"), (.named(GoLibraryTypes.connectionName), "Write"):
             return [.int, GoPredeclared.errorType]
-        case (.named("net.Listener"), "Accept"):
-            return [.named("net.Conn"), GoPredeclared.errorType]
+        case (.named(GoLibraryTypes.listenerName), "Accept"):
+            return [.named(GoLibraryTypes.connectionName), GoPredeclared.errorType]
         default:
             break
         }
@@ -3569,7 +3569,7 @@ struct FunctionChecker {
             case "error": return builtinErrorType()
             case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
-                "net.Conn", "net.Listener",
+                GoLibraryTypes.connectionName, GoLibraryTypes.listenerName,
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
                 return .named(name)
@@ -4395,12 +4395,12 @@ struct FunctionChecker {
                     try checkArguments(
                         arguments, of: callee, declared: [.string, .string],
                         position: position)
-                    return [.named("net.Conn"), GoPredeclared.errorType]
+                    return [.named(GoLibraryTypes.connectionName), GoPredeclared.errorType]
                 case "Listen":
                     try checkArguments(
                         arguments, of: callee, declared: [.string, .string],
                         position: position)
-                    return [.named("net.Listener"), GoPredeclared.errorType]
+                    return [.named(GoLibraryTypes.listenerName), GoPredeclared.errorType]
                 case "LookupHost":
                     try checkArguments(
                         arguments, of: callee, declared: [.string],
@@ -4413,10 +4413,10 @@ struct FunctionChecker {
             // Handle net.Conn/net.Listener method calls
             if let receiverType = try? type(of: base) {
                 switch (receiverType, name) {
-                case (.named("net.Conn"), "Read"), (.named("net.Conn"), "Write"):
+                case (.named(GoLibraryTypes.connectionName), "Read"), (.named(GoLibraryTypes.connectionName), "Write"):
                     return [.int, GoPredeclared.errorType]
-                case (.named("net.Listener"), "Accept"):
-                    return [.named("net.Conn"), GoPredeclared.errorType]
+                case (.named(GoLibraryTypes.listenerName), "Accept"):
+                    return [.named(GoLibraryTypes.connectionName), GoPredeclared.errorType]
                 default:
                     break
                 }

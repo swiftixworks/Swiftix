@@ -80,8 +80,8 @@ extension GoBuiltinFunction {
         case .fmtPrint, .fmtPrintln, .strconvAtoi: return [.int, failure]
         case .userlandReadInput, .userlandReadStdin: return [.string, .int]
         case .userlandWindowSize: return [.int, .int]
-        case .netDial: return [.named("net.Conn"), failure]
-        case .netListen: return [.named("net.Listener"), failure]
+        case .netDial: return [.named(GoLibraryTypes.connectionName), failure]
+        case .netListen: return [.named(GoLibraryTypes.listenerName), failure]
         case .netLookupHost: return [.slice(.string), failure]
         case .httpGet: return [.named("http.Response"), failure]
         default: return nil
