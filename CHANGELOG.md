@@ -353,6 +353,53 @@ format, behavior and platform changes are recorded here.
   `t.Local`, `t.Location`, and `t.Zone`.
 - `time.Time` values compare with `==` and are map keys, by the instant and
   the location (was `values are not comparable`).
+- Full slice expressions `a[low:high:max]` of slices, arrays, and pointers to
+  arrays, with Go's capacities, compile errors, and run-time panics (`slice
+  bounds out of range [::5] with capacity 4`), through `gofmt` and `gofmt -r`
+  (was `expected ']'`).
+- `==`, `!=`, and `switch` between an interface value and a concrete value or
+  an interface of another type (`var a any = 5; a == 5`, `err == myErr`, an
+  `any` with an `error`); an untyped constant takes its default type. Was
+  `invalid operation: a == 5 (mismatched types any and untyped int)`.
+- `net.Conn`, `net.Listener`, `net.Addr`, and `net.Error` are Go's interfaces:
+  a program type can be a connection or a listener, and a struct that embeds
+  one implements it. `LocalAddr`, `RemoteAddr`, `SetDeadline`,
+  `SetReadDeadline`, `SetWriteDeadline`, and a listener's `Addr`;
+  `*net.TCPAddr`, `net.IP`, `ParseIP`, `IPv4`, `SplitHostPort`,
+  `JoinHostPort`, and `ResolveTCPAddr`, with Go's text for loopback and
+  wildcard addresses (`[::]:8080`); port 0 is a free port. Was
+  `c.SetReadDeadline undefined (type net.Conn has no field or method
+  SetReadDeadline)`, and a wrapper was refused with `*countingConn does not
+  implement net.Conn (missing method LocalAddr)`.
+- Deadlines: a `Read` past its deadline fails with `read tcp
+  127.0.0.1:8080->127.0.0.1:54321: i/o timeout`, whose `Timeout()` is true
+  and which `errors.Is` `os.ErrDeadlineExceeded`; a deadline set from another
+  goroutine applies to a `Read` already waiting; a `Write` past its deadline
+  fails; a connection is usable again after a new deadline.
+- `os.ErrDeadlineExceeded`, `os.SyscallError`, `os.NewSyscallError`, and
+  `net.ErrClosed`.
+- `io/fs`, `syscall`, and `runtime` as far as errors need them:
+  `fs.PathError` and the `fs.Err*` values; `syscall.Errno` with `Is`,
+  `Timeout`, and `Temporary` and Linux's numbers; `os.ErrNotExist`,
+  `ErrExist`, `ErrPermission`, `ErrClosed`, `ErrInvalid`, `os.LinkError`,
+  `os.IsNotExist`, `IsExist`, `IsPermission`, `IsTimeout`, and
+  `io.ErrClosedPipe`; `runtime.Error`, to which a recovered run-time error
+  asserts (was `undefined: runtime.Error`).
+- An unrecovered panic prints the goroutine trace after its first line, as
+  Go does (`goroutine 1 [running]:`, `main.f(...)`,
+  `\t/path/main.go:13 +0x16`), and `go run` ends with `exit status 2`. Only
+  the first line was printed.
+- Method expressions of library and interface types: `time.Duration.String`,
+  `time.Time.Year`, `(*time.Time).Year`, `(*sync.Mutex).Lock`, `I.m` of an
+  interface of the program, embedded, local, or of the library,
+  `error.Error`, and `fmt.Stringer.String`, through aliases, aliased imports,
+  and packages of the module, with Go's types and errors. Was
+  `time.Duration (type) is not an expression`, `I.M undefined (type I has no
+  field or method M)`, and `sync.Mutex (type) is not an expression`.
+- `fmt.Stringer`, `fmt.GoStringer`, `fmt.Formatter`, and `fmt.State` (was
+  `undefined: fmt.Stringer`). `fmt` calls a `Format` method under every verb
+  and a `GoString` method under `%#v`; the state is a `*fmt.pp` with `Write`,
+  `Width`, `Precision`, and `Flag`.
 
 
 ### Changed
@@ -578,8 +625,9 @@ format, behavior and platform changes are recorded here.
 - A program that uses `strings.NewReader` (and so `http.NewRequest`) or
   `io.Copy` is linked with more of the library and compiles to a larger
   image.
-- The Go tool reports `go1.24-swiftix.0.5`, so images cached by an earlier
-  tool are built again rather than replayed.
+- The Go tool reports `go1.24-swiftix.0.6`, so images cached by an earlier
+  tool are built again rather than replayed. The coreutils and sysutils
+  packages are rebuilt for the `os` file functions linked from Go text.
 - `go run` and `go test` no longer stop a program after 1,000,000 VM
   instructions (`instruction limit exceeded`); like Go's, they bound no CPU
   time. Embedding hosts that call `GoVirtualMachine.run` keep the budget.
@@ -603,6 +651,31 @@ format, behavior and platform changes are recorded here.
   printed its nanoseconds (`1700000000000000000`).
 - `log` formats its date and time with `time.Time.Format`; a program that logs
   is about 5.6 KB smaller.
+- A compound assignment, `++`, and `--` whose target holds a call or a
+  channel receive are accepted, and the target is evaluated once
+  (`m[f()] += 1`, `a[<-ch]++`, `p().x -= 2`). Was `+= target must not contain
+  a call or a channel receive`, and `m[f()]++` called `f` twice (`map[2:1] 2`
+  where Go prints `map[1:1] 1`).
+- `net` is Go text (`Sources/SwiftixGoLibrary/net`) and the methods of a
+  connection are interface calls, so a program that uses `net` or `net/http`
+  compiles to a new image. Images built before still run.
+- A failed `os.Open`, `Create`, `OpenFile`, `ReadFile`, `WriteFile`,
+  `Remove`, or `Mkdir` returns a new `*fs.PathError`, and a failed
+  `os.Rename` an `*os.LinkError`. Was `%T` `*errors.errorString`, two
+  failures with the same text were equal (`true`), and `os.ErrNotExist` and
+  `os.IsNotExist` were undefined. A program that calls the `os` file
+  functions compiles to a new image.
+- An error of `net` wraps a `syscall.Errno` (`errors.Is(err,
+  syscall.ECONNREFUSED)`).
+- A built program that panics prints `panic: ...` without a path before it.
+- `go run` of a program that exits with a nonzero status prints `exit status
+  N` on standard error and fails with status 1, as Go's does. It was silent
+  and ended with the program's status.
+- The units of `time` are constants of type `time.Duration`: `const timeout =
+  5 * time.Second` is a constant and works in array lengths and switch cases
+  (was `invalid array length time.Second / time.Millisecond`). A duration
+  constant that overflows is Go's compile error; `const big = 1000000 *
+  time.Hour * 1000` printed `801362h40m26.63743488s`.
 
 
 ### Fixed
@@ -755,6 +828,42 @@ format, behavior and platform changes are recorded here.
   `Accept` or `Read` with `use of closed network connection` (was a
   deadlock). A cancelled `context.WithTimeout` stops its timer (it waited
   until the deadline, and many of them exhausted the timer limit).
+- Two interface values that hold one incomparable type panic with `runtime
+  error: comparing uncomparable type []int` (was `true` or `false`).
+- `a < 2` on an interface value is Go's `operator < not defined on interface`
+  at Go's position.
+- `p().x = 3` assigns (was `cannot assign to p().x (neither addressable nor a
+  map index expression)`).
+- Constant slice indexes are checked at compile time (`invalid slice indices:
+  1 < 2`, `index 5 out of bounds [0:5]`, `must not be negative`); they were a
+  run-time panic.
+- A variadic function literal that captures nothing, under `defer` or `go`,
+  packs its arguments: it was `has 2 arguments; expected 1`, and `defer
+  func(xs ...int){...}(1)` printed `1` where Go prints `[1]`. An interface
+  parameter keeps the argument's type (`%T` of `int8(1)` printed `int`).
+- A duplicate constant case in a switch on an interface names a `constant of
+  type int`.
+- A slice expression without an upper bound reads its base once (`f()[1:]`
+  printed `[2 3] [1 2] [2] 4` where Go prints `... 3`).
+- `m[k].f = v` is Go's `cannot assign to struct field m[1].y in map`, and a
+  deeper field `cannot assign to m[1].i.a (neither addressable nor a map
+  index expression)`. It compiled, and `m[1].y = 1` printed `map[1:{0 1}]`.
+- An error of `net` is a `*net.OpError` (`Op`, `Net`, `Source`, `Addr`, and
+  `Err`) around a `*os.SyscallError`, `*net.AddrError`, `*net.DNSError`,
+  `net.UnknownNetworkError`, or `net.ErrClosed`, with Go's text: `listen tcp
+  127.0.0.1:18320: bind: address already in use` (was `net: listen on
+  127.0.0.1:18320 failed`), `dial tcp: address nonsense: missing port in
+  address` (was `net: invalid address nonsense`); `%T` was
+  `*errors.errorString`. Closing a closed connection fails as in Go (`close
+  tcp [::]:8080: use of closed network connection`).
+- `os.ReadFile` of a directory is `read /: is a directory` (was `open /:
+  isADirectory`), and `os.WriteFile` into a missing directory `no such file or
+  directory` (was `noSuchFileOrDirectory`).
+- `%#v` of a value with a `GoString` method prints what it returns (was
+  `main.P{x:1, y:2}`).
+- A constant of a defined type that overflows is `a * 4 (constant
+  18446744073709551616 of int64 type D) overflows int64` (was `constant
+  18446744073709551616 overflows D`).
 
 
 ## 0.13.1 — 2026-10-08
