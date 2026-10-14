@@ -37,6 +37,7 @@ public enum GoFormatter {
             tokens: sortingImports(tokens), spacing: spacing, functionLiterals: literals,
             literalBraces: parsed.parentheses.literalBraces)
         let text = Array(source.text.utf8)
+        printer.sourceText = text
         printer.commentsAtLineStart = Set(
             tokens.filter { $0.kind == .blockComment }.map(\.offset).filter {
                 $0 == 0 || text[$0 - 1] == 0x0A
@@ -581,6 +582,8 @@ private struct FormatPrinter {
     /// The offsets of the `/* */` comments that begin in the first column
     /// of their line, which Go's printer moves differently.
     var commentsAtLineStart: Set<Int> = []
+    /// The source, for the columns of tokens.
+    var sourceText: [UInt8] = []
     var lines: [FormatLine] = []
     /// The cells of the line being written, and the text after the last one.
     var cells: [String] = []
@@ -1335,6 +1338,17 @@ private struct FormatPrinter {
             if standsAlone {
                 lineIsStructField = false
                 groupAwaitsSpecification = awaitsSpecification
+                // A comment on the line before a `case` or a `default` goes
+                // where that label goes, as Go's printer puts it: before the
+                // first one always, after the statements of a clause when it
+                // stood in the label's column (`writeCommentPrefix`).
+                if let label = caseLabelAfterComments(at: position),
+                    activeCaseDepths.contains(braceDepth)
+                        ? column(of: token.offset) == column(of: tokens[label].offset)
+                        : switchDepths.contains(braceDepth)
+                {
+                    lineIndent = (lineIndent ?? indent) - 1
+                }
             }
             finishLine()
             previous = token
@@ -2252,6 +2266,28 @@ private struct FormatPrinter {
     mutating func finishLine(unlessCommentFollows next: FormatToken?) {
         if let next, next.kind == .lineComment, next.leadingNewlines == 0 { return }
         finishLine()
+    }
+
+    /// The index of the first token after the comments from `index` on,
+    /// when it is the label of a clause, `case` or `default`.
+    func caseLabelAfterComments(at index: Int) -> Int? {
+        var next = index + 1
+        while next < tokens.count,
+            tokens[next].kind == .lineComment || tokens[next].kind == .blockComment
+        {
+            next += 1
+        }
+        guard next < tokens.count, tokens[next].text == "case" || tokens[next].text == "default"
+        else { return nil }
+        return next
+    }
+
+    /// The column of the byte at `offset` in the source, counted in bytes
+    /// as Go's positions count it.
+    func column(of offset: Int) -> Int {
+        var start = offset
+        while start > 0, sourceText[start - 1] != 0x0A { start -= 1 }
+        return offset - start + 1
     }
 
     /// Whether the `for` clause whose first semicolon is the token at

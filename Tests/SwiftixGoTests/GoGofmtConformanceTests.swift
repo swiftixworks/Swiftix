@@ -31,6 +31,13 @@ struct GoGofmtConformanceTests {
         #expect(try GoFormatter.format(GoSourceFile(path: "main.go", text: expected)) == expected)
     }
 
+    /// A comment on the line before a `case` or a `default` goes where the
+    /// label goes before the first clause, and after the statements of a
+    /// clause only when it stood in the label's column.
+    @Test func commentsBeforeCaseLabels() throws {
+        try expectGofmt(commentsBeforeCaseLabelsSource, commentsBeforeCaseLabelsExpected)
+    }
+
     /// Go writes no semicolon where an `if` or a `switch` has no
     /// initializer, and none in a `for` clause without an initializer and a
     /// post statement; otherwise an empty part keeps its blank.
@@ -2514,5 +2521,69 @@ func main() {
 	if i > 0 {
 	}
 }
+
+"""#
+
+private let commentsBeforeCaseLabelsSource = #"""
+package main
+
+func f(b byte, x int) int {
+	switch b {
+			// before the first case
+	case 1:
+		x++
+	// at case depth
+	case 2:
+		x--
+		// deep before default
+	default:
+		x = 0
+		// trailing in the body
+	}
+	select {
+	// before a select case
+	default:
+	}
+	switch {
+	case x > 1:
+		/* block */
+	case x > 2:
+	}
+	return x
+}
+
+func main() { _ = f(1, 2) }
+
+"""#
+
+private let commentsBeforeCaseLabelsExpected = #"""
+package main
+
+func f(b byte, x int) int {
+	switch b {
+	// before the first case
+	case 1:
+		x++
+	// at case depth
+	case 2:
+		x--
+		// deep before default
+	default:
+		x = 0
+		// trailing in the body
+	}
+	select {
+	// before a select case
+	default:
+	}
+	switch {
+	case x > 1:
+		/* block */
+	case x > 2:
+	}
+	return x
+}
+
+func main() { _ = f(1, 2) }
 
 """#
