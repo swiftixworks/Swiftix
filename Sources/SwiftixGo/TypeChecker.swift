@@ -70,7 +70,7 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
         case .string: return "string"
         case .bool: return "bool"
         case .void: return "void"
-        case .named(let name): return name
+        case .named(let name): return GoTypeSpelling.named(name)
         case .structure(let fields):
             // As Go writes a struct type in a message: `struct{a int; b string}`.
             return "struct{" + fields.map(\.spelling).joined(separator: "; ") + "}"
@@ -88,8 +88,7 @@ public indirect enum GoType: Sendable, Equatable, CustomStringConvertible {
             case .receiveOnly: return "<-chan \(element)"
             }
         case .interface(let methods):
-            if methods.isEmpty { return "interface{}" }
-            return "interface{...}"
+            return GoTypeSpelling.interface(methods)
         case .function(let parameters, let results):
             let list = "func(" + parameters.map(\.description).joined(separator: ", ") + ")"
             switch results.count {
@@ -231,9 +230,11 @@ public enum GoTypeChecker {
                 // An import made for its initialization names nothing.
                 if declaration.name == GoImportName.blank { continue }
                 guard importedPaths.insert(declaration.path).inserted else {
-                    throw GoDiagnostic(
-                        position: declaration.position,
-                        message: "\(importName) redeclared in this block")
+                    throw GoDiagnostic.redeclared(
+                        importName, at: declaration.position,
+                        other: file.imports.first {
+                            $0.path == declaration.path && $0.name != GoImportName.blank
+                        }?.position)
                 }
             }
             importedPathsByFile.append(importedPaths)
@@ -279,11 +280,14 @@ public enum GoTypeChecker {
                 typeDefinitions[name]?.embedding = shape
             }
         }
-        for definition in typeDefinitions.values {
+        // In the order of the source: Go reports a cycle at the first of
+        // its types.
+        for declaration in files.flatMap(\.typeDeclarations) {
             try rejectRecursiveValueType(
-                definition.name,
+                declaration.name,
                 definitions: typeDefinitions,
-                position: typeSyntax[definition.name]?.position ?? syntheticPosition())
+                position: declaration.position,
+                places: typeSyntax.mapValues(\.position))
         }
 
         var functionSignatures: [String: FunctionSignature] = [:]
@@ -309,7 +313,9 @@ public enum GoTypeChecker {
             }
             let signature = FunctionSignature(
                 parameters: parameterTypes,
-                results: resultTypes)
+                results: resultTypes,
+                names: GoSignatureNames(
+                    parameters: function.parameters.map(\.name), results: function.resultNames))
             if let receiver = function.receiver {
                 let identity = try receiverIdentity(
                     receiver.type,
@@ -319,9 +325,14 @@ public enum GoTypeChecker {
                 if case .structure(let fields)? = typeDefinitions[identity.baseName]?.underlying,
                     fields.contains(where: { $0.name == function.name })
                 {
-                    throw GoDiagnostic(
-                        position: file.namePosition(of: function),
-                        message: "field and method with the same name \(function.name)")
+                    var message = "field and method with the same name \(function.name)"
+                    if case .structure(let declared, _)? = typeSyntax[identity.baseName]?.type,
+                        let field = declared.first(where: { $0.name == function.name })
+                    {
+                        message += "\n\t" + GoDiagnostic.place(field.position)
+                            + ": other declaration of \(function.name)"
+                    }
+                    throw GoDiagnostic(position: file.namePosition(of: function), message: message)
                 }
                 let key = methodKey(
                     baseName: identity.baseName,
@@ -531,7 +542,7 @@ public enum GoTypeChecker {
         names: inout [String: GoSourcePosition]
     ) throws {
         guard names[name] == nil else {
-            throw GoDiagnostic(position: position, message: "\(name) redeclared in this block")
+            throw GoDiagnostic.redeclared(name, at: position, other: names[name])
         }
         names[name] = position
     }
@@ -591,11 +602,10 @@ public enum GoTypeChecker {
             default:
                 if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: GoPredeclared.unsupportedNumericTypes.contains(name)
-                            ? GoPredeclared.unsupportedTypeMessage(name)
-                            : "undefined: \(name)")
+                    throw GoPredeclared.unsupportedNumericTypes.contains(name)
+                        ? GoDiagnostic(
+                            position: position, message: GoPredeclared.unsupportedTypeMessage(name))
+                        : GoDiagnostic.undefinedType(name, at: position)
                 }
                 return .named(name)
             }
@@ -603,9 +613,9 @@ public enum GoTypeChecker {
             var names: Set<String> = []
             let resolvedFields = try fields.map { field -> GoStructFieldType in
                 guard names.insert(field.name).inserted else {
-                    throw GoDiagnostic(
-                        position: field.position,
-                        message: "\(field.name) redeclared in this block")
+                    throw GoDiagnostic.redeclared(
+                        field.name, at: field.position,
+                        other: fields.first { $0.name == field.name }?.position, inBlock: false)
                 }
                 return GoStructFieldType(
                     field, type: try resolve(field.type, availableTypes: availableTypes))
@@ -658,16 +668,23 @@ public enum GoTypeChecker {
         switch expression {
         case .named(let name, let position):
             guard availableTypes.contains(name) else {
-                throw GoDiagnostic(position: position, message: "invalid receiver type \(name)")
+                throw GoDiagnostic.unknownReceiver(name, at: position)
             }
             return (name, false)
-        case .pointer(let pointee, let position):
-            guard case .named(let name, _) = pointee, availableTypes.contains(name) else {
-                throw GoDiagnostic(position: position, message: "invalid receiver type")
+        case .pointer(let pointee, _):
+            guard case .named(let name, let position) = pointee else {
+                throw GoDiagnostic(
+                    position: pointee.position,
+                    message: "invalid receiver type \(expression.sourceSpelling)")
+            }
+            guard availableTypes.contains(name) else {
+                throw GoDiagnostic.unknownReceiver(name, at: position)
             }
             return (name, true)
         default:
-            throw GoDiagnostic(position: expression.position, message: "invalid receiver type")
+            throw GoDiagnostic(
+                position: expression.position,
+                message: "invalid receiver type \(expression.sourceSpelling)")
         }
     }
 
@@ -724,41 +741,48 @@ public enum GoTypeChecker {
     private static func rejectRecursiveValueType(
         _ root: String,
         definitions: [String: GoTypeDefinition],
-        position: GoSourcePosition
+        position: GoSourcePosition,
+        places: [String: GoSourcePosition]
     ) throws {
-        func contains(
-            _ type: GoType,
-            target: String,
-            visiting: inout Set<String>
-        ) -> Bool {
+        // The types between `type` and `root`, when a value of `type`
+        // holds one of `root` without a pointer, a slice, or the like
+        // between them.
+        func cycle(_ type: GoType, visiting: inout Set<String>) -> [String]? {
             switch type {
             case .named(let name):
-                if name == target { return true }
+                if name == root { return [] }
                 guard visiting.insert(name).inserted,
                     let definition = definitions[name]
-                else { return false }
+                else { return nil }
                 defer { visiting.remove(name) }
-                return contains(definition.underlying, target: target, visiting: &visiting)
+                return cycle(definition.underlying, visiting: &visiting).map { [name] + $0 }
             case .structure(let fields):
-                return fields.contains {
-                    contains($0.type, target: target, visiting: &visiting)
+                for field in fields {
+                    if let found = cycle(field.type, visiting: &visiting) { return found }
                 }
-            case .pointer:
-                return false
+                return nil
             case .array(_, let element):
-                return contains(element, target: target, visiting: &visiting)
-            case .slice:
-                return false
+                return cycle(element, visiting: &visiting)
             default:
-                return false
+                return nil
             }
         }
 
         guard let definition = definitions[root] else { return }
         var visiting: Set<String> = [root]
-        if contains(definition.underlying, target: root, visiting: &visiting) {
-            throw GoDiagnostic(position: position, message: "invalid recursive type \(root)")
+        guard let between = cycle(definition.underlying, visiting: &visiting) else { return }
+        guard !between.isEmpty else {
+            throw GoDiagnostic(
+                position: position, message: "invalid recursive type: \(root) refers to itself")
         }
+        // As Go lists a cycle of several types: each with what it refers to.
+        let names = [root] + between
+        var message = "invalid recursive type \(root)"
+        for (index, name) in names.enumerated() {
+            message += "\n\t" + GoDiagnostic.place(places[name] ?? position)
+                + ": \(name) refers to \(names[(index + 1) % names.count])"
+        }
+        throw GoDiagnostic(position: position, message: message)
     }
 
     private static func declarationPosition(in file: GoFile) -> GoSourcePosition {
@@ -776,6 +800,10 @@ public enum GoTypeChecker {
 struct FunctionSignature {
     let parameters: [GoType]
     let results: [GoType]
+    /// The names the declaration gives its parameters and results, which
+    /// Go prints in the type of the function. Behind a reference: a
+    /// signature is copied in many frames, and only a message reads these.
+    var names: GoSignatureNames? = nil
 }
 
 private func builtinErrorType() -> GoType {
@@ -911,8 +939,10 @@ struct FunctionChecker {
         if name == "nil" { return "invalid operation: cannot call non-function nil" }
         if name == GoValueList.blank { return Self.undeclaredMessage(name) }
         guard let binding = lookup(name) else { return nil }
-        let kind = binding.isConstant ? "constant" : "variable"
-        return "invalid operation: cannot call non-function \(name) (\(kind) of type \(binding.type))"
+        var describer = self
+        return "invalid operation: cannot call non-function "
+            + describer.describe(
+                .identifier(name, position: syntheticPosition()), ofType: binding.type)
     }
 
     /// The report for `package.name` where a value is expected and the
@@ -984,35 +1014,21 @@ struct FunctionChecker {
             let receiver = GoMethodExpression.receiver(of: base),
             let method = try methodExpressionType(base: base, name: name, position: callee.position)
         else { return nil }
+        _ = receiver
         return try resultsOfCall(
-            through: method, named: GoMethodExpression.spelling(receiver, name),
-            arguments: arguments, position: position)
+            through: method, callee: callee, arguments: arguments, position: position)
     }
 
     /// The results of calling a value of `type` with `arguments`, or nil
     /// when the type is no function.
     mutating func resultsOfCall(
-        through calleeType: GoType, named name: String, arguments: [GoExpression],
+        through calleeType: GoType, callee: GoExpression, arguments: [GoExpression],
         position: GoSourcePosition
     ) throws -> [GoType]? {
         guard case .function(let declared, let results) = underlying(calleeType) else {
             return nil
         }
-        let (arguments, parameters) = matched(arguments, to: declared)
-        guard arguments.count <= parameters.count else {
-            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
-        }
-        guard arguments.count == parameters.count else {
-            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
-        }
-        for (argument, parameterType) in zip(arguments, parameters) {
-            let argumentType = try type(of: argument)
-            guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
-                throw GoDiagnostic(
-                    position: argument.position,
-                    message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
-            }
-        }
+        try checkArguments(arguments, of: callee, declared: declared, position: position)
         return results
     }
 
@@ -1032,7 +1048,7 @@ struct FunctionChecker {
         case .ambiguous:
             throw GoDiagnostic(
                 position: position,
-                message: "ambiguous selector \(GoEmbedding.spelling(base)).\(name)")
+                message: "ambiguous selector \(base.spelledAsOperand(in: namePositions)).\(name)")
         case .found(let promotion):
             if promotion.isMethod, promotion.holderKind == .library, !isCalled,
                 methodSignature(of: baseType, named: name) != nil
@@ -1178,10 +1194,12 @@ struct FunctionChecker {
     mutating func place(_ name: String, at position: GoSourcePosition) {
         // A stand-in the checker made up is nothing the source declares.
         guard name != GoValueList.blank, !name.hasPrefix("$"),
-            let binding = scopes[scopes.count - 1][name], !binding.isConstant,
-            binding.position == nil
+            let binding = scopes[scopes.count - 1][name], binding.position == nil
         else { return }
         scopes[scopes.count - 1][name]?.position = position
+        // A constant need not be read; where it is declared is kept for a
+        // second declaration of its name.
+        if binding.isConstant { scopes[scopes.count - 1][name]?.isUsed = true }
     }
 
     /// Marks every variable the expressions of `statement` read. Not every
@@ -1412,7 +1430,7 @@ struct FunctionChecker {
             if receiver.name != GoValueList.blank {
                 scopes[scopes.count - 1][receiver.name] = Binding(
                     type: receiverType,
-                    isConstant: false)
+                    isConstant: false, position: receiver.position, isUsed: true)
             }
         } else {
             signature = functionSignatures[function.name]
@@ -1426,13 +1444,15 @@ struct FunctionChecker {
             // the body can use, and any number may be so.
             if parameter.name == GoValueList.blank { continue }
             guard scopes[scopes.count - 1][parameter.name] == nil else {
-                throw GoDiagnostic(
-                    position: parameter.position,
-                    message: "\(parameter.name) redeclared in this block")
+                throw GoDiagnostic.redeclared(
+                    parameter.name, at: parameter.position,
+                    other: scopes[scopes.count - 1][parameter.name]?.position)
             }
+            // A parameter need not be read; where it is declared is kept
+            // for a second declaration of its name.
             scopes[scopes.count - 1][parameter.name] = Binding(
                 type: parameterType.parameterType,
-                isConstant: false)
+                isConstant: false, position: parameter.position, isUsed: true)
         }
         for (index, (name, resultType)) in zip(function.resultNames, signature.results).enumerated() {
             guard let name else { continue }
@@ -1444,12 +1464,16 @@ struct FunctionChecker {
             guard scopes[scopes.count - 1][name] == nil else {
                 // The names of the results follow the two places above.
                 let named = function.resultNames.prefix(index).compactMap { $0 }.count + 2
-                throw GoDiagnostic(
-                    position: positions.flatMap { named < $0.count ? $0[named] : $0.first }
+                throw GoDiagnostic.redeclared(
+                    name,
+                    at: positions.flatMap { named < $0.count ? $0[named] : $0.first }
                         ?? function.position,
-                    message: "\(name) redeclared in this block")
+                    other: scopes[scopes.count - 1][name]?.position)
             }
-            scopes[scopes.count - 1][name] = Binding(type: resultType, isConstant: false)
+            let named = function.resultNames.prefix(index).compactMap { $0 }.count + 2
+            scopes[scopes.count - 1][name] = Binding(
+                type: resultType, isConstant: false,
+                position: positions.flatMap { named < $0.count ? $0[named] : nil }, isUsed: true)
             namedResultCount += 1
         }
         if namedResultCount > 0, namedResultCount != signature.results.count {
@@ -1468,7 +1492,8 @@ struct FunctionChecker {
         if !signature.results.isEmpty, !blockTerminates(function.body) {
             // Go reports the return a function lacks where its body ends.
             throw GoDiagnostic(
-                position: positions?.last ?? function.position, message: "missing return")
+                position: positions.flatMap { $0.count > 1 ? $0[1] : nil } ?? function.position,
+                message: "missing return")
         }
     }
 
@@ -1536,9 +1561,8 @@ struct FunctionChecker {
             let keyword: String
             if case .deferStatement = statement { keyword = "defer" } else { keyword = "go" }
             guard case .call = expression, !(try isOperatorOrConversion(expression)) else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "expression in \(keyword) must be function call")
+                _ = position
+                throw try uncallableStatement(expression, after: keyword)
             }
             try checkCall(expression, droppedBy: keyword)
         case .sendStatement: try checkSendStatement(statement)
@@ -1555,24 +1579,22 @@ struct FunctionChecker {
             return
         }
         try requireUndeclared(statement)
-        if let expression { try requireSingleValue(expression, at: position) }
+        if let expression {
+            try requireOneValue(expression, assigned: isShortDeclaration(at: position))
+        }
         let declared = try explicitType.map { try declaredType($0) }
         let expressionType = try expression.map { try type(of: $0) }
         if isConstant { try requireConstant(expression, ofType: expressionType) }
-        if let declared, let expression, let expressionType,
-            !(try isAssignable(expression, ofType: expressionType, to: declared))
-        {
-            throw GoDiagnostic(
-                position: Self.start(of: expression, in: namePositions),
-                message: "cannot use \(expressionType) as \(declared) value")
+        if let declared, let expression, let expressionType {
+            try requireUse(
+                expression, ofType: expressionType, as: declared,
+                in: isConstant ? "constant declaration" : "variable declaration")
         }
         guard let bindingType = declared ?? expressionType else {
             throw GoDiagnostic(position: position, message: "missing type in declaration")
         }
         guard bindingType != .void, bindingType != .nilType else {
-            throw GoDiagnostic(
-                position: expression?.position ?? position,
-                message: "no value used as value")
+            throw valueless(expression, ofType: bindingType, isConstant: isConstant, at: position)
         }
         // `var _ = v` checks and evaluates `v` and declares nothing.
         if name == GoValueList.blank { return }
@@ -1581,7 +1603,7 @@ struct FunctionChecker {
             isConstant: isConstant,
             constantValue: isConstant && declared == nil
                 ? expression.flatMap { untypedConstantValue($0) } : nil)
-        try noteDeclaration(
+        try noteChecked(
             name, declared: declared, expression: expression, isConstant: isConstant,
             position: position)
     }
@@ -1592,16 +1614,13 @@ struct FunctionChecker {
         }
         if target.isBlank {
             // `_ = x` evaluates `x` and keeps nothing.
-            try requireValue(expression)
+            try requireOneValue(expression, assigned: true)
+            try requireValue(expression, in: "assignment to _ identifier")
             return
         }
-        let targetType = try assignableType(of: target, asTarget: true)
-        let expressionType = try type(of: expression)
-        guard try isAssignable(expression, ofType: expressionType, to: targetType) else {
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "cannot use \(expressionType) as \(targetType) value")
-        }
+        let targetType = try targetType(of: target)
+        try requireOneValue(expression, assigned: true)
+        try requireUse(expression, as: targetType, in: "assignment")
     }
 
     private mutating func checkMultiDeclarationStatement(_ statement: GoStatement) throws {
@@ -1612,10 +1631,8 @@ struct FunctionChecker {
             if variables.isConstant {
                 // Constants are values of the compiler: one declaration each.
                 guard variables.values.count == names.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: Self.mismatch(
-                            variables: names.count, values: variables.values.count))
+                    throw try arityMismatch(
+                        names, values: variables.values, isConstant: true, position: position)
                 }
                 for (name, value) in zip(names, variables.values) {
                     try check(
@@ -1644,19 +1661,18 @@ struct FunctionChecker {
             names: names, expression: expression, position: position,
             declared: Set(names.filter { scopes[scopes.count - 1][$0] != nil }))
         {
-            for statement in statements { try check(statement) }
+            try checkRedeclaration(statements, of: expression)
             return
         }
         if case .unary(.receive, let channel, _) = expression,
             case .channel(let direction, let elementType) = underlying(try type(of: channel))
         {
             guard direction != .sendOnly else {
-                throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
+                throw try invalidOperand(
+                    "cannot receive from send-only channel", channel, ofType: type(of: channel))
             }
             guard names.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: channel receive returns 2 values")
+                throw try countMismatch(variables: names.count, values: [expression])
             }
             scopes[scopes.count - 1][names[0]] = Binding(
                 type: elementType, isConstant: false)
@@ -1668,11 +1684,9 @@ struct FunctionChecker {
             case .map(let keyType, let valueType) = underlying(try type(of: base))
         {
             guard names.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: map index returns 2 values")
+                throw try countMismatch(variables: names.count, values: [expression])
             }
-            try require(key, assignableTo: keyType)
+            try requireUse(key, as: keyType, in: "map index")
             scopes[scopes.count - 1][names[0]] = Binding(
                 type: valueType, isConstant: false)
             scopes[scopes.count - 1][names[1]] = Binding(
@@ -1681,9 +1695,7 @@ struct FunctionChecker {
         }
         if case .typeAssertion(_, let assertedType, _) = expression {
             guard names.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: type assertion returns 2 values")
+                throw try countMismatch(variables: names.count, values: [expression])
             }
             let valueType = try declaredType(assertedType)
             scopes[scopes.count - 1][names[0]] = Binding(
@@ -1694,24 +1706,20 @@ struct FunctionChecker {
             return
         }
         guard case .call(let callee, let arguments, let callPosition) = expression else {
-            throw GoDiagnostic(
-                position: position,
-                message: Self.mismatch(variables: names.count, values: 1))
+            throw try countMismatch(variables: names.count, values: [expression])
         }
         let resultTypes = try callResultTypes(
             callee: callee, arguments: arguments, position: callPosition)
         guard resultTypes.count == names.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: "assignment mismatch: \(names.count) variables but function returns \(resultTypes.count) values")
+            throw resultCountMismatch(
+                variables: names.count, call: expression, results: resultTypes.count)
         }
         for (name, resultType) in zip(names, resultTypes) {
             // The blank identifier declares nothing and may repeat.
             if name == "_" { continue }
             guard scopes[scopes.count - 1][name] == nil else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "\(name) redeclared in this block")
+                throw GoDiagnostic.redeclared(
+                    name, at: position, other: scopes[scopes.count - 1][name]?.position)
             }
             scopes[scopes.count - 1][name] = Binding(
                 type: resultType, isConstant: false)
@@ -1719,28 +1727,21 @@ struct FunctionChecker {
     }
 
     private mutating func checkMultiAssignmentStatement(_ statement: GoStatement) throws {
-        guard case .multiAssignment(let targets, let expression, let position) = statement else {
+        guard case .multiAssignment(let targets, let expression, _) = statement else {
             return
         }
         if let values = expression.valueList {
             guard targets.count == values.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: Self.mismatch(variables: targets.count, values: values.count))
+                throw try countMismatch(variables: targets.count, values: values)
             }
             for (target, value) in zip(targets, values) {
                 if target.isBlank {
-                    try requireValue(value)
+                    try requireValue(value, in: "assignment to _ identifier")
                     continue
                 }
-                let targetType = try assignableType(of: target, asTarget: true)
+                let targetType = try targetType(of: target)
                 try requireSingleValue(value, at: value.position)
-                let valueType = try type(of: value)
-                guard try isAssignable(value, ofType: valueType, to: targetType) else {
-                    throw GoDiagnostic(
-                        position: value.position,
-                        message: "cannot use \(valueType) as \(targetType) value in assignment")
-                }
+                try requireUse(value, as: targetType, in: "assignment")
             }
             return
         }
@@ -1748,82 +1749,49 @@ struct FunctionChecker {
             case .channel(let direction, let elementType) = underlying(try type(of: channel))
         {
             guard direction != .sendOnly else {
-                throw GoDiagnostic(position: expression.position, message: "cannot receive from send-only channel")
+                throw try invalidOperand(
+                    "cannot receive from send-only channel", channel, ofType: type(of: channel))
             }
             guard targets.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: channel receive returns 2 values")
+                throw try countMismatch(variables: targets.count, values: [expression])
             }
-            for (target, resultType) in zip(targets, [elementType, GoType.bool]) {
-                if target.isBlank { continue }
-                let targetType = try assignableType(of: target, asTarget: true)
-                guard isAssignable(resultType, to: targetType) else {
-                    throw GoDiagnostic(
-                        position: target.position,
-                        message: "cannot assign \(resultType) to \(targetType)")
-                }
-            }
+            try requireCommaOk(expression, results: [elementType, .bool], targets: targets)
             return
         }
         if case .index(let base, let key, _) = expression,
             case .map(let keyType, let valueType) = underlying(try type(of: base))
         {
             guard targets.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: map index returns 2 values")
+                throw try countMismatch(variables: targets.count, values: [expression])
             }
-            try require(key, assignableTo: keyType)
-            for (target, resultType) in zip(targets, [valueType, .bool]) {
-                if target.isBlank { continue }
-                let targetType = try assignableType(of: target, asTarget: true)
-                guard isAssignable(resultType, to: targetType) else {
-                    throw GoDiagnostic(
-                        position: target.position,
-                        message: "cannot assign \(resultType) to \(targetType)")
-                }
-            }
+            try requireUse(key, as: keyType, in: "map index")
+            try requireCommaOk(expression, results: [valueType, .bool], targets: targets)
             return
         }
         if case .typeAssertion(_, let assertedType, _) = expression {
             guard targets.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "assignment mismatch: type assertion returns 2 values")
+                throw try countMismatch(variables: targets.count, values: [expression])
             }
             _ = try type(of: expression)
-            let resultTypes = [try declaredType(assertedType), GoType.bool]
-            for (target, resultType) in zip(targets, resultTypes) {
-                if target.isBlank { continue }
-                let targetType = try assignableType(of: target, asTarget: true)
-                guard isAssignable(resultType, to: targetType) else {
-                    throw GoDiagnostic(
-                        position: target.position,
-                        message: "cannot assign \(resultType) to \(targetType)")
-                }
-            }
+            try requireCommaOk(
+                expression, results: [try declaredType(assertedType), .bool], targets: targets)
             return
         }
         guard case .call(let callee, let arguments, let callPosition) = expression else {
-            throw GoDiagnostic(
-                position: position,
-                message: Self.mismatch(variables: targets.count, values: 1))
+            throw try countMismatch(variables: targets.count, values: [expression])
         }
         let resultTypes = try callResultTypes(
             callee: callee, arguments: arguments, position: callPosition)
         guard resultTypes.count == targets.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: "assignment mismatch: \(targets.count) variables but function returns \(resultTypes.count) values")
+            throw resultCountMismatch(
+                variables: targets.count, call: expression, results: resultTypes.count)
         }
         for (target, resultType) in zip(targets, resultTypes) {
             if target.isBlank { continue }
-            let targetType = try assignableType(of: target, asTarget: true)
+            let targetType = try targetType(of: target)
             guard isAssignable(resultType, to: targetType) else {
-                throw GoDiagnostic(
-                    position: target.position,
-                    message: "cannot use \(resultType) as \(targetType) value in assignment")
+                throw cannotUseResult(
+                    of: expression, type: resultType, as: targetType, in: "assignment")
             }
         }
     }
@@ -1832,12 +1800,13 @@ struct FunctionChecker {
         guard case .increment(let target, let incrementOperator, let position) = statement else {
             return
         }
-        let targetType = try assignableType(of: target)
+        let targetType = try targetType(of: target, isRead: true)
         guard isInteger(targetType) || isFloat(targetType) else {
             let spelling = incrementOperator == .increment ? "++" : "--"
             throw GoDiagnostic(
                 position: position,
-                message: "invalid operation: \(spelling) on non-numeric type \(targetType)")
+                message: "invalid operation: \(target.sourceSpelling)\(spelling) "
+                    + "(non-numeric type \(targetType))")
         }
     }
 
@@ -1851,16 +1820,9 @@ struct FunctionChecker {
                 _ = try type(of: expression)
                 return
             }
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "expression evaluated but not used")
+            throw try unused(expression)
         }
-        if try isOperatorOrConversion(expression) {
-            _ = try type(of: expression)
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "expression evaluated but not used")
-        }
+        if try isOperatorOrConversion(expression) { throw try unused(expression) }
         try checkCall(expression, droppedBy: nil)
     }
 
@@ -1870,7 +1832,7 @@ struct FunctionChecker {
         }
         guard !expectedResults.isEmpty else {
             guard values.isEmpty else {
-                throw GoDiagnostic(position: position, message: "too many return values")
+                throw try returnCountMismatch(values, at: position)
             }
             return
         }
@@ -1883,35 +1845,23 @@ struct FunctionChecker {
         {
             let results = try callResultTypes(
                 callee: callee, arguments: arguments, position: callPosition)
-            guard results.count >= expectedResults.count else {
-                throw GoDiagnostic(position: position, message: "not enough return values")
-            }
-            guard results.count <= expectedResults.count else {
-                throw GoDiagnostic(position: position, message: "too many return values")
+            guard results.count == expectedResults.count else {
+                throw returnCountMismatch(of: values[0], results: results)
             }
             for (actual, expected) in zip(results, expectedResults) {
                 guard isAssignable(actual, to: expected) else {
-                    throw GoDiagnostic(
-                        position: values[0].position,
-                        message: "cannot use \(actual) as \(expected) value in return statement")
+                    throw cannotUseResult(
+                        of: values[0], type: actual, as: expected, in: "return statement")
                 }
             }
             return
         }
-        guard values.count >= expectedResults.count else {
-            throw GoDiagnostic(position: position, message: "not enough return values")
-        }
-        guard values.count <= expectedResults.count else {
-            throw GoDiagnostic(position: position, message: "too many return values")
+        guard values.count == expectedResults.count else {
+            throw try returnCountMismatch(values, at: position)
         }
         if values.count == 1 { try rejectSeveralReturnValues(values[0]) }
         for (value, expected) in zip(values, expectedResults) {
-            let actual = try type(of: value)
-            guard try isAssignable(value, ofType: actual, to: expected) else {
-                throw GoDiagnostic(
-                    position: value.position,
-                    message: "cannot use \(actual) as \(expected) value in return statement")
-            }
+            try requireUse(value, as: expected, in: "return statement")
         }
     }
 
@@ -1919,25 +1869,21 @@ struct FunctionChecker {
         guard case .sendStatement(let channel, let value, _) = statement else {
             return
         }
-        guard case .channel(let direction, let elementType) = underlying(try type(of: channel)) else {
-            throw GoDiagnostic(position: channel.position, message: "cannot send to non-channel value")
+        let channelType = try type(of: channel)
+        guard case .channel(let direction, let elementType) = underlying(channelType) else {
+            throw invalidOperand("cannot send to non-channel", channel, ofType: channelType)
         }
         guard direction != .receiveOnly else {
-            throw GoDiagnostic(position: channel.position, message: "cannot send to receive-only channel")
+            throw invalidOperand("cannot send to receive-only channel", channel, ofType: channelType)
         }
-        let valueType = try type(of: value)
-        guard try isAssignable(value, ofType: valueType, to: elementType) else {
-            throw GoDiagnostic(
-                position: value.position,
-                message: "cannot send \(valueType) value on \(elementType) channel")
-        }
+        try requireUse(value, as: elementType, in: "send")
     }
 
     private mutating func checkIfStatement(_ statement: GoStatement) throws {
         guard case .ifStatement(let condition, let thenBlock, let elseBlock, _) = statement else {
             return
         }
-        try requireBool(condition)
+        try requireBool(condition, in: "if statement")
         try checkBlock(thenBlock)
         if let elseBlock { try checkBlock(elseBlock) }
     }
@@ -1963,7 +1909,7 @@ struct FunctionChecker {
         if let initializer { try check(initializer) }
         if let condition {
             read(condition)
-            try requireBool(condition)
+            try requireBool(condition, in: "for statement")
         }
         if let post { try check(post) }
         breakableDepth += 1
@@ -1991,24 +1937,21 @@ struct FunctionChecker {
         case .map(_, let value): elementType = value
         case .channel(let direction, let element):
             guard direction != .sendOnly else {
-                throw GoDiagnostic(
-                    position: collection.position,
-                    message: "cannot range over send-only channel")
+                throw unrangeable(
+                    collection, ofType: collectionType, why: ": receive from send-only channel")
             }
             guard valueName == nil else {
-                throw tooManyRangeVariables(over: collectionType, at: position)
+                throw tooManyRangeVariables(over: collection, ofType: collectionType, at: position)
             }
             elementType = element
         case .int:
             // `for i := range n`: the integers below `n`.
             guard valueName == nil else {
-                throw tooManyRangeVariables(over: collectionType, at: position)
+                throw tooManyRangeVariables(over: collection, ofType: collectionType, at: position)
             }
             elementType = .int
         default:
-            throw GoDiagnostic(
-                position: collection.position,
-                message: "cannot range over \(collectionType)")
+            throw unrangeable(collection, ofType: collectionType, why: "")
         }
         if let indexName {
             let indexType: GoType
@@ -2048,15 +1991,14 @@ struct FunctionChecker {
         }
         let switchType = try expression.map { try type(of: $0) } ?? .bool
         guard switchType != .void else {
+            if let expression { throw noValue(expression) }
             throw GoDiagnostic(
-                position: expression?.position ?? cases.first?.position ?? syntheticPosition(),
+                position: cases.first?.position ?? syntheticPosition(),
                 message: "switch expression used as value")
         }
-        try requireSwitchable(
-            switchType,
-            at: expression?.position ?? cases.first?.position ?? syntheticPosition())
+        try requireSwitchable(switchType, expression)
         var firstDefault: GoSourcePosition?
-        var constants: Set<SwitchCaseConstant> = []
+        var constants: [SwitchCaseConstant: GoSourcePosition] = [:]
         breakableDepth += 1
         defer { breakableDepth -= 1 }
         for switchCase in cases {
@@ -2065,13 +2007,11 @@ struct FunctionChecker {
                 firstDefault = switchCase.position
             }
             for caseExpression in switchCase.expressions {
-                try requireCase(caseExpression, of: switchType)
-                if let constant = switchCaseConstant(caseExpression),
-                    !constants.insert(constant).inserted
-                {
-                    throw GoDiagnostic(
-                        position: caseExpression.startPosition,
-                        message: "duplicate case in expression switch")
+                try requireCase(caseExpression, of: switchType, switched: expression)
+                guard let constant = switchCaseConstant(caseExpression) else { continue }
+                let place = Self.start(of: caseExpression, in: namePositions)
+                if let previous = constants.updateValue(place, forKey: constant) {
+                    throw duplicateCase(caseExpression, of: switchType, at: place, after: previous)
                 }
             }
             try checkBlock(switchCase.body)
@@ -2086,20 +2026,29 @@ struct FunctionChecker {
     }
 
     /// What a `switch` is on has a type, and one whose values compare.
-    func requireSwitchable(_ type: GoType, at position: GoSourcePosition) throws {
+    mutating func requireSwitchable(_ type: GoType, _ expression: GoExpression?) throws {
+        let position = expression.map { Self.start(of: $0, in: namePositions) } ?? syntheticPosition()
         guard type != .nilType else {
             throw GoDiagnostic(
                 position: position, message: "use of untyped nil in switch expression")
         }
         guard isComparable(type) || comparesWithNilAlone(type) else {
-            throw GoDiagnostic(position: position, message: "switch expression is not comparable")
+            guard let expression else {
+                throw GoDiagnostic(position: position, message: "switch expression is not comparable")
+            }
+            throw GoDiagnostic(
+                position: position,
+                message: "cannot switch on \(describe(expression, ofType: type)) "
+                    + "(\(type) is not comparable)")
         }
     }
 
     /// A case of a switch on a value of `switchType` compares with it: it
     /// has that type, is an untyped constant an integer type adopts, or is
     /// `nil` for a type that has it.
-    mutating func requireCase(_ caseExpression: GoExpression, of switchType: GoType) throws {
+    mutating func requireCase(
+        _ caseExpression: GoExpression, of switchType: GoType, switched: GoExpression?
+    ) throws {
         let caseType = try type(of: caseExpression)
         let nilAlone = comparesWithNilAlone(switchType)
         let matches = try nilAlone
@@ -2114,9 +2063,9 @@ struct FunctionChecker {
             let note = nilAlone
                 ? " (" + incomparableMessage(switchType).dropFirst("invalid operation: ".count)
                     + ")" : ""
-            throw GoDiagnostic(
-                position: caseExpression.position,
-                message: "invalid case \(caseType) in switch on \(switchType)" + note)
+            throw invalidCase(
+                caseExpression, caseType, switched: switched, switchType,
+                fallback: "invalid case \(caseType) in switch on \(switchType)" + note)
         }
     }
 
@@ -2151,12 +2100,13 @@ struct FunctionChecker {
 
     /// What Go says of a `range` with a second variable where it has one
     /// value to give: over a channel, and over an integer.
-    func tooManyRangeVariables(
-        over type: GoType, at position: GoSourcePosition
+    mutating func tooManyRangeVariables(
+        over collection: GoExpression, ofType type: GoType, at position: GoSourcePosition
     ) -> GoDiagnostic {
         GoDiagnostic(
             position: namePositions[position.offset]?.last ?? position,
-            message: "range over \(type) permits only one iteration variable")
+            message: "range over \(describe(collection, ofType: type)) permits only one "
+                + "iteration variable")
     }
 
     /// `switch v := x.(type) { case T: ... }`. The operand is a value of an
@@ -2170,11 +2120,12 @@ struct FunctionChecker {
         let operandType = try type(of: typeSwitch.operand)
         guard case .interface(let methods) = underlying(operandType) else {
             throw GoDiagnostic(
-                position: typeSwitch.operand.startPosition,
-                message: "\(operandType) is not an interface")
+                position: Self.start(of: typeSwitch.operand, in: namePositions),
+                message: "\(describe(typeSwitch.operand, ofType: operandType)) is not an interface")
         }
         var firstDefault: GoSourcePosition?
         var seen: [GoType?] = []
+        var places: [GoSourcePosition] = []
         var isBindingUsed = false
         breakableDepth += 1
         defer { breakableDepth -= 1 }
@@ -2183,7 +2134,9 @@ struct FunctionChecker {
                 try requireOneDefault(at: clause.position, after: firstDefault)
                 firstDefault = clause.position
             }
-            let types = try caseTypes(of: clause, inSwitchOn: methods, seen: &seen)
+            let types = try caseTypes(
+                of: clause, inSwitchOn: typeSwitch.operand, ofType: operandType, methods: methods,
+                seen: &seen, places: &places)
             scopes.append([:])
             defer { scopes.removeLast() }
             if let binding = typeSwitch.binding {
@@ -2209,23 +2162,25 @@ struct FunctionChecker {
     /// The types a clause of a type switch lists, nil for `nil`. `seen`
     /// holds those of the clauses before it: a type comes once, and is one
     /// a value of an interface with `methods` can have.
-    func caseTypes(
-        of clause: GoSwitchCase, inSwitchOn methods: [GoInterfaceMethod], seen: inout [GoType?]
+    mutating func caseTypes(
+        of clause: GoSwitchCase, inSwitchOn operand: GoExpression, ofType operandType: GoType,
+        methods: [GoInterfaceMethod], seen: inout [GoType?], places: inout [GoSourcePosition]
     ) throws -> [GoType?] {
         var types: [GoType?] = []
         for case .typeExpression(let syntax, let position) in clause.expressions {
             let caseType = syntax.isNilCase ? nil : canonical(try declaredType(syntax))
             if let caseType, isImpossibleDynamicType(caseType, ofInterface: methods) {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "impossible type switch case: \(syntax.spelling)")
+                throw impossibleCase(
+                    syntax.spelling, caseType, of: operand, ofType: operandType, at: position)
             }
-            guard !seen.contains(caseType) else {
+            if let earlier = seen.firstIndex(of: caseType) {
                 throw GoDiagnostic(
                     position: position,
-                    message: "duplicate case \(syntax.spelling) in type switch")
+                    message: "duplicate case \(syntax.spelling) in type switch\n\t"
+                        + GoDiagnostic.place(places[earlier]) + ": previous case")
             }
             seen.append(caseType)
+            places.append(position)
             types.append(caseType)
         }
         return types
@@ -2297,15 +2252,12 @@ struct FunctionChecker {
         case .compositeLiteral: return try typeOfCompositeLiteral(expression)
         case .index: return try typeOfIndex(expression)
         case .slicing: return try typeOfSlicing(expression)
-        case .typeExpression(_, let position):
-            throw GoDiagnostic(position: position, message: "type is not an expression")
-        case .typeAssertion(let base, let assertedType, let position):
-            guard case .interface = underlying(try type(of: base)) else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "invalid operation: value is not an interface")
-            }
-            return try declaredType(assertedType)
+        case .typeExpression:
+            throw GoDiagnostic(
+                position: Self.start(of: expression, in: namePositions),
+                message: "\(spelling(of: expression)) (type) is not an expression")
+        case .typeAssertion(let base, let assertedType, _):
+            return try typeOfAssertion(base, to: assertedType)
         case .functionLiteral(
             let parameters, let resultNames, let resultTypes, let body, let position):
             return try functionLiteralType(
@@ -2406,7 +2358,7 @@ struct FunctionChecker {
             return method
         }
         let baseType = try type(of: base)
-        try requireVisible(name, in: baseType, at: position)
+        try requireVisible(name, of: base, in: baseType, at: position)
         if let lent = try promotedType(base: base, baseType: baseType, name: name, at: position) {
             return lent
         }
@@ -2424,9 +2376,7 @@ struct FunctionChecker {
             }
             // And a method of a type of the run-time library.
             if let method = libraryMethodType(of: baseType, named: name) { return method }
-            throw GoDiagnostic(
-                position: position,
-                message: "\(baseType) has no field or method \(name)")
+            throw undefinedSelection(name, of: base, ofType: baseType, at: position)
         }
         return field.type
     }
@@ -2464,39 +2414,34 @@ struct FunctionChecker {
         switch baseType {
         case .array(_, let element), .slice(let element):
             guard isInteger(try type(of: index)) else {
-                throw GoDiagnostic(position: index.position, message: "index must be integer")
+                throw nonIntegerIndex(index)
             }
             return element
         case .string:
             guard isInteger(try type(of: index)) else {
-                throw GoDiagnostic(position: index.position, message: "index must be integer")
+                throw nonIntegerIndex(index)
             }
             return GoPredeclared.byte
         case .map(let keyType, let valueType):
-            let indexType = try type(of: index)
-            guard try isAssignable(index, ofType: indexType, to: keyType) else {
-                throw GoDiagnostic(
-                    position: index.position,
-                    message: "cannot use \(indexType) as \(keyType) value in map index")
-            }
+            try requireUse(index, as: keyType, in: "map index")
             return valueType
         default:
-            throw GoDiagnostic(position: position, message: "cannot index expression")
+            throw unindexable(base, at: position)
         }
     }
 
     mutating func typeOfSlicing(_ expression: GoExpression) throws -> GoType {
-        guard case .slicing(let base, let low, let high, let position) = expression else {
+        guard case .slicing(let base, let low, let high, _) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
         for bound in [low, high].compactMap({ $0 }) where !isInteger(try type(of: bound)) {
-            throw GoDiagnostic(position: bound.position, message: "slice index must be integer")
+            throw nonIntegerIndex(bound)
         }
         switch try indexedType(of: base) {
         case .array(_, let element), .slice(let element): return .slice(element)
         case .string: return .string
         default:
-            throw GoDiagnostic(position: position, message: "cannot slice expression")
+            throw try invalidOperand("cannot slice", base, ofType: type(of: base))
         }
     }
 
@@ -2507,50 +2452,48 @@ struct FunctionChecker {
         switch unaryOperator {
         case .plus, .minus:
             let operandType = try type(of: operand)
-            if let numeric = try numericUnaryType(expression, operandType: operandType) {
+            if let numeric = try checkedNumericUnaryType(expression, operandType: operandType) {
                 return numeric
             }
             guard isInteger(operandType) else {
-                throw GoDiagnostic(position: position, message: "operator requires integer operand")
+                throw undefinedOperator(
+                    GoSourceSpelling.text(of: unaryOperator), on: operand, ofType: operandType)
             }
             return operandType
         case .not:
             let operandType = try type(of: operand)
             guard isBool(operandType) else {
-                throw GoDiagnostic(position: position, message: "operator ! not defined on \(operandType)")
+                throw undefinedOperator("!", on: operand, ofType: operandType)
             }
             return operandType
         case .address:
             // A composite literal is the one operand that is not a
             // variable: `&T{...}` makes one.
             if case .compositeLiteral = operand { return .pointer(try type(of: operand)) }
-            guard isAddressable(operand) else {
-                throw GoDiagnostic(
-                    position: operand.position,
-                    message: "invalid operation: cannot take address of a value that is not a variable")
-            }
-            return .pointer(try assignableType(of: operand))
+            guard isAddressable(operand) else { throw unaddressable(operand) }
+            return .pointer(try addressedType(of: operand))
         case .dereference:
             let operandType = try type(of: operand)
             guard let pointee = operandType.pointee(in: typeDefinitions) else {
-                throw GoDiagnostic(position: position, message: "cannot indirect \(operandType)")
+                throw invalidOperand("cannot indirect", operand, ofType: operandType)
             }
             try rejectOpaqueFile(pointee, at: position)
             return pointee
         case .receive:
-            let operandType = underlying(try type(of: operand))
-            guard case .channel(let direction, let elementType) = operandType else {
-                throw GoDiagnostic(position: position, message: "cannot receive from non-channel value")
+            let operandType = try type(of: operand)
+            guard case .channel(let direction, let elementType) = underlying(operandType) else {
+                throw invalidOperand("cannot receive from non-channel", operand, ofType: operandType)
             }
             guard direction != .sendOnly else {
-                throw GoDiagnostic(position: position, message: "cannot receive from send-only channel")
+                throw invalidOperand(
+                    "cannot receive from send-only channel", operand, ofType: operandType)
             }
             return elementType
         }
     }
 
     mutating func typeOfBinary(_ expression: GoExpression) throws -> GoType {
-        guard case .binary(let left, let binaryOperator, let right, let position) = expression else {
+        guard case .binary(let left, let binaryOperator, let right, _) = expression else {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
         var (leftType, rightType) = try operandTypes(left, right)
@@ -2571,25 +2514,26 @@ struct FunctionChecker {
                         || isFunction(leftType) || isFunction(rightType)
                         || isInterface(leftType) || isInterface(rightType)))
         else {
-            throw GoDiagnostic(position: position, message: "mismatched types \(leftType) and \(rightType)")
+            throw binaryFailure(expression, "mismatched types \(leftType) and \(rightType)")
         }
         switch binaryOperator {
         case .add:
             guard isInteger(leftType) || isString(leftType) else {
-                throw GoDiagnostic(position: position, message: "operator + not defined on \(leftType)")
+                throw binaryFailure(expression, "operator + not defined on \(leftType)")
             }
             return leftType
         case .subtract, .multiply:
             guard isInteger(leftType) else {
-                throw GoDiagnostic(position: position, message: "operator requires integer operands")
+                throw binaryFailure(expression, "operator requires integer operands")
             }
             return leftType
         case .divide, .remainder:
             guard isInteger(leftType) else {
-                throw GoDiagnostic(position: position, message: "operator requires integer operands")
+                throw binaryFailure(expression, "operator requires integer operands")
             }
             if case .integer(0, let zeroPosition) = right {
-                throw GoDiagnostic(position: zeroPosition, message: "division by zero")
+                throw GoDiagnostic(
+                    position: zeroPosition, message: "invalid operation: division by zero")
             }
             return leftType
         case .equal, .notEqual:
@@ -2604,18 +2548,17 @@ struct FunctionChecker {
                 return .bool
             }
             guard isComparable(leftType) else {
-                throw GoDiagnostic(
-                    position: position, message: incomparableMessage(leftType))
+                throw binaryFailure(expression, incomparableMessage(leftType))
             }
             return .bool
         case .less, .lessEqual, .greater, .greaterEqual:
             guard isInteger(leftType) || isString(leftType) else {
-                throw GoDiagnostic(position: position, message: "operator is not defined on \(leftType)")
+                throw binaryFailure(expression, "operator is not defined on \(leftType)")
             }
             return .bool
         case .logicalAnd, .logicalOr:
             guard isBool(leftType) else {
-                throw GoDiagnostic(position: position, message: "operator requires boolean operands")
+                throw binaryFailure(expression, "operator requires boolean operands")
             }
             return leftType
         }
@@ -2632,14 +2575,7 @@ struct FunctionChecker {
         if case .functionLiteral = callee,
             case .function(let parameters, let results) = try type(of: callee)
         {
-            guard arguments.count == parameters.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in function literal call")
-            }
-            for (argument, parameter) in zip(arguments, parameters) {
-                try require(argument, assignableTo: parameter)
-            }
+            try checkArguments(arguments, of: callee, declared: parameters, position: position)
             return results.first ?? .void
         }
         if let operation = expression.bitwiseOperation {
@@ -2652,15 +2588,17 @@ struct FunctionChecker {
                 message: "can only use ... with final argument in list")
         }
         if let target = try conversionTarget(callee) {
+            guard arguments.count == 1 else {
+                throw conversionCountMismatch(
+                    to: target, callee: callee, arguments: arguments, position: position)
+            }
             return try conversionResultType(target, arguments: arguments, position: position)
         }
         if let native = try nativeCall(
             callee: callee, arguments: arguments, position: position)
         {
             guard native.results.count <= 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "multiple-value \(native.goName)() in single-value context")
+                throw severalValues(expression, results: native.results)
             }
             guard let result = native.results.first else { return .void }
             return result
@@ -2679,11 +2617,9 @@ struct FunctionChecker {
             // What an index, a call, or a literal gives may be a function.
             let calleeType = try type(of: callee)
             guard let results = try resultsOfCall(
-                through: calleeType, named: "function", arguments: arguments, position: position)
+                through: calleeType, callee: callee, arguments: arguments, position: position)
             else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "invalid operation: cannot call non-function of type \(calleeType)")
+                throw invalidOperand("cannot call non-function", callee, ofType: calleeType)
             }
             return results.first ?? .void
         }
@@ -2698,150 +2634,116 @@ struct FunctionChecker {
         position: GoSourcePosition
     ) throws -> GoType {
         if name == "len" || name == "cap" {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(position: position, message: "invalid argument count for \(name)")
-            }
+            try requireArgumentCount(1, of: name, arguments: arguments, position: namePosition)
             let argumentType = try indexedType(of: arguments[0])
             if name == "len" {
                 guard argumentType == .string || isArrayOrSlice(argumentType)
                     || isMap(argumentType) || isChannel(argumentType)
                 else {
-                    throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for len")
+                    throw invalidArgument(arguments[0], "for built-in len")
                 }
             } else {
                 guard isArrayOrSlice(argumentType) || isChannel(argumentType) else {
-                    throw GoDiagnostic(position: arguments[0].position, message: "invalid argument for cap")
+                    throw invalidArgument(arguments[0], "for built-in cap")
                 }
             }
             return .int
         }
         if name == "append" {
+            try requireArgumentCount(
+                1, of: name, arguments: arguments, position: namePosition, orMore: true)
             guard arguments.count >= 2 else {
                 throw GoDiagnostic(position: position, message: "not enough arguments in call to append")
             }
             let sliceType = try type(of: arguments[0])
             guard case .slice(let elementType) = underlying(sliceType) else {
                 throw GoDiagnostic(
-                    position: arguments[0].position, message: "first argument to append must be slice")
+                    position: Self.start(of: arguments[0], in: namePositions),
+                    message: "first argument to append must be a slice; have "
+                        + describe(arguments[0], ofType: sliceType))
             }
             if arguments.count == 2, let source = arguments[1].spreadOperand {
                 let sourceType = try type(of: source)
                 guard isElementSource(sourceType, of: elementType) else {
-                    throw GoDiagnostic(
-                        position: source.position,
-                        message: "cannot use \(sourceType) as \(sliceType) value in append")
+                    throw cannotUse(
+                        source, ofType: sourceType, as: .slice(elementType),
+                        in: "argument to append")
                 }
                 return sliceType
             }
             for argument in arguments.dropFirst() {
-                try require(argument, assignableTo: elementType)
+                try requireUse(argument, as: elementType, in: "argument to append")
             }
             return sliceType
         }
         if name == "make" {
-            guard arguments.count >= 1 && arguments.count <= 3,
-                case .typeExpression(let typeExpression, _) = arguments[0]
-            else {
+            try requireArgumentCount(
+                1, of: name, arguments: arguments, position: namePosition, orMore: true)
+            guard case .typeExpression(let typeExpression, _) = arguments[0] else {
                 throw GoDiagnostic(position: position, message: "invalid make call")
             }
             let madeType = try declaredType(typeExpression)
             switch underlying(madeType) {
             case .slice:
-                guard arguments.count >= 2 else {
-                    throw GoDiagnostic(position: position, message: "missing len argument")
-                }
-                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                    throw GoDiagnostic(position: argument.position, message: "make size must be integer")
-                }
-            case .map:
-                if arguments.count > 2 {
-                    throw GoDiagnostic(position: position, message: "too many arguments to make")
-                }
-                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                    throw GoDiagnostic(position: argument.position, message: "make size must be integer")
-                }
-            case .channel:
-                if arguments.count > 2 {
-                    throw GoDiagnostic(position: position, message: "too many arguments to make")
-                }
-                for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
-                    throw GoDiagnostic(position: argument.position, message: "make channel size must be integer")
-                }
+                try requireMakeArguments(2...3, arguments, at: namePosition)
+            case .map, .channel:
+                try requireMakeArguments(1...2, arguments, at: namePosition)
             default:
-                throw GoDiagnostic(position: arguments[0].position, message: "cannot make \(madeType)")
+                throw GoDiagnostic(
+                    position: arguments[0].position,
+                    message: "invalid argument: cannot make \(typeExpression.sourceSpelling); "
+                        + "type must be slice, map, or channel")
+            }
+            for argument in arguments.dropFirst() where !isInteger(try type(of: argument)) {
+                throw nonIntegerIndex(argument)
             }
             return madeType
         }
         if name == "panic" {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(position: position, message: "panic takes exactly one argument")
-            }
+            try requireArgumentCount(1, of: name, arguments: arguments, position: namePosition)
             _ = try type(of: arguments[0])
             return .void
         }
         if name == "recover" {
-            guard arguments.isEmpty else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "too many arguments in call to recover")
-            }
+            try requireArgumentCount(0, of: name, arguments: arguments, position: namePosition)
             return .interface([])
         }
         if name == "delete" {
-            guard arguments.count == 2 else {
-                throw GoDiagnostic(position: position, message: "delete takes exactly two arguments")
-            }
+            try requireArgumentCount(2, of: name, arguments: arguments, position: namePosition)
             let mapType = try type(of: arguments[0])
             guard case .map(let keyType, _) = underlying(mapType) else {
-                throw GoDiagnostic(
-                    position: arguments[0].position,
-                    message: "first argument to delete must be map")
+                throw invalidArgument(arguments[0], "is not a map")
             }
-            let actualKeyType = try type(of: arguments[1])
-            guard try isAssignable(arguments[1], ofType: actualKeyType, to: keyType) else {
-                throw GoDiagnostic(
-                    position: arguments[1].position,
-                    message: "cannot use \(actualKeyType) as \(keyType) value in delete")
-            }
+            try requireUse(arguments[1], as: keyType, in: "argument to delete")
             return .void
         }
         if name == "copy" {
-            guard arguments.count == 2 else {
-                throw GoDiagnostic(position: position, message: "copy takes exactly two arguments")
-            }
+            try requireArgumentCount(2, of: name, arguments: arguments, position: namePosition)
             let destinationType = try type(of: arguments[0])
-            guard case .slice(let element) = underlying(destinationType) else {
-                throw GoDiagnostic(
-                    position: arguments[0].position,
-                    message: "first argument to copy must be slice")
-            }
             let sourceType = try type(of: arguments[1])
-            guard isElementSource(sourceType, of: element) else {
-                throw GoDiagnostic(
-                    position: arguments[1].position,
-                    message: "cannot copy \(sourceType) into \(destinationType)")
+            guard case .slice(let element) = underlying(destinationType),
+                isElementSource(sourceType, of: element)
+            else {
+                throw uncopyable(arguments[0], destinationType, arguments[1], sourceType)
             }
             return .int
         }
         if name == "close" {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(position: position, message: "close takes exactly one argument")
-            }
-            guard case .channel(let direction, _) = underlying(try type(of: arguments[0])) else {
-                throw GoDiagnostic(
-                    position: arguments[0].position,
-                    message: "invalid operation: cannot close non-channel")
+            try requireArgumentCount(1, of: name, arguments: arguments, position: namePosition)
+            let closedType = try type(of: arguments[0])
+            guard case .channel(let direction, _) = underlying(closedType) else {
+                throw invalidOperand("cannot close non-channel", arguments[0], ofType: closedType)
             }
             guard direction != .receiveOnly else {
-                throw GoDiagnostic(
-                    position: arguments[0].position,
-                    message: "invalid operation: cannot close receive-only channel")
+                throw invalidOperand(
+                    "cannot close receive-only channel", arguments[0], ofType: closedType)
             }
             return .void
         }
         if let binding = lookup(name),
             let results = try resultsOfCall(
-                through: binding.type, named: name, arguments: arguments, position: position)
+                through: binding.type, callee: .identifier(name, position: namePosition),
+                arguments: arguments, position: position)
         {
             return results.first ?? .void
         }
@@ -2851,31 +2753,17 @@ struct FunctionChecker {
                 binding.type == .named("context.CancelFunc")
             {
                 use(name)
-                guard arguments.isEmpty else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "too many arguments in call to cancel function")
-                }
+                try checkArguments(
+                    arguments, of: .identifier(name, position: namePosition), declared: [],
+                    position: position)
                 return .void
             }
             throw GoDiagnostic(
                 position: namePosition, message: uncallableMessage(name) ?? "undefined: \(name)")
         }
-        let (arguments, parameters) = matched(arguments, to: signature.parameters)
-        guard arguments.count <= parameters.count else {
-            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
-        }
-        guard arguments.count == parameters.count else {
-            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
-        }
-        for (argument, parameterType) in zip(arguments, parameters) {
-            let argumentType = try type(of: argument)
-            guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
-                throw GoDiagnostic(
-                    position: argument.position,
-                    message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
-            }
-        }
+        try checkArguments(
+            arguments, of: .identifier(name, position: namePosition),
+            declared: signature.parameters, position: position)
         return signature.results.first ?? .void
     }
 
@@ -2890,70 +2778,53 @@ struct FunctionChecker {
             importedPaths.contains("fmt"),
             name == "Print" || name == "Println"
         {
-            try checkAnyOperands(arguments[...])
+            try checkAnyOperands(arguments[...], of: callee)
             return .void
         }
         if case .identifier("os", _) = base,
             importedPaths.contains("os"),
             name == "Exit"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to os.Exit")
-            }
-            try require(arguments[0], assignableTo: .int)
+            try checkArguments(arguments, of: callee, declared: [.int], position: position)
             return .void
         }
         if case .identifier("strconv", _) = base,
             importedPaths.contains("strconv"),
             name == "Atoi"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to strconv.Atoi")
-            }
-            try require(arguments[0], assignableTo: .string)
+            try checkArguments(arguments, of: callee, declared: [.string], position: position)
             return .int
         }
         if case .identifier("userland", _) = base,
             importedPaths.contains("swiftix/userland"),
             name == "ReadInput"
         {
-            guard arguments.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to userland.ReadInput")
-            }
-            try require(arguments[0], assignableTo: .string)
-            try require(arguments[1], assignableTo: .slice(.string))
+            try checkArguments(
+                arguments, of: callee, declared: [.string, .slice(.string)],
+                position: position)
             return .string
         }
         if case .identifier("userland", _) = base,
             importedPaths.contains("swiftix/userland"),
             let results = try userlandTerminalResults(
-                name, arguments: arguments, position: position)
+                name, callee: callee, arguments: arguments, position: position)
         {
             return results.first ?? .void
         }
         if case .identifier("strings", _) = base,
             importedPaths.contains("strings")
         {
-            return try stringsCallResult(name, arguments: arguments, position: position)
+            return try stringsCallResult(
+                name, callee: callee, arguments: arguments, position: position)
         }
         if case .identifier(let packageName, _) = base,
             packageName == "time",
             importedPaths.contains("time"),
             name == "After"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to time.After")
-            }
-            try requireArgument(
-                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.After")
+            try checkArguments(
+                arguments, of: callee, declared: [GoLibraryTypes.duration],
+                position: position)
             return .channel(direction: .receiveOnly, element: GoPredeclared.time)
         }
         if case .identifier(let packageName, _) = base,
@@ -2961,13 +2832,9 @@ struct FunctionChecker {
             importedPaths.contains("time"),
             name == "Sleep"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to time.Sleep")
-            }
-            try requireArgument(
-                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.Sleep")
+            try checkArguments(
+                arguments, of: callee, declared: [GoLibraryTypes.duration],
+                position: position)
             return .void
         }
         if case .identifier(let packageName, _) = base,
@@ -2975,13 +2842,9 @@ struct FunctionChecker {
             importedPaths.contains("time"),
             name == "Tick"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to time.Tick")
-            }
-            try requireArgument(
-                arguments[0], assignableTo: GoLibraryTypes.duration, of: "time.Tick")
+            try checkArguments(
+                arguments, of: callee, declared: [GoLibraryTypes.duration],
+                position: position)
             return .channel(direction: .receiveOnly, element: GoPredeclared.time)
         }
         if case .identifier(let packageName, _) = base,
@@ -2989,11 +2852,7 @@ struct FunctionChecker {
             importedPaths.contains("context"),
             name == "Background"
         {
-            guard arguments.isEmpty else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "too many arguments in call to context.Background")
-            }
+            try checkArguments(arguments, of: callee, declared: [], position: position)
             return .named("context.Context")
         }
         if case .identifier(let packageName, _) = base,
@@ -3001,12 +2860,9 @@ struct FunctionChecker {
             importedPaths.contains("context"),
             name == "WithCancel"
         {
-            guard arguments.count == 1 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to context.WithCancel")
-            }
-            try require(arguments[0], assignableTo: .named("context.Context"))
+            try checkArguments(
+                arguments, of: callee, declared: [.named("context.Context")],
+                position: position)
             return .named("context.Context")
         }
         if case .identifier(let packageName, _) = base,
@@ -3014,14 +2870,9 @@ struct FunctionChecker {
             importedPaths.contains("context"),
             name == "WithTimeout"
         {
-            guard arguments.count == 2 else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to context.WithTimeout")
-            }
-            try require(arguments[0], assignableTo: .named("context.Context"))
-            try requireArgument(
-                arguments[1], assignableTo: GoLibraryTypes.duration, of: "context.WithTimeout")
+            try checkArguments(
+                arguments, of: callee, declared: [.named("context.Context"), GoLibraryTypes.duration],
+                position: position)
             return .named("context.Context")
         }
         if case .identifier(let packageName, _) = base,
@@ -3030,30 +2881,17 @@ struct FunctionChecker {
         {
             switch name {
             case "Dial":
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to net.Dial")
-                }
-                try require(arguments[0], assignableTo: .string)
-                try require(arguments[1], assignableTo: .string)
+                try checkArguments(
+                    arguments, of: callee, declared: [.string, .string],
+                    position: position)
                 return .named("net.Conn")
             case "Listen":
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to net.Listen")
-                }
-                try require(arguments[0], assignableTo: .string)
-                try require(arguments[1], assignableTo: .string)
+                try checkArguments(
+                    arguments, of: callee, declared: [.string, .string],
+                    position: position)
                 return .named("net.Listener")
             case "LookupHost":
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to net.LookupHost")
-                }
-                try require(arguments[0], assignableTo: .string)
+                try checkArguments(arguments, of: callee, declared: [.string], position: position)
                 return .slice(.string)
             default:
                 break
@@ -3064,29 +2902,20 @@ struct FunctionChecker {
         {
             switch name {
             case "HandleFunc":
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to http.HandleFunc")
-                }
-                try require(arguments[0], assignableTo: .string)
-                try requireHandler(arguments[1])
+                try checkArguments(
+                    arguments, of: callee, declared: [.string, .function(parameters: [.named("http.ResponseWriter"), .pointer(.named("http.Request"))], results: [])],
+                    position: position)
                 return .void
             case "ListenAndServe":
                 guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to http.ListenAndServe")
+                    throw try argumentCountMismatch(
+                        arguments, of: callee, declared: [.string, .named("http.Handler")],
+                        position: position)
                 }
-                try require(arguments[0], assignableTo: .string)
+                try requireArgument(arguments[0], as: .string, of: callee)
                 return GoPredeclared.errorType
             case "Get":
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to http.Get")
-                }
-                try require(arguments[0], assignableTo: .string)
+                try checkArguments(arguments, of: callee, declared: [.string], position: position)
                 return .named("http.Response")
             default:
                 break
@@ -3097,11 +2926,7 @@ struct FunctionChecker {
             importedPaths.contains("runtime"),
             name == "GC"
         {
-            guard arguments.isEmpty else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "too many arguments in call to runtime.GC")
-            }
+            try checkArguments(arguments, of: callee, declared: [], position: position)
             return .void
         }
         if let syncReceiverType = try? type(of: base) {
@@ -3119,11 +2944,7 @@ struct FunctionChecker {
                 syncReceiverIsPointer = false
             }
             if syncReceiverName == "sync.Mutex", name == "Lock" || name == "Unlock" {
-                guard arguments.isEmpty else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "too many arguments in call to \(name)")
-                }
+                try checkArguments(arguments, of: callee, declared: [], position: position)
                 guard syncReceiverIsPointer || isAddressable(base) else {
                     throw GoDiagnostic(
                         position: base.position,
@@ -3139,19 +2960,10 @@ struct FunctionChecker {
                 }
                 switch name {
                 case "Add":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to Add")
-                    }
-                    try require(arguments[0], assignableTo: .int)
+                    try checkArguments(arguments, of: callee, declared: [.int], position: position)
                     return .void
                 case "Done", "Wait":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to \(name)")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return .void
                 default:
                     break
@@ -3160,18 +2972,10 @@ struct FunctionChecker {
             if syncReceiverName == "context.Context" {
                 switch name {
                 case "Done":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to Done")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return .channel(direction: .receiveOnly, element: .int)
                 case "Err":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to Err")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return GoPredeclared.errorType
                 default:
                     break
@@ -3181,20 +2985,16 @@ struct FunctionChecker {
                 switch name {
                 case "Read", "Write":
                     guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to \(name)")
+                        throw try argumentCountMismatch(
+                            arguments, of: callee, declared: [.slice(GoPredeclared.byte)],
+                            position: position)
                     }
                     if try type(of: arguments[0]) != .slice(GoPredeclared.byte) {
-                        try require(arguments[0], assignableTo: .slice(.int))
+                        try requireArgument(arguments[0], as: .slice(.int), of: callee)
                     }
                     return .int
                 case "Close":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to Close")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return GoPredeclared.errorType
                 default:
                     break
@@ -3203,18 +3003,10 @@ struct FunctionChecker {
             if syncReceiverName == "net.Listener" {
                 switch name {
                 case "Accept":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to Accept")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return .named("net.Conn")
                 case "Close":
-                    guard arguments.isEmpty else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "too many arguments in call to Close")
-                    }
+                    try checkArguments(arguments, of: callee, declared: [], position: position)
                     return GoPredeclared.errorType
                 default:
                     break
@@ -3251,19 +3043,8 @@ struct FunctionChecker {
             let export = resolvePackageExport(packageName),
             let funcExport = export.functions[name]
         {
-            guard arguments.count == funcExport.parameters.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to \(packageName).\(name)")
-            }
-            for (argument, paramType) in zip(arguments, funcExport.parameters) {
-                let argType = try type(of: argument)
-                guard try isAssignable(argument, ofType: argType, to: paramType) else {
-                    throw GoDiagnostic(
-                        position: argument.position,
-                        message: "cannot use \(argType) as \(paramType) value in argument to \(packageName).\(name)")
-                }
-            }
+            try checkArguments(
+                arguments, of: callee, declared: funcExport.parameters, position: position)
             return funcExport.results.first ?? .void
         }
         if let packageName = importedPackage(named: base) {
@@ -3273,7 +3054,7 @@ struct FunctionChecker {
                 position: callee.position, message: "undefined: \(packageName).\(name)")
         }
         let baseType = try type(of: base)
-        try requireVisible(name, in: baseType, at: callee.position)
+        try requireVisible(name, of: base, in: baseType, at: callee.position)
         if let lent = try promotedCallResults(
             callee, baseType: baseType, arguments: arguments, position: position, single: true)
         {
@@ -3301,43 +3082,29 @@ struct FunctionChecker {
             if case .interface(let methods) = underlying(baseType),
                 let method = methods.first(where: { $0.name == name })
             {
-                let (arguments, parameters) = matched(arguments, to: method.parameters)
-                guard arguments.count == parameters.count else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to \(name)")
-                }
-                for (argument, parameterType) in zip(arguments, parameters) {
-                    try require(argument, assignableTo: parameterType)
-                }
+                try checkArguments(
+                    arguments, of: callee, declared: method.parameters, position: position)
                 return method.results.first ?? .void
             }
             // A field that holds a function is called like a method.
             if let field = structFields(of: baseType)?.first(where: { $0.name == name }),
                 let results = try resultsOfCall(
-                    through: field.type, named: name, arguments: arguments, position: position)
+                    through: field.type, callee: callee, arguments: arguments, position: position)
             {
                 return results.first ?? .void
             }
-            throw GoDiagnostic(
-                position: callee.position,
-                message: "\(baseType) has no field or method \(name)")
+            if let field = structFields(of: baseType)?.first(where: { $0.name == name }) {
+                throw invalidOperand("cannot call non-function", callee, ofType: field.type)
+            }
+            throw undefinedSelection(name, of: base, ofType: baseType, at: callee.position)
         }
         if match.first == "*", case .named = baseType, !isAddressable(base) {
             throw GoDiagnostic(
-                position: base.position,
-                message: "cannot call pointer method on non-addressable value")
+                position: callee.position,
+                message: "cannot call pointer method \(name) on \(baseType)")
         }
-        let (arguments, parameters) = matched(arguments, to: signature.parameters)
-        guard arguments.count <= parameters.count else {
-            throw GoDiagnostic(position: position, message: "too many arguments in call to \(name)")
-        }
-        guard arguments.count == parameters.count else {
-            throw GoDiagnostic(position: position, message: "not enough arguments in call to \(name)")
-        }
-        for (argument, parameterType) in zip(arguments, parameters) {
-            try require(argument, assignableTo: parameterType)
-        }
+        try checkArguments(
+            arguments, of: callee, declared: signature.parameters, position: position)
         return signature.results.first ?? .void
     }
 
@@ -3350,12 +3117,8 @@ struct FunctionChecker {
     ) throws -> GoType {
         switch expression {
         case .identifier(let name, let position):
-            guard let binding = lookup(name) else {
-                throw GoDiagnostic(position: position, message: Self.undeclaredMessage(name))
-            }
-            guard !binding.isConstant else {
-                throw GoDiagnostic(position: position, message: "cannot assign to \(name)")
-            }
+            guard let binding = lookup(name) else { throw unassignableName(name, at: position) }
+            guard !binding.isConstant else { throw unassignable(expression) }
             if asTarget {
                 // Assigned and not read, which a literal does to a variable
                 // around it through the same pointer.
@@ -3368,16 +3131,15 @@ struct FunctionChecker {
             return binding.type
         case .selector(let base, let name, let position):
             let baseType = try assignableType(of: base)
-            try requireVisible(name, in: baseType, at: position)
+            try requireVisible(name, of: base, in: baseType, at: position)
             if let lent = try promotedType(
                 base: base, baseType: baseType, name: name, at: position, assignable: true)
             {
                 return lent
             }
             guard let field = structFields(of: baseType)?.first(where: { $0.name == name }) else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "\(baseType) has no field or method \(name)")
+                if methodSignature(of: baseType, named: name) != nil { throw unassignable(expression) }
+                throw undefinedSelection(name, of: base, ofType: baseType, at: position)
             }
             return field.type
         case .unary(.dereference, let operand, let position):
@@ -3392,30 +3154,26 @@ struct FunctionChecker {
             switch underlying(baseType) {
             case .array(_, let element):
                 guard isInteger(try type(of: index)) else {
-                    throw GoDiagnostic(position: index.position, message: "index must be integer")
+                    throw nonIntegerIndex(index)
                 }
                 _ = try assignableType(of: base)
                 return element
             case .slice(let element):
                 guard isInteger(try type(of: index)) else {
-                    throw GoDiagnostic(position: index.position, message: "index must be integer")
+                    throw nonIntegerIndex(index)
                 }
                 return element
             case .pointer where throughArrayPointer(baseType) != baseType:
                 return try elementType(behind: baseType, index: index)
             case .map(let keyType, let valueType):
-                let indexType = try type(of: index)
-                guard try isAssignable(index, ofType: indexType, to: keyType) else {
-                    throw GoDiagnostic(
-                        position: index.position,
-                        message: "cannot use \(indexType) as \(keyType) value in map index")
-                }
+                try requireUse(index, as: keyType, in: "map index")
                 return valueType
             default:
-                throw GoDiagnostic(position: position, message: "cannot assign to index expression")
+                _ = position
+                throw unassignable(expression)
             }
         default:
-            throw GoDiagnostic(position: expression.position, message: "cannot assign to expression")
+            throw unassignable(expression)
         }
     }
 
@@ -3430,34 +3188,29 @@ struct FunctionChecker {
             let signature = functionSignatures[name],
             signature.results.count > 1
         {
-            throw GoDiagnostic(
-                position: position,
-                message: "multiple-value \(name)() (value of type (\(signature.results.map(\.description).joined(separator: ", ")))) in single-value context")
-        } else if case .selector(let base, let name, _) = callee,
+            _ = position
+            throw severalValues(expression, results: signature.results)
+        } else if case .selector(let base, _, _) = callee,
             !(base == .identifier("fmt", position: base.position) && importedPaths.contains("fmt"))
         {
             let results = (try? callResultTypes(
                 callee: callee, arguments: arguments, position: callPosition)) ?? []
-            if results.count > 1 {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "multiple-value \(name)() in single-value context")
-            }
+            if results.count > 1 { throw severalValues(expression, results: results) }
         }
     }
 
     /// Requires `expression` to have a value: not a call without a result
     /// or with several, and not an untyped `nil`, which has no type to give
     /// a variable.
-    mutating func requireValue(_ expression: GoExpression) throws {
+    mutating func requireValue(
+        _ expression: GoExpression, in context: String = "assignment"
+    ) throws {
         try requireSingleValue(expression, at: expression.position)
         let valueType = try type(of: expression)
-        guard valueType != .void else {
-            throw GoDiagnostic(position: expression.position, message: "no value used as value")
-        }
+        guard valueType != .void else { throw noValue(expression) }
         guard valueType != .nilType else {
             throw GoDiagnostic(
-                position: expression.position, message: "use of untyped nil in assignment")
+                position: expression.position, message: "use of untyped nil in \(context)")
         }
     }
 
@@ -3480,10 +3233,7 @@ struct FunctionChecker {
             try callType(of: expression, callee: callee, arguments: arguments, position: position)
                 != .void
         else { return }
-        throw GoDiagnostic(
-            position: expression.start,
-            message: "multiple-value \(calledName(callee))() (value of type "
-                + "(\(results.map(\.description).joined(separator: ", ")))) in single-value context")
+        throw severalValues(expression, results: results)
     }
 
     /// `return f()` in a function of one result, where `f` has several: Go
@@ -3493,8 +3243,8 @@ struct FunctionChecker {
             severalResults(of: value) != nil
         else { return }
         // What is wrong with the call itself comes first.
-        _ = try callType(of: value, callee: callee, arguments: arguments, position: position)
-        throw GoDiagnostic(position: value.start, message: "too many return values")
+        let results = try callResultTypes(callee: callee, arguments: arguments, position: position)
+        throw returnCountMismatch(of: value, results: results)
     }
 
     /// The results of the call `expression` when it has several.
@@ -3587,25 +3337,6 @@ struct FunctionChecker {
         return try? type(of: expression)
     }
 
-    /// How a message names a call of `callee`: by what is called, where Go
-    /// prints the call as the source has it.
-    func calledName(_ callee: GoExpression) -> String {
-        switch callee {
-        case .identifier(let name, _):
-            return name
-        case .selector(let base, let name, _):
-            if let packageName = importedPackage(named: base) { return packageName + "." + name }
-            if let receiver = GoMethodExpression.receiver(of: base),
-                lookup(receiver.typeName) == nil, typeDefinitions[receiver.typeName] != nil
-            {
-                return GoMethodExpression.spelling(receiver, name)
-            }
-            return name
-        default:
-            return "function"
-        }
-    }
-
     /// Whether a call of `callee` with `arguments` passes on the results of
     /// its only argument: a call of several results, which Go passes in
     /// order. `f(g()...)` is neither that nor a slice to spread.
@@ -3613,12 +3344,12 @@ struct FunctionChecker {
         _ arguments: [GoExpression], to callee: GoExpression
     ) throws -> Bool {
         guard arguments.count == 1 else { return false }
-        if let operand = arguments[0].spreadOperand, case .call(let inner, _, _) = operand,
+        if let operand = arguments[0].spreadOperand, case .call = operand,
             let results = severalResults(of: operand)
         {
             throw GoDiagnostic(
                 position: callee.start,
-                message: "cannot use ... with \(results.count)-valued \(calledName(inner))()")
+                message: "cannot use ... with \(results.count)-valued \(spelling(of: operand))")
         }
         return try GoForwardedResults.call(in: arguments, of: callee) != nil
             && severalResults(of: arguments[0]) != nil && conversionTarget(callee) == nil
@@ -3643,6 +3374,7 @@ struct FunctionChecker {
             try callResultTypes(
                 callee: inner.callee, arguments: inner.arguments, position: inner.position),
             at: arguments[0].start)
+        noteForwardedCall(arguments[0])
         if case .identifier(let name, let namePosition) = callee, lookup(name) == nil,
             functionSignatures[name] == nil
         {
@@ -3733,9 +3465,11 @@ struct FunctionChecker {
             guard scopes[scopes.count - 1][name] == nil, seen.insert(name).inserted else {
                 // Go reports a name declared twice where the name is.
                 let places = namePositions[position.offset] ?? []
-                throw GoDiagnostic(
-                    position: index < places.count ? places[index] : position,
-                    message: "\(name) redeclared in this block")
+                let first = names.firstIndex(of: name) ?? index
+                throw GoDiagnostic.redeclared(
+                    name, at: index < places.count ? places[index] : position,
+                    other: scopes[scopes.count - 1][name]?.position
+                        ?? (first < index && first < places.count ? places[first] : nil))
             }
         }
         if values.isEmpty {
@@ -3753,37 +3487,29 @@ struct FunctionChecker {
             switch values[0] {
             case .call, .index, .typeAssertion, .unary(.receive, _, _): break
             default:
-                throw GoDiagnostic(
-                    position: position,
-                    message: Self.mismatch(variables: names.count, values: 1))
+                throw try countMismatch(variables: names.count, values: values)
             }
             try check(.multiDeclaration(names: names, expression: values[0], position: position))
             if let declared {
                 for name in names where name != GoValueList.blank {
                     guard let found = scopes[scopes.count - 1][name]?.type, found == declared else {
-                        throw GoDiagnostic(
-                            position: values[0].position,
-                            message: "cannot use a value of another type as \(declared) value in assignment")
+                        throw cannotUseResult(
+                            of: values[0], type: scopes[scopes.count - 1][name]?.type ?? .void,
+                            as: declared, in: "assignment")
                     }
                 }
             }
             return
         }
         guard values.count == names.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: Self.mismatch(variables: names.count, values: values.count))
+            throw try arityMismatch(names, values: values, isConstant: false, position: position)
         }
         var types: [GoType] = []
         for value in values {
             try requireValueOrNil(value, declared: declared)
             let valueType = try self.type(of: value)
             if let declared {
-                guard try isAssignable(value, ofType: valueType, to: declared) else {
-                    throw GoDiagnostic(
-                        position: value.position,
-                        message: "cannot use \(valueType) as \(declared) value in variable declaration")
-                }
+                try requireUse(value, ofType: valueType, as: declared, in: "variable declaration")
                 types.append(declared)
             } else {
                 types.append(valueType)
@@ -3798,7 +3524,7 @@ struct FunctionChecker {
     /// `nil` then has one, and a typed value otherwise.
     mutating func requireValueOrNil(_ expression: GoExpression, declared: GoType?) throws {
         if declared != nil, try type(of: expression) == .nilType { return }
-        try requireValue(expression)
+        try requireValue(expression, in: "variable declaration")
     }
 
     /// `a, b := x, y`. A name the block already declares is assigned, as
@@ -3809,9 +3535,7 @@ struct FunctionChecker {
         position: GoSourcePosition
     ) throws {
         guard names.count == values.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: Self.mismatch(variables: names.count, values: values.count))
+            throw try countMismatch(variables: names.count, values: values)
         }
         var seen: Set<String> = []
         var added: [(name: String, type: GoType)] = []
@@ -3828,15 +3552,10 @@ struct FunctionChecker {
             let valueType = try type(of: value)
             if let existing = scopes[scopes.count - 1][name] {
                 guard !existing.isConstant else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "cannot assign to \(name) (neither addressable nor a map index expression)")
+                    // A `:=` that names a constant: Go says no more.
+                    throw GoDiagnostic(position: position, message: "cannot assign to \(name)")
                 }
-                guard try isAssignable(value, ofType: valueType, to: existing.type) else {
-                    throw GoDiagnostic(
-                        position: value.position,
-                        message: "cannot use \(valueType) as \(existing.type) value in assignment")
-                }
+                try requireUse(value, ofType: valueType, as: existing.type, in: "assignment")
             } else {
                 try requireValue(value)
                 added.append((name, valueType))
@@ -3850,34 +3569,14 @@ struct FunctionChecker {
         }
     }
 
-    mutating func require(_ expression: GoExpression, assignableTo expected: GoType) throws {
-        let actual = try type(of: expression)
-        guard try isAssignable(expression, ofType: actual, to: expected) else {
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "cannot use \(actual) as \(expected) value")
-        }
-    }
 
-    /// The second argument of `http.HandleFunc`: a function of a response
-    /// writer and a request.
-    mutating func requireHandler(_ expression: GoExpression) throws {
-        let expected = GoType.function(
-            parameters: [.named("http.ResponseWriter"), .pointer(.named("http.Request"))], results: [])
-        let actual = try type(of: expression)
-        guard try isAssignable(expression, ofType: actual, to: expected) else {
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "cannot use \(actual) as \(expected) value in argument to http.HandleFunc")
-        }
-    }
-
-    mutating func requireBool(_ expression: GoExpression) throws {
+    mutating func requireBool(_ expression: GoExpression, in statement: String) throws {
         let expressionType = try type(of: expression)
         guard isBool(expressionType) else {
+            if expressionType == .void { throw noValue(expression) }
             throw GoDiagnostic(
-                position: expression.position,
-                message: "non-boolean condition in control statement")
+                position: Self.start(of: expression, in: namePositions),
+                message: "non-boolean condition in \(statement)")
         }
     }
 
@@ -3905,11 +3604,10 @@ struct FunctionChecker {
                         throw GoDiagnostic(
                             position: position, message: GoTypeSwitch.misplacedGuardMessage)
                     }
-                    throw GoDiagnostic(
-                        position: position,
-                        message: GoPredeclared.unsupportedNumericTypes.contains(name)
-                            ? GoPredeclared.unsupportedTypeMessage(name)
-                            : "undefined: \(name)")
+                    throw GoPredeclared.unsupportedNumericTypes.contains(name)
+                        ? GoDiagnostic(
+                            position: position, message: GoPredeclared.unsupportedTypeMessage(name))
+                        : GoDiagnostic.undefinedType(name, at: position)
                 }
                 return .named(name)
             }
@@ -3918,9 +3616,10 @@ struct FunctionChecker {
             return .structure(
                 try fields.map { field in
                     guard names.insert(field.name).inserted else {
-                        throw GoDiagnostic(
-                            position: field.position,
-                            message: "\(field.name) redeclared in this block")
+                        throw GoDiagnostic.redeclared(
+                            field.name, at: field.position,
+                            other: fields.first { $0.name == field.name }?.position,
+                            inBlock: false)
                     }
                     return GoStructFieldType(field, type: try declaredType(field.type))
                 })
@@ -4085,21 +3784,17 @@ struct FunctionChecker {
         let leftType = try type(of: operands[0])
         if bitwiseOperator == .complement {
             guard isInteger(leftType) else {
-                throw GoDiagnostic(
-                    position: position, message: "operator ^ not defined on \(leftType)")
+                throw undefinedOperator("^", on: operands[0], ofType: leftType)
             }
             return leftType
         }
         let rightType = try type(of: operands[1])
         guard isInteger(leftType), isInteger(rightType) else {
-            throw GoDiagnostic(
-                position: position,
-                message: "operator \(bitwiseOperator.spelling) requires integer operands")
+            throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
         }
         if bitwiseOperator.isShift {
             if let count = untypedConstantValue(operands[1]), count < 0 {
-                throw GoDiagnostic(
-                    position: operands[1].position, message: "invalid negative shift count \(count)")
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
             }
             return leftType
         }
@@ -4107,8 +3802,7 @@ struct FunctionChecker {
             let common = try commonIntegerType(
                 left: operands[0], leftType: leftType, right: operands[1], rightType: rightType)
         else {
-            throw GoDiagnostic(
-                position: position, message: "mismatched types \(leftType) and \(rightType)")
+            throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
         }
         return common
     }
@@ -4161,8 +3855,6 @@ struct FunctionChecker {
             return numeric
         }
         let source = try type(of: argument)
-        let failure = GoDiagnostic(
-            position: argument.position, message: "cannot convert \(source) to type \(target)")
         let sourceShape = underlying(source)
         switch underlying(target) {
         case .int:
@@ -4170,12 +3862,12 @@ struct FunctionChecker {
                 try requireConstant(value, representableAs: target, at: argument.position)
                 return target
             }
-            guard sourceShape == .int else { throw failure }
+            guard sourceShape == .int else { throw cannotConvert(argument, ofType: source, to: target) }
             return target
         case .string:
             if sourceShape == .string || sourceShape == .int { return target }
             if case .slice(let element) = sourceShape, isByte(element) { return target }
-            throw failure
+            throw cannotConvert(argument, ofType: source, to: target)
         case .slice(let element) where isByte(element) && sourceShape == .string:
             return target
         case .bool, .slice, .map, .pointer, .channel, .function:
@@ -4183,21 +3875,21 @@ struct FunctionChecker {
             // and a channel to one of its directions, as it is assigned.
             if source == .nilType {
                 // `Handler(nil)`: nil is a value of every type that has one.
-                guard underlying(target) != .bool else { throw failure }
+                guard underlying(target) != .bool else { throw cannotConvert(argument, ofType: source, to: target) }
                 return target
             }
             guard sourceShape == underlying(target) || isAssignable(source, to: target) else {
-                throw failure
+                throw cannotConvert(argument, ofType: source, to: target)
             }
             return target
         case .interface, .structure, .array:
             // `Reader(rw)`, `error(e)`, `any(x)`: whatever may be assigned
             // to an interface converts to it; struct and array types
             // convert by their structure.
-            guard source != .void, isConvertible(source, to: target) else { throw failure }
+            guard source != .void, isConvertible(source, to: target) else { throw cannotConvert(argument, ofType: source, to: target) }
             return target
         default:
-            throw failure
+            throw cannotConvert(argument, ofType: source, to: target)
         }
     }
 
@@ -4226,50 +3918,6 @@ struct FunctionChecker {
         let name = packageName + "." + member
         let named = GoTypeExpression.named(name, position: base.position)
         return (try? declaredType(named)) == nil ? nil : name
-    }
-
-    /// Requires `argument` to be assignable to a parameter of type
-    /// `expected` of the library function `function`, and names the
-    /// function when it is not, as the report for a function of the program
-    /// does.
-    mutating func requireArgument(
-        _ argument: GoExpression, assignableTo expected: GoType, of function: String
-    ) throws {
-        let actual = try type(of: argument)
-        guard try isAssignable(argument, ofType: actual, to: expected) else {
-            throw GoDiagnostic(
-                position: argument.position,
-                message: "cannot use \(actual) as \(expected) value in argument to \(function)")
-        }
-    }
-
-    /// The same for a native call written as `callee`. Only a duration
-    /// that is refused names the call: an `int` where one is wanted is the
-    /// mistake a program written for durations as integers makes, and the
-    /// call is what tells the reader which value to convert.
-    mutating func requireArgument(
-        _ argument: GoExpression, assignableTo expected: GoType, ofCall callee: GoExpression
-    ) throws {
-        guard expected == GoLibraryTypes.duration, let name = spelling(callee) else {
-            return try require(argument, assignableTo: expected)
-        }
-        try requireArgument(argument, assignableTo: expected, of: name)
-    }
-
-    /// How the source writes `expression` when it is a name, a selection
-    /// from one, or a call of one without arguments (`time.Now().Add`);
-    /// nil for anything longer.
-    func spelling(_ expression: GoExpression) -> String? {
-        switch expression {
-        case .identifier(let name, _):
-            return name
-        case .selector(let base, let name, _):
-            return spelling(base).map { $0 + "." + name }
-        case .call(let callee, let arguments, _) where arguments.isEmpty:
-            return spelling(callee).map { $0 + "()" }
-        default:
-            return nil
-        }
     }
 
     /// Checks a call to a native library function or `*os.File` method and
@@ -4302,16 +3950,16 @@ struct FunctionChecker {
             ? arguments.count >= parameters.count
             : arguments.count == parameters.count
         else {
-            throw GoDiagnostic(
-                position: position,
-                message: "wrong number of arguments in call to \(function.goName)")
+            throw try argumentCountMismatch(
+                arguments, of: callee, declared: function.declared(parameters),
+                position: position)
         }
         // The writer of `fmt.Fprint` is a file or anything with `Write`.
         let writes = try checkFormatWriter(function, arguments: arguments, position: position)
         for (argument, parameter) in zip(arguments, parameters).dropFirst(writes ? 1 : 0) {
-            try requireArgument(argument, assignableTo: parameter, ofCall: callee)
+            try requireArgument(argument, as: parameter, of: callee)
         }
-        try checkAnyOperands(arguments.dropFirst(parameters.count))
+        try checkAnyOperands(arguments.dropFirst(parameters.count), of: callee)
         return function
     }
 
@@ -4332,31 +3980,31 @@ struct FunctionChecker {
         let results = try? callResultTypes(
             callee: write.callee, arguments: write.arguments, position: position)
         guard results == [.int, GoPredeclared.errorType] else {
-            throw GoDiagnostic(
-                position: writer.position,
-                message: "cannot use \(writerType) as io.Writer value in argument to \(function.goName)")
+            throw noWriter(writer, ofType: writerType, in: "argument to \(function.goName)")
         }
         return true
     }
 
     /// Checks the operands of a `...any` parameter: any number of values, or
     /// one `[]any` followed by `...`.
-    mutating func checkAnyOperands(_ operands: ArraySlice<GoExpression>) throws {
+    mutating func checkAnyOperands(
+        _ operands: ArraySlice<GoExpression>, of callee: GoExpression
+    ) throws {
         if operands.count == 1, let operand = operands.first?.spreadOperand {
             let operandType = try type(of: operand)
             guard case .slice(let element) = underlying(operandType),
                 case .interface(let methods) = underlying(element), methods.isEmpty
             else {
-                throw GoDiagnostic(
-                    position: operand.position,
-                    message: "cannot use \(operandType) as []interface{} value in argument")
+                throw cannotUse(
+                    operand, ofType: operandType, as: .slice(.interface([])),
+                    in: "argument to " + calleeSpelling(callee))
             }
             return
         }
         for argument in operands where try type(of: argument) == .void {
-            throw GoDiagnostic(position: argument.position, message: "no value used as value")
+            throw noValue(argument)
         }
-        for argument in operands { try requireDefaultValue(argument) }
+        for argument in operands { try requireDefault(argument, of: callee) }
     }
 
     func structFields(of type: GoType) -> [GoStructFieldType]? {
@@ -4590,6 +4238,7 @@ struct FunctionChecker {
     /// full-screen programs, or `nil` when `name` is not one of them.
     mutating func userlandTerminalResults(
         _ name: String,
+        callee: GoExpression,
         arguments: [GoExpression],
         position: GoSourcePosition
     ) throws -> [GoType]? {
@@ -4611,35 +4260,23 @@ struct FunctionChecker {
         default:
             return nil
         }
-        guard arguments.count == parameters.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: "wrong number of arguments in call to userland.\(name)")
-        }
-        for (argument, parameter) in zip(arguments, parameters) {
-            try require(argument, assignableTo: parameter)
-        }
+        try checkArguments(arguments, of: callee, declared: parameters, position: position)
         return results
     }
 
     /// Check a call to a supported `strings` function and return its result.
     mutating func stringsCallResult(
         _ name: String,
+        callee: GoExpression,
         arguments: [GoExpression],
         position: GoSourcePosition
     ) throws -> GoType {
         guard let function = GoStringsFunction(goName: name) else {
-            throw GoDiagnostic(position: position, message: "undefined: strings.\(name)")
+            throw GoDiagnostic(position: callee.position, message: "undefined: strings.\(name)")
         }
         let signature = function.signature
-        guard arguments.count == signature.parameters.count else {
-            throw GoDiagnostic(
-                position: position,
-                message: "wrong number of arguments in call to strings.\(name)")
-        }
-        for (argument, parameter) in zip(arguments, signature.parameters) {
-            try require(argument, assignableTo: parameter)
-        }
+        try checkArguments(
+            arguments, of: callee, declared: signature.parameters, position: position)
         return signature.result
     }
 
@@ -4654,7 +4291,7 @@ struct FunctionChecker {
         if case .identifier(let name, let namePosition) = callee {
             if let binding = lookup(name),
                 let results = try resultsOfCall(
-                    through: binding.type, named: name, arguments: arguments, position: position)
+                    through: binding.type, callee: callee, arguments: arguments, position: position)
             {
                 return results
             }
@@ -4663,20 +4300,8 @@ struct FunctionChecker {
                     position: namePosition,
                     message: uncallableMessage(name) ?? "undefined: \(name)")
             }
-            let (arguments, parameters) = matched(arguments, to: signature.parameters)
-            guard arguments.count == parameters.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to \(name)")
-            }
-            for (argument, parameterType) in zip(arguments, parameters) {
-                let argumentType = try type(of: argument)
-                guard try isAssignable(argument, ofType: argumentType, to: parameterType) else {
-                    throw GoDiagnostic(
-                        position: argument.position,
-                        message: "cannot use \(argumentType) as \(parameterType) value in argument to \(name)")
-                }
-            }
+            try checkArguments(
+                arguments, of: callee, declared: signature.parameters, position: position)
             return signature.results
         }
         if try isOperatorOrConversion(
@@ -4703,38 +4328,32 @@ struct FunctionChecker {
                 importedPaths.contains("strconv"),
                 name == "Atoi"
             {
-                guard arguments.count == 1 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to strconv.Atoi")
-                }
-                try require(arguments[0], assignableTo: .string)
+                try checkArguments(arguments, of: callee, declared: [.string], position: position)
                 return [.int, GoPredeclared.errorType]
             }
             if case .identifier("userland", _) = base,
                 importedPaths.contains("swiftix/userland"),
                 name == "ReadInput"
             {
-                guard arguments.count == 2 else {
-                    throw GoDiagnostic(
-                        position: position,
-                        message: "wrong number of arguments in call to userland.ReadInput")
-                }
-                try require(arguments[0], assignableTo: .string)
-                try require(arguments[1], assignableTo: .slice(.string))
+                try checkArguments(
+                    arguments, of: callee, declared: [.string, .slice(.string)],
+                    position: position)
                 return [.string, .int]
             }
             if case .identifier("userland", _) = base,
                 importedPaths.contains("swiftix/userland"),
                 let results = try userlandTerminalResults(
-                    name, arguments: arguments, position: position)
+                    name, callee: callee, arguments: arguments, position: position)
             {
                 return results
             }
             if case .identifier("strings", _) = base,
                 importedPaths.contains("strings")
             {
-                return [try stringsCallResult(name, arguments: arguments, position: position)]
+                return [
+                    try stringsCallResult(
+                        name, callee: callee, arguments: arguments, position: position)
+                ]
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "context",
@@ -4742,23 +4361,14 @@ struct FunctionChecker {
             {
                 switch name {
                 case "WithCancel":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to context.WithCancel")
-                    }
-                    try require(arguments[0], assignableTo: .named("context.Context"))
+                    try checkArguments(
+                        arguments, of: callee, declared: [.named("context.Context")],
+                        position: position)
                     return [.named("context.Context"), .named("context.CancelFunc")]
                 case "WithTimeout":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to context.WithTimeout")
-                    }
-                    try require(arguments[0], assignableTo: .named("context.Context"))
-                    try requireArgument(
-                        arguments[1], assignableTo: GoLibraryTypes.duration,
-                        of: "context.WithTimeout")
+                    try checkArguments(
+                        arguments, of: callee, declared: [.named("context.Context"), GoLibraryTypes.duration],
+                        position: position)
                     return [.named("context.Context"), .named("context.CancelFunc")]
                 default:
                     break
@@ -4770,30 +4380,19 @@ struct FunctionChecker {
             {
                 switch name {
                 case "Dial":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.Dial")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    try require(arguments[1], assignableTo: .string)
+                    try checkArguments(
+                        arguments, of: callee, declared: [.string, .string],
+                        position: position)
                     return [.named("net.Conn"), GoPredeclared.errorType]
                 case "Listen":
-                    guard arguments.count == 2 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.Listen")
-                    }
-                    try require(arguments[0], assignableTo: .string)
-                    try require(arguments[1], assignableTo: .string)
+                    try checkArguments(
+                        arguments, of: callee, declared: [.string, .string],
+                        position: position)
                     return [.named("net.Listener"), GoPredeclared.errorType]
                 case "LookupHost":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to net.LookupHost")
-                    }
-                    try require(arguments[0], assignableTo: .string)
+                    try checkArguments(
+                        arguments, of: callee, declared: [.string],
+                        position: position)
                     return [.slice(.string), GoPredeclared.errorType]
                 default:
                     break
@@ -4815,12 +4414,9 @@ struct FunctionChecker {
             {
                 switch name {
                 case "Get":
-                    guard arguments.count == 1 else {
-                        throw GoDiagnostic(
-                            position: position,
-                            message: "wrong number of arguments in call to http.Get")
-                    }
-                    try require(arguments[0], assignableTo: .string)
+                    try checkArguments(
+                        arguments, of: callee, declared: [.string],
+                        position: position)
                     return [.named("http.Response"), GoPredeclared.errorType]
                 default:
                     break
@@ -4831,7 +4427,7 @@ struct FunctionChecker {
                     position: callee.position, message: "undefined: \(packageName).\(name)")
             }
             let baseType = try type(of: base)
-            try requireVisible(name, in: baseType, at: callee.position)
+            try requireVisible(name, of: base, in: baseType, at: callee.position)
             if let lent = try promotedCallResults(
                 callee, baseType: baseType, arguments: arguments, position: position, single: false)
             {
@@ -4867,28 +4463,22 @@ struct FunctionChecker {
             if signature == nil,
                 let field = structFields(of: baseType)?.first(where: { $0.name == name }),
                 let results = try resultsOfCall(
-                    through: field.type, named: name, arguments: arguments, position: position)
+                    through: field.type, callee: callee, arguments: arguments, position: position)
             {
                 return results
             }
             guard let signature else {
-                throw GoDiagnostic(
-                    position: callee.position,
-                    message: "\(baseType) has no field or method \(name)")
+                if let field = structFields(of: baseType)?.first(where: { $0.name == name }) {
+                    throw invalidOperand("cannot call non-function", callee, ofType: field.type)
+                }
+                throw undefinedSelection(name, of: base, ofType: baseType, at: callee.position)
             }
-            let (arguments, parameters) = matched(arguments, to: signature.parameters)
-            guard arguments.count == parameters.count else {
-                throw GoDiagnostic(
-                    position: position,
-                    message: "wrong number of arguments in call to \(name)")
-            }
-            for (argument, parameterType) in zip(arguments, parameters) {
-                try require(argument, assignableTo: parameterType)
-            }
+            try checkArguments(
+                arguments, of: callee, declared: signature.parameters, position: position)
             return signature.results
         }
         if let results = try resultsOfCall(
-            through: try type(of: callee), named: "function", arguments: arguments,
+            through: try type(of: callee), callee: callee, arguments: arguments,
             position: position)
         {
             return results
@@ -4957,6 +4547,8 @@ extension FunctionChecker {
     static func start(
         of expression: GoExpression, in positions: [Int: [GoSourcePosition]]
     ) -> GoSourcePosition {
+        // In parentheses, it begins at the outermost of them.
+        if let open = positions[GoParenthesized.key(of: expression.position)]?.last { return open }
         switch expression {
         case .call(let callee, let arguments, let position):
             if let grouped = expression.groupedResult { return start(of: grouped.value, in: positions) }
@@ -4968,8 +4560,7 @@ extension FunctionChecker {
                 return arguments.first.map { start(of: $0, in: positions) } ?? position
             }
             return positions[position.offset]?.first ?? start(of: callee, in: positions)
-        case .selector(let base, _, _), .typeAssertion(let base, _, _),
-            .index(let base, _, _), .slicing(let base, _, _, _):
+        case .selector(let base, _, _), .typeAssertion(let base, _, _), .index(let base, _, _):
             return start(of: base, in: positions)
         case .binary(let left, _, _, _):
             return start(of: left, in: positions)
@@ -4987,12 +4578,13 @@ extension FunctionChecker {
         for (parameter, parameterType) in zip(parameters, types)
         where parameter.name != GoValueList.blank {
             guard scopes[scopes.count - 1][parameter.name] == nil else {
-                throw GoDiagnostic(
-                    position: parameter.position,
-                    message: "\(parameter.name) redeclared in this block")
+                throw GoDiagnostic.redeclared(
+                    parameter.name, at: parameter.position,
+                    other: scopes[scopes.count - 1][parameter.name]?.position)
             }
             scopes[scopes.count - 1][parameter.name] = Binding(
-                type: parameterType.parameterType, isConstant: false)
+                type: parameterType.parameterType, isConstant: false,
+                position: parameter.position, isUsed: true)
         }
     }
 
@@ -5018,9 +4610,9 @@ extension FunctionChecker {
         else { return }
         if explicitType == nil, !isConstant { try requireNewVariables([name], at: position) }
         guard scopes[scopes.count - 1][name] == nil else {
-            throw GoDiagnostic(
-                position: namePositions[position.offset]?.first ?? position,
-                message: "\(name) redeclared in this block")
+            throw GoDiagnostic.redeclared(
+                name, at: namePositions[position.offset]?.first ?? position,
+                other: scopes[scopes.count - 1][name]?.position)
         }
     }
 
@@ -5127,13 +4719,9 @@ extension FunctionChecker {
     /// has, where the expression begins.
     mutating func requireConstant(_ expression: GoExpression?, ofType type: GoType?) throws {
         guard let expression, let type, isNotConstant(expression) else { return }
-        var subject = "value of type \(type)"
-        if case .identifier(let name, _) = expression {
-            subject = "\(name) (\(lookup(name) == nil ? "value" : "variable") of type \(type))"
-        }
         throw GoDiagnostic(
             position: Self.start(of: expression, in: namePositions),
-            message: subject + " is not constant")
+            message: describe(expression, ofType: type) + " is not constant")
     }
 
     // MARK: Package-level variables
@@ -5145,11 +4733,17 @@ extension FunctionChecker {
     ) throws {
         let actual = try initializerType(of: expression)
         if isConstant { try requireConstant(expression, ofType: actual) }
-        guard try isAssignable(expression, ofType: actual, to: expected) else {
-            throw GoDiagnostic(
-                position: Self.start(of: expression, in: namePositions),
-                message: "cannot use \(actual) as \(expected) value")
+        if let grouped = expression.groupedResult {
+            // One of the values of `var a, b T = f()`.
+            guard try isAssignable(expression, ofType: actual, to: expected) else {
+                throw cannotUseResult(
+                    of: grouped.value, type: actual, as: expected, in: "assignment")
+            }
+            return
         }
+        try requireUse(
+            expression, ofType: actual, as: expected,
+            in: isConstant ? "constant declaration" : "variable declaration")
     }
 
     /// The type of the value of a package-level variable: of the
@@ -5168,16 +4762,13 @@ extension FunctionChecker {
         case .call(let callee, let arguments, let position):
             types = try callResultTypes(callee: callee, arguments: arguments, position: position)
             guard types.count == count else {
-                throw GoDiagnostic(
-                    position: names,
-                    message:
-                        "assignment mismatch: \(count) variables but function returns \(types.count) values")
+                throw resultCountMismatch(variables: count, call: value, results: types.count)
             }
         case .index(let base, let key, _):
             guard case .map(let keyType, let valueType) = underlying(try type(of: base)) else {
                 break
             }
-            try require(key, assignableTo: keyType)
+            try requireUse(key, as: keyType, in: "map index")
             types = [valueType, .bool]
         case .typeAssertion(_, let assertedType, _):
             _ = try type(of: value)
@@ -5237,7 +4828,9 @@ extension FunctionChecker {
     /// Refuses the selection of a hidden field or method, as Go does where
     /// the name is. A name the type does not have at all is left to the
     /// report that says so.
-    mutating func requireVisible(_ name: String, in type: GoType, at position: GoSourcePosition) throws {
+    mutating func requireVisible(
+        _ name: String, of base: GoExpression, in type: GoType, at position: GoSourcePosition
+    ) throws {
         guard isHidden(name, in: type) else { return }
         let kind: String
         if structFields(of: type)?.contains(where: { $0.name == name }) == true {
@@ -5252,7 +4845,9 @@ extension FunctionChecker {
             return
         }
         throw GoDiagnostic(
-            position: position, message: "cannot refer to unexported \(kind) \(name)")
+            position: position,
+            message: "\(base.spelledAsOperand(in: namePositions)).\(name) undefined "
+                + "(cannot refer to unexported \(kind) \(name))")
     }
 
     /// A struct literal may not name a field that is hidden.
@@ -5295,14 +4890,8 @@ extension FunctionChecker {
     ) throws {
         try requireSingleResult(of: expression)
         let actual = try type(of: expression)
-        guard actual != .void else {
-            throw GoDiagnostic(position: expression.position, message: "no value used as value")
-        }
-        guard try isAssignable(expression, ofType: actual, to: expected) else {
-            throw GoDiagnostic(
-                position: expression.position,
-                message: "cannot use \(actual) as \(expected) value in \(context)")
-        }
+        guard actual != .void else { throw noValue(expression) }
+        try requireUse(expression, ofType: actual, as: expected, in: context)
     }
 
     /// The elements of a struct literal: every one names its field, or none
@@ -5441,7 +5030,7 @@ extension FunctionChecker {
         guard case .array(_, let element) = underlying(throughArrayPointer(pointer)),
             isInteger(try type(of: index))
         else {
-            throw GoDiagnostic(position: index.position, message: "index must be integer")
+            throw nonIntegerIndex(index)
         }
         return element
     }
@@ -5464,11 +5053,7 @@ extension FunctionChecker {
     mutating func literalIndex(_ written: GoExpression) throws -> Int {
         guard case .integer(let value, let position) = written else {
             let writtenType = try type(of: written)
-            guard isInteger(writtenType) else {
-                throw GoDiagnostic(
-                    position: written.position,
-                    message: "cannot convert \(writtenType) to type int")
-            }
+            guard isInteger(writtenType) else { throw nonIntegerIndex(written) }
             throw GoDiagnostic(
                 position: written.position,
                 message: "index \(written.sourceSpelling) must be integer constant")
@@ -5518,17 +5103,6 @@ extension FunctionChecker {
         isInteger(type) || isString(type) || isFloat(type)
     }
 
-    /// An operand as Go describes it in a message: a variable by its name
-    /// and type, anything else by its type.
-    func operandDescription(_ expression: GoExpression, ofType type: GoType) -> String {
-        if case .identifier(let name, _) = expression, let binding = lookup(name),
-            !binding.isConstant
-        {
-            return "\(name) (variable of type \(type))"
-        }
-        return "\(expression.sourceSpelling) (value of type \(type))"
-    }
-
     /// The type of a call of `new`, `min`, `max`, or `clear`, or nil when
     /// `callee` is none of them or the program has given the name another
     /// meaning.
@@ -5568,7 +5142,7 @@ extension FunctionChecker {
                 throw GoDiagnostic(
                     position: arguments[0].position,
                     message: "invalid argument: cannot clear "
-                        + operandDescription(arguments[0], ofType: cleared)
+                        + describe(arguments[0], ofType: cleared)
                         + ": argument must be (or constrained by) map or slice")
             }
             return .void
@@ -5583,7 +5157,7 @@ extension FunctionChecker {
         orMore: Bool = false
     ) throws {
         if arguments.count == count || (orMore && arguments.count > count) { return }
-        let call = name + "(" + arguments.map(\.sourceSpelling).joined(separator: ", ") + ")"
+        let call = name + "(" + argumentList(arguments) + ")"
         throw GoDiagnostic(
             position: position,
             message: "invalid operation: "
@@ -5623,7 +5197,7 @@ extension FunctionChecker {
                 throw GoDiagnostic(
                     position: argument.position,
                     message: "invalid argument: "
-                        + operandDescription(argument, ofType: argumentType)
+                        + describe(argument, ofType: argumentType)
                         + " cannot be ordered")
             }
             let isConstant = isUntypedConstant(argument)
@@ -5676,11 +5250,11 @@ extension FunctionChecker {
             ["len", "cap", "append", "make", "new", "min", "max"].contains(name),
             isPredeclared(name)
         {
-            _ = try type(of: expression)
+            let described = describe(expression, ofType: try type(of: expression))
             throw GoDiagnostic(
                 position: position,
-                message: keyword.map { "\($0) discards result of \(expression.sourceSpelling)" }
-                    ?? "\(expression.sourceSpelling) is not used")
+                message: keyword.map { "\($0) discards result of \(described)" }
+                    ?? "\(described) is not used")
         }
         try checkCallStatement(expression)
     }

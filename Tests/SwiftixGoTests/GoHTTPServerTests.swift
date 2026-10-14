@@ -332,17 +332,17 @@ struct GoHTTPServerTests: GoTestHarness {
         #expect(diagnostic(body("http.Nope()")) == "5:7: undefined: http.Nope")
         #expect(
             diagnostic(body("http.HandleFunc(\"/\", 42)"))
-                == "5:23: cannot use int as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
+                == "5:23: cannot use 42 (untyped int constant) as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
         #expect(
-            diagnostic(body("var h http.Handler = 1\n\t_ = h"))?
-                .hasSuffix("cannot use int as http.Handler value") == true)
+            diagnostic(body("var h http.Handler = 1\n\t_ = h"))
+                == "5:23: cannot use 1 (constant of type int) as http.Handler value in variable declaration: int does not implement http.Handler (missing method ServeHTTP)")
         #expect(
             diagnostic("package main\nimport \"net/http\"\nfunc main() {}\n")
                 == "2:8: \"net/http\" imported and not used")
         #expect(
             diagnostic(
                 "package main\nimport \"fmt\"\nfunc main() {\n\tfmt.Fprintln(42, \"x\")\n}\n")
-                == "4:15: cannot use int as io.Writer value in argument to fmt.Fprintln")
+                == "4:15: cannot use 42 (constant of type int) as io.Writer value in argument to fmt.Fprintln: int does not implement io.Writer (missing method Write)")
     }
 
     // MARK: - Natives

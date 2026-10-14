@@ -505,7 +505,7 @@ extension FunctionChecker {
             operandTypesInHand = wordOperandTypes(expression, left, right, leftType, rightType)
             return nil
         }
-        return try numericBinaryType(
+        return try checkedNumericBinaryType(
             expression, left, binaryOperator, right, leftType, rightType, position)
     }
 
@@ -564,8 +564,7 @@ extension FunctionChecker {
         guard let leftKind = numericKind(leftType) else { return nil }
         if bitwiseOperator == .complement {
             guard leftKind.isInteger else {
-                throw GoDiagnostic(
-                    position: position, message: "operator ^ not defined on \(leftType)")
+                throw undefinedOperator("^", on: operands[0], ofType: leftType)
             }
             if let folded = try constant(of: expression) {
                 return noteDefault(folded, for: expression)
@@ -575,13 +574,12 @@ extension FunctionChecker {
         }
         let rightType = try type(of: operands[1])
         guard let rightKind = numericKind(rightType) else { return nil }
-        let mistake = GoDiagnostic(
-            position: position,
-            message: "operator \(bitwiseOperator.spelling) requires integer operands")
         guard bitwiseOperator.isShift else {
-            guard leftKind.isInteger, rightKind.isInteger else { throw mistake }
-            let operandType = try commonNumericType(
-                operands[0], leftType, operands[1], rightType, at: position)
+            guard leftKind.isInteger, rightKind.isInteger else {
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
+            }
+            let operandType = try checkedBitwiseOperandType(
+                bitwiseOperator, operands, leftType, rightType, at: position)
             if let folded = try constant(of: expression) {
                 return noteDefault(folded, for: expression)
             }
@@ -591,18 +589,22 @@ extension FunctionChecker {
         // A shift count is a number of its own: any integer, or a constant
         // with an integer value that is not negative.
         if let count = try constant(of: operands[1]) {
-            guard count.value.isInteger else { throw mistake }
+            guard count.value.isInteger else {
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
+            }
             guard count.value.signum >= 0 else {
-                throw GoDiagnostic(
-                    position: operands[1].position,
-                    message: "invalid negative shift count \(count.text)")
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
             }
             if count.isUntyped { try adopt(operands[1], as: .int) }
         } else {
-            guard rightKind.isInteger else { throw mistake }
+            guard rightKind.isInteger else {
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
+            }
         }
         if let shifted = try constant(of: operands[0]) {
-            guard shifted.value.isInteger, shifted.type.map(isFloat) != true else { throw mistake }
+            guard shifted.value.isInteger, shifted.type.map(isFloat) != true else {
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
+            }
             if let folded = try constant(of: expression) {
                 return noteDefault(folded, for: expression)
             }
@@ -613,16 +615,16 @@ extension FunctionChecker {
             // An untyped constant shifted by a variable: an integer of its
             // default type, until the place it is used gives it another.
             guard shifted.kind != .float else {
-                throw GoDiagnostic(
-                    position: operands[0].startPosition,
-                    message: "invalid operation: shifted operand (type float64) must be integer")
+                throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
             }
             let type = shifted.kind.defaultType
             try adopt(operands[0], as: type)
             noteOperation(expression, at: type)
             return type
         }
-        guard leftKind.isInteger else { throw mistake }
+        guard leftKind.isInteger else {
+            throw bitwiseMistake(bitwiseOperator, operands, leftType, rightType, at: position)
+        }
         noteOperation(expression, at: leftType)
         return leftType
     }
@@ -705,8 +707,6 @@ extension FunctionChecker {
         _ target: GoType, argument: GoExpression, at position: GoSourcePosition
     ) throws -> GoType? {
         let source = try type(of: argument)
-        let failure = GoDiagnostic(
-            position: argument.position, message: "cannot convert \(source) to type \(target)")
         if isNumeric(target) {
             guard isNumeric(source) else { return nil }
             if let operand = try constant(of: argument) {
@@ -735,7 +735,7 @@ extension FunctionChecker {
         }
         // `string(x)` takes an integer, which is a code point.
         if underlying(target) == .string {
-            guard sourceKind.isInteger else { throw failure }
+            guard sourceKind.isInteger else { throw cannotConvert(argument, ofType: source, to: target) }
             if let constant = try constant(of: argument), constant.isUntyped {
                 try adopt(argument, as: constant.kind == .float ? .int : constant.kind.defaultType)
             }

@@ -167,21 +167,21 @@ struct GoArrayPointerTests: GoTestHarness {
                 var p *[]int
                 fmt.Println(p[0])
                 """)
-                == "cannot index expression")
+                == "invalid operation: cannot index p (variable of type *[]int)")
         #expect(
             goMainDiagnostic(
                 """
                 var p *int
                 fmt.Println(p[0])
                 """)
-                == "cannot index expression")
+                == "invalid operation: cannot index p (variable of type *int)")
         #expect(
             goMainDiagnostic(
                 """
                 var p *[]int
                 fmt.Println(len(p))
                 """)
-                == "invalid argument for len")
+                == "invalid argument: p (variable of type *[]int) for built-in len")
         #expect(
             goMainDiagnostic(
                 """
@@ -189,6 +189,6 @@ struct GoArrayPointerTests: GoTestHarness {
                 for range p {
                 }
                 """)
-                == "cannot range over *[]int")
+                == "cannot range over p (variable of type *[]int)")
     }
 }

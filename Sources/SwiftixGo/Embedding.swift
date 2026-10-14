@@ -599,21 +599,6 @@ extension GoEmbedding {
         }
     }
 
-    /// `expression` as a message writes the operand of a selector: Go
-    /// quotes the source, of which the names are enough for the usual one.
-    static func spelling(_ expression: GoExpression) -> String {
-        switch expression {
-        case .identifier(let name, _): return name
-        case .selector(let base, let name, _): return spelling(base) + "." + name
-        case .unary(.dereference, let operand, _): return "(*" + spelling(operand) + ")"
-        case .unary(.address, let operand, _): return "(&" + spelling(operand) + ")"
-        case .index(let base, _, _): return spelling(base) + "[...]"
-        case .call(let callee, _, _): return spelling(callee) + "(...)"
-        case .compositeLiteral(.named(let name, _), _, _): return name + "{...}"
-        default: return "value"
-        }
-    }
-
     /// Go's rules for what a struct type may embed, which need the
     /// declarations of the program to check.
     static func validate(_ files: [GoFile]) throws {

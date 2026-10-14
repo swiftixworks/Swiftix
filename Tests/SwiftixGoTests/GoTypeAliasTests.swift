@@ -282,11 +282,11 @@ struct GoTypeAliasTests: GoTestHarness {
         // Not where it is declared, and by the type it stands for.
         #expect(
             diagnostic("package main\ntype A = int\nfunc (a A) M() {}\nfunc main() {}\n")
-                == "main.go:3:9: invalid receiver type int")
+                == "main.go:3:9: cannot define new methods on non-local type int")
         #expect(
             diagnostic(
                 "package main\ntype T struct{ X int }\ntype A = T\ntype U T\nfunc main() {\n var a A\n var u U = a\n _ = u\n}\n")
-                == "main.go:7:12: cannot use T as U value")
+                == "main.go:7:12: cannot use a (variable of struct type T) as U value in variable declaration")
     }
 
     @Test func gofmtAlignsTheNamesOfAGroup() throws {

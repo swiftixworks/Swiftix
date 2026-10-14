@@ -409,13 +409,13 @@ struct GoImportNameTests: GoTestHarness {
 
         #expect(
             diagnostic(program(" f \"fmt\"\n f \"os\"", " f.Println(1)"))
-                == "main.go:4:2: f redeclared in this block")
+                == "main.go:4:2: f redeclared in this block\n\tmain.go:3:2: other declaration of f")
         #expect(
             diagnostic(program(" \"fmt\"\n fmt \"strings\"", " fmt.Println(1)"))
-                == "main.go:4:2: fmt redeclared in this block")
+                == "main.go:4:2: fmt redeclared in this block\n\tmain.go:3:2: other declaration of fmt")
         #expect(
             diagnostic(program(" \"os\"\n \"os\"", " os.Exit(0)"))
-                == "main.go:4:2: os redeclared in this block")
+                == "main.go:4:2: os redeclared in this block\n\tmain.go:3:2: other declaration of os")
         // Under another name the package's own is not declared.
         #expect(
             diagnostic(program(" f \"fmt\"", " fmt.Println(1)\n f.Println(2)"))
@@ -423,7 +423,7 @@ struct GoImportNameTests: GoTestHarness {
         // A name a declaration hides is that declaration.
         #expect(
             diagnostic(program(" f \"fmt\"", " f.Print()\n f := 3\n f.Println(f)"))
-                == "main.go:8:4: int has no field or method Println")
+                == "main.go:8:4: f.Println undefined (type int has no field or method Println)")
     }
 
     @Test func anImportMustBeUsed() {
@@ -473,7 +473,7 @@ struct GoImportNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 "package main\nimport (\n f \"fmt\"\n s \"strings\"\n)\nfunc main() {\n f.Println(s.ToUpper(\"a\", \"b\"))\n}\n")
-                == "main.go:7:21: wrong number of arguments in call to s.ToUpper")
+                == "main.go:7:27: too many arguments in call to s.ToUpper\n\thave (string, string)\n\twant (string)")
         // Each name on a line is the one written there.
         #expect(
             diagnostic(
@@ -483,7 +483,7 @@ struct GoImportNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 "package main\nimport (\n f \"fmt\"\n stdtime \"time\"\n)\nfunc main() {\n var t stdtime.Time = 1\n f.Println(t)\n}\n")
-                == "main.go:7:23: cannot use int as time.Time value")
+                == "main.go:7:23: cannot use 1 (untyped int constant) as time.Time value in variable declaration")
         // And a package the file does not rename by the name it has.
         #expect(
             diagnostic(

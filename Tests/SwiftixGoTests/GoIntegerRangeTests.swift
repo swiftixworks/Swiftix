@@ -178,29 +178,29 @@ struct GoIntegerRangeTests: GoTestHarness {
                 """)
                 == "5:5: declared and not used: i")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 for i, v := range 10 {
                     _, _ = i, v
                 }
                 """)
-                == "range over int permits only one iteration variable")
+                == "5:8: range over 10 (untyped int constant) permits only one iteration variable")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 c := make(chan int)
                 for i, v := range c {
                     _, _ = i, v
                 }
                 """)
-                == "range over chan int permits only one iteration variable")
+                == "6:8: range over c (variable of type chan int) permits only one iteration variable")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 for i := range true {
                     fmt.Println(i)
                 }
                 """)
-                == "cannot range over bool")
+                == "5:16: cannot range over true (untyped bool constant)")
     }
 }

@@ -143,7 +143,7 @@ struct GoTypeEncoder {
             if fields.isEmpty { return "struct {}" }
             return "struct { "
                 + fields.map { $0.name + " " + goTypeName($0.type) }.joined(separator: "; ") + " }"
-        default: return type.description
+        default: return type.legacyDescription
         }
     }
 }

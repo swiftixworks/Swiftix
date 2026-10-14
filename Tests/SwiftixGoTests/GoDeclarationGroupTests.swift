@@ -138,7 +138,7 @@ struct GoDeclarationGroupTests: GoTestHarness {
                 == "assignment mismatch: 2 variables but 1 value")
         #expect(
             diagnostic(program("const (\n\ta, b = 1, 2\n\tc\n)"))
-                == "assignment mismatch: 1 variable but 2 values")
+                == "extra init expr at main.go:3:12")
         #expect(diagnostic(program("var (\n\ta = 1\n\ta = 2\n)")) != nil)
         #expect(diagnostic(program("var (\n\ta = 1")) != nil)
         #expect(diagnostic("package main\nimport (\n\t1\n)\nfunc main() {}\n") == "expected import path")

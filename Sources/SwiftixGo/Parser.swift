@@ -257,7 +257,9 @@ private struct Parser {
         let keywordPosition = current.position
         let isConstant = check(.constant)
         advance()
-        func checked(_ specification: ValueSpecification) throws -> ValueSpecification {
+        func checked(
+            _ specification: ValueSpecification, inherited: Bool = false
+        ) throws -> ValueSpecification {
             let names = specification.names.count
             let values = specification.values.count
             if isConstant, values == 0 {
@@ -274,11 +276,26 @@ private struct Parser {
             // function; otherwise there is a value for each name.
             guard values == 0 || values == names || (values == 1 && names > 1 && !isConstant)
             else {
+                // As Go words it: the first value too many, or the first
+                // name without one.
+                guard names > values else {
+                    let extra = specification.values[names]
+                    let place = FunctionChecker.start(of: extra, in: namePositions)
+                    // Values a specification of a `const` group repeats are
+                    // too many where it is, and are written where they are.
+                    guard !inherited else {
+                        throw GoDiagnostic(
+                            position: specification.position,
+                            message: "extra init expr at \(GoDiagnostic.place(place))")
+                    }
+                    throw GoDiagnostic(
+                        position: place,
+                        message: "extra init expr \(extra.spelled(in: namePositions))")
+                }
+                let places = namePositions[specification.position.offset] ?? []
                 throw GoDiagnostic(
-                    position: specification.position,
-                    message:
-                        "assignment mismatch: \(names) variable\(names == 1 ? "" : "s") but \(values) value\(values == 1 ? "" : "s")"
-                )
+                    position: values < places.count ? places[values] : specification.position,
+                    message: "missing init expr for \(specification.names[values])")
             }
             return specification
         }
@@ -304,10 +321,12 @@ private struct Parser {
         while !check(.rightParen) {
             guard !check(.eof) else { throw diagnostic("expected ')'") }
             var specification = try parseValueSpecification()
+            var inherited = false
             if isConstant {
                 if specification.values.isEmpty, specification.type == nil, let repeated {
                     specification.type = repeated.type
                     specification.values = repeated.values
+                    inherited = true
                 } else {
                     repeated = specification
                 }
@@ -319,7 +338,7 @@ private struct Parser {
                 }
             }
             declare(specification.names)
-            list.append(try checked(specification))
+            list.append(try checked(specification, inherited: inherited))
             if check(.semicolon) {
                 skipSemicolons()
             } else if !check(.rightParen) {
@@ -379,7 +398,7 @@ private struct Parser {
         case .call, .index, .typeAssertion, .unary(.receive, _, _): break
         default:
             throw GoDiagnostic(
-                position: specification.position,
+                position: FunctionChecker.start(of: specification.values[0], in: namePositions),
                 message: "assignment mismatch: \(names.count) variables but 1 value")
         }
         return names.indices.map { index in
@@ -544,9 +563,12 @@ private struct Parser {
                 }
                 let methodPosition = current.position
                 let methodName = try expectIdentifier(message: "expected method name")
-                if methods.contains(where: { $0.name == methodName }) {
+                if let other = methods.first(where: { $0.name == methodName }) {
                     throw GoDiagnostic(
-                        position: methodPosition, message: "duplicate method \(methodName)")
+                        position: methodPosition,
+                        message: "duplicate method \(methodName)\n\t"
+                            + GoDiagnostic.place(other.position)
+                            + ": other declaration of method \(methodName)")
                 }
                 try expect(.leftParen, message: "expected '('")
                 let parameters = try parseSignatureTypes()
@@ -1483,8 +1505,8 @@ private struct Parser {
                 let names = try targets.map { expr -> String in
                     guard case .identifier(let name, _) = expr else {
                         throw GoDiagnostic(
-                            position: expr.position,
-                            message: "non-name on left side of :=")
+                            position: FunctionChecker.start(of: expr, in: namePositions),
+                            message: "non-name \(expr.spelled(in: namePositions)) on left side of :=")
                     }
                     return name
                 }
@@ -1511,7 +1533,9 @@ private struct Parser {
                     message: "cannot declare in post statement of for loop")
             }
             guard case .identifier(let name, _) = target else {
-                throw GoDiagnostic(position: position, message: "non-name on left side of :=")
+                throw GoDiagnostic(
+                    position: position,
+                    message: "non-name \(target.spelled(in: namePositions)) on left side of :=")
             }
             advance()
             noteShortDeclaration(at: position, names: [position])
@@ -1539,6 +1563,8 @@ private struct Parser {
             }
             advance()
             let value = try parseExpression(allowCompositeLiteral: allowCompositeLiteral)
+            // A message about the operation writes it as the source does.
+            namePositions[GoCompoundAssignment.key(of: operatorPosition)] = [position]
             return .assignment(
                 target: target,
                 expression: compound.apply(to: target, value, position: operatorPosition),
@@ -1806,6 +1832,10 @@ private struct Parser {
             let close = current.position.offset
             try expect(.rightParen, message: "expected ')'")
             parentheses.record(around: expression, open: token.position.offset, close: close)
+            // A message writes the expression with its parentheses, and
+            // reports it where the outermost of them is.
+            namePositions[GoParenthesized.key(of: expression.position), default: []].append(
+                token.position)
             noteCallStart(token.position)
             return expression
         case .leftBracket:

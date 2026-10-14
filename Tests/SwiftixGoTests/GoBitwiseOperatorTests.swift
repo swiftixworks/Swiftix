@@ -90,15 +90,15 @@ struct GoBitwiseOperatorTests: GoTestHarness {
     }
 
     @Test func invalidOperandsAreDiagnosed() {
-        #expect(goMainDiagnostic("fmt.Println(\"a\" | 1)") == "operator | requires integer operands")
-        #expect(goMainDiagnostic("fmt.Println(true & false)") == "operator & requires integer operands")
-        #expect(goMainDiagnostic("fmt.Println(1 << \"2\")") == "operator << requires integer operands")
-        #expect(goMainDiagnostic("fmt.Println(^true)") == "operator ^ not defined on bool")
-        #expect(goMainDiagnostic("fmt.Println(1 << -1)") == "invalid negative shift count -1")
+        #expect(goMainDiagnostic("fmt.Println(\"a\" | 1)") == "invalid operation: \"a\" | 1 (mismatched types untyped string and untyped int)")
+        #expect(goMainDiagnostic("fmt.Println(true & false)") == "invalid operation: operator & not defined on true (untyped bool constant)")
+        #expect(goMainDiagnostic("fmt.Println(1 << \"2\")") == "cannot convert \"2\" (untyped string constant) to type uint")
+        #expect(goMainDiagnostic("fmt.Println(^true)") == "invalid operation: operator ^ not defined on true (untyped bool constant)")
+        #expect(goMainDiagnostic("fmt.Println(1 << -1)") == "invalid operation: negative shift count -1 (untyped int constant)")
         #expect(
             goMainDiagnostic("s := \"a\"\ni := 1\nfmt.Println(s[0] | i)")
-                == "mismatched types byte and int")
-        #expect(goMainDiagnostic("a := 1\na | 2") == "expression evaluated but not used")
+                == "invalid operation: s[0] | i (mismatched types byte and int)")
+        #expect(goMainDiagnostic("a := 1\na | 2") == "a | 2 (value of type int) is not used")
         #expect(goMainDiagnostic("a := 1\nfmt.Println(a |)") == "expected expression")
         #expect(goMainDiagnostic("var | int") == "expected name in declaration")
     }

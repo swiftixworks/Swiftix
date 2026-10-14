@@ -37,13 +37,13 @@ struct GoIntegerLiteralTests: GoTestHarness {
     @Test func literalsBeyondInt64AreRejected() {
         #expect(
             goMainDiagnostic("x := 9223372036854775808\nfmt.Println(x)")
-                == "constant 9223372036854775808 overflows int")
+                == "cannot use 9223372036854775808 (untyped int constant) as int value in assignment (overflows)")
         #expect(
             goMainDiagnostic("x := 0x8000000000000000\nfmt.Println(x)")
-                == "constant 9223372036854775808 overflows int")
+                == "cannot use 0x8000000000000000 (untyped int constant 9223372036854775808) as int value in assignment (overflows)")
         #expect(
             goMainDiagnostic("x := 0xfffffffffffffffffffffffffffffffff\nfmt.Println(x)")
-                == "constant 5444517870735015415413993718908291383295 overflows int")
+                == "cannot use 0xfffffffffffffffffffffffffffffffff (untyped int constant 5444517870735015415413993718908291383295) as int value in assignment (overflows)")
         #expect(
             goMainDiagnostic("var b byte = 0x100\nfmt.Println(b)")?.contains("256") == true)
     }

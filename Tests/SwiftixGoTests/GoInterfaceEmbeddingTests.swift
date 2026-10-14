@@ -268,7 +268,7 @@ struct GoInterfaceEmbeddingTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var i I
                 var j J = i
@@ -281,9 +281,9 @@ struct GoInterfaceEmbeddingTests: GoTestHarness {
                         N()
                     }
                     """)
-                == "cannot use I as J value")
+                == "10:11: cannot use i (variable of interface type I) as J value in variable declaration: I does not implement J (missing method N)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var j J = t{}
                 _ = j
@@ -298,7 +298,7 @@ struct GoInterfaceEmbeddingTests: GoTestHarness {
 
                     func (v t) M() {}
                     """)
-                == "cannot use t as J value")
+                == "12:11: cannot use t{} (value of struct type t) as J value in variable declaration: t does not implement J (missing method N)")
     }
 
     /// Two embedded interfaces, or one and the interface itself, may have a
@@ -377,7 +377,7 @@ struct GoInterfaceEmbeddingTests: GoTestHarness {
                         M() int
                     }
                     """)
-                == "6:5: duplicate method M")
+                == "6:5: duplicate method M\n\tmain.go:4:5: other declaration of method M")
     }
 
     /// Itself, directly or through another; a type that is not declared;

@@ -104,9 +104,11 @@ private struct Resolver: GoScopedRewriter {
             default:
                 let name = declaration.name ?? ownName
                 guard packages.updateValue(ownName, forKey: name) == nil else {
-                    throw GoDiagnostic(
-                        position: declaration.position,
-                        message: "\(name) redeclared in this block")
+                    throw GoDiagnostic.redeclared(
+                        name, at: declaration.position,
+                        other: file.imports.first {
+                            ($0.name ?? GoImportName.defaultName(ofPath: $0.path)) == name
+                        }?.position)
                 }
             }
         }

@@ -460,7 +460,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                 case int, int:
                 }
                 """)
-                == "7:11: duplicate case int in type switch")
+                == "7:11: duplicate case int in type switch\n\tmain.go:7:6: previous case")
         #expect(
             firstError(
                 """
@@ -471,7 +471,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                 case []int:
                 }
                 """)
-                == "9:6: duplicate case []int in type switch")
+                == "9:6: duplicate case []int in type switch\n\tmain.go:7:6: previous case")
         #expect(
             firstError(
                 """
@@ -481,7 +481,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                 case nil:
                 }
                 """)
-                == "8:6: duplicate case nil in type switch")
+                == "8:6: duplicate case nil in type switch\n\tmain.go:7:6: previous case")
         #expect(
             firstError(
                 """
@@ -490,7 +490,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                 case int:
                 }
                 """)
-                == "7:6: impossible type switch case: int")
+                == "7:6: impossible type switch case: int\n\tx (variable of interface type error) cannot have dynamic type int (missing method Error)")
         #expect(
             firstError(
                 """
@@ -505,7 +505,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                     type T struct{}
                     func (t *T) M() {}
                     """)
-                == "10:6: impossible type switch case: T")
+                == "10:6: impossible type switch case: T\n\tx (variable of interface type I) cannot have dynamic type T (method M has pointer receiver)")
         #expect(
             firstError(
                 """
@@ -540,16 +540,16 @@ struct GoTypeSwitchTests: GoTestHarness {
                 """)
                 == "6:5: invalid syntax tree: use of .(type) outside type switch")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 1
                 switch x.(type) {
                 case int:
                 }
                 """)
-                == "int is not an interface")
+                == "6:8: x (variable of type int) is not an interface")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var x any = 1
                 switch x.(type) {
@@ -557,7 +557,7 @@ struct GoTypeSwitchTests: GoTestHarness {
                 default:
                 }
                 """)
-                == "multiple defaults (first at main.go:7:1)")
+                == "8:1: multiple defaults (first at main.go:7:1)")
         #expect(
             goMainDiagnostic(
                 """

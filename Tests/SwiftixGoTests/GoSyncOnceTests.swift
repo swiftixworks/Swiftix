@@ -201,7 +201,7 @@ struct GoSyncOnceTests: GoTestHarness {
                 fmt.Println(1)
                 """,
                 imports: ["fmt", "sync"])
-                == "cannot use int as func() value")
+                == "cannot use 1 (untyped int constant) as func() value in argument to once.Do")
         #expect(
             goMainDiagnostic(
                 """
@@ -210,7 +210,7 @@ struct GoSyncOnceTests: GoTestHarness {
                 fmt.Println(1)
                 """,
                 imports: ["fmt", "sync"])
-                == "cannot use func() int as func() value")
+                == "cannot use func() int {…} (value of type func() int) as func() value in argument to once.Do")
         #expect(
             goMainDiagnostic(
                 """
@@ -219,7 +219,7 @@ struct GoSyncOnceTests: GoTestHarness {
                 fmt.Println(1)
                 """,
                 imports: ["fmt", "sync"])
-                == "not enough arguments in call to Do")
+                == "not enough arguments in call to once.Do\n\thave ()\n\twant (func())")
         #expect(
             goMainDiagnostic(
                 """
@@ -228,7 +228,7 @@ struct GoSyncOnceTests: GoTestHarness {
                 fmt.Println(1)
                 """,
                 imports: ["fmt", "sync"])
-                == "sync.Once has no field or method Done")
+                == "once.Done undefined (type \"sync\".Once has no field or method Done, but does have unexported field done)")
         #expect(
             goMainDiagnostic(
                 """

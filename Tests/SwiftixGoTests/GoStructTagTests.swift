@@ -91,7 +91,7 @@ struct GoStructTagTests: GoTestHarness {
                         A int `a`
                     }
                     """)
-                == #"cannot use T as struct{A int "b"} value"#)
+                == #"cannot use t (variable of struct type T) as struct{A int "b"} value in assignment"#)
         #expect(
             goMainDiagnostic(
                 """

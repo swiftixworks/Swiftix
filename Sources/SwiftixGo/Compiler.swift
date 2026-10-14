@@ -5603,7 +5603,7 @@ struct IRLowerer {
         }
         return functionValue(
             symbol: try libraryValueFunction(
-                named: "\(receiverType).\(member)", of: nil, member: member,
+                named: "\(receiverType.legacyDescription).\(member)", of: nil, member: member,
                 signature: signature),
             bound: [receiver])
     }

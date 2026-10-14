@@ -188,21 +188,21 @@ struct GoPackageDeclarationTests: GoTestHarness {
 
                     func three() (int, int, int) { return 1, 2, 3 }
                     """)
-                == "3:12: assignment mismatch: 2 variables but function returns 3 values")
+                == "3:12: assignment mismatch: 2 variables but three returns 3 values")
         #expect(
             firstError("", declarations: """
                     var a, b = one()
 
                     func one() int { return 1 }
                     """)
-                == "3:12: assignment mismatch: 2 variables but function returns 1 values")
+                == "3:12: assignment mismatch: 2 variables but one returns 1 value")
         #expect(
             firstError("", declarations: """
                     var a, b int = pair()
 
                     func pair() (int, string) { return 1, "a" }
                     """)
-                == "3:16: cannot use string as int value")
+                == "3:16: cannot use pair() (value of type string) as int value in assignment")
         #expect(
             firstError("", declarations: """
                     var table = map[string]int{}
@@ -360,7 +360,7 @@ struct GoPackageDeclarationTests: GoTestHarness {
                     var x = 1
                     var x = 2
                     """)
-                == "4:5: x redeclared in this block")
+                == "4:5: x redeclared in this block\n\tmain.go:3:5: other declaration of x")
         #expect(
             firstError("", declarations: """
                     var (
@@ -368,7 +368,7 @@ struct GoPackageDeclarationTests: GoTestHarness {
                         b, a = 2, 3
                     )
                     """)
-                == "5:8: a redeclared in this block")
+                == "5:8: a redeclared in this block\n\tmain.go:4:5: other declaration of a")
         #expect(
             firstError("", declarations: """
                     const (
@@ -376,31 +376,31 @@ struct GoPackageDeclarationTests: GoTestHarness {
                         y = 4
                     )
                     """)
-                == "5:5: y redeclared in this block")
+                == "5:5: y redeclared in this block\n\tmain.go:4:11: other declaration of y")
         #expect(
             firstError("", declarations: """
                     func f() {}
                     var f = 1
                     """)
-                == "4:5: f redeclared in this block")
+                == "4:5: f redeclared in this block\n\tmain.go:3:6: other declaration of f")
         #expect(
             firstError("", declarations: """
                     var f = 1
                     func f() {}
                     """)
-                == "4:6: f redeclared in this block")
+                == "4:6: f redeclared in this block\n\tmain.go:3:5: other declaration of f")
         #expect(
             firstError("", declarations: """
                     type f int
                     func f() {}
                     """)
-                == "4:6: f redeclared in this block")
+                == "4:6: f redeclared in this block\n\tmain.go:3:6: other declaration of f")
         #expect(
             firstError("", declarations: """
                     var _, x = 1, 2
                     var x = 3
                     """)
-                == "4:5: x redeclared in this block")
+                == "4:5: x redeclared in this block\n\tmain.go:3:8: other declaration of x")
         #expect(
             firstError(
                 """
@@ -408,7 +408,7 @@ struct GoPackageDeclarationTests: GoTestHarness {
                 var x = 2
                 fmt.Println(x)
                 """)
-                == "6:5: x redeclared in this block")
+                == "6:5: x redeclared in this block\n\tmain.go:5:5: other declaration of x")
         #expect(
             firstError(
                 """
@@ -416,7 +416,7 @@ struct GoPackageDeclarationTests: GoTestHarness {
                 var y, x = 2, 3
                 fmt.Println(x, y)
                 """)
-                == "6:8: x redeclared in this block")
+                == "6:8: x redeclared in this block\n\tmain.go:5:1: other declaration of x")
     }
 
     /// Nothing else may have those names in a package.
@@ -440,14 +440,14 @@ struct GoPackageDeclarationTests: GoTestHarness {
 
                     func (t) a() {}
                     """)
-                == "5:10: field and method with the same name a")
+                == "5:10: field and method with the same name a\n\tmain.go:3:16: other declaration of a")
         #expect(
             firstError("", declarations: """
                     type t struct{ a, b int }
 
                     func (x *t) b() int { return x.a }
                     """)
-                == "5:13: field and method with the same name b")
+                == "5:13: field and method with the same name b\n\tmain.go:3:19: other declaration of b")
     }
 
     /// A package-level value that names nothing is reported as that, where

@@ -292,28 +292,28 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var b int8 = 300
                 fmt.Println(b)
                 """)
-                == "constant 300 overflows int8")
+                == "cannot use 300 (untyped int constant) as int8 value in variable declaration (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 var b uint16 = -1
                 fmt.Println(b)
                 """)
-                == "constant -1 overflows uint16")
+                == "cannot use -1 (untyped int constant) as uint16 value in variable declaration (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 var b uint64 = 1 << 64
                 fmt.Println(b)
                 """)
-                == "constant 18446744073709551616 overflows uint64")
+                == "cannot use 1 << 64 (untyped int constant 18446744073709551616) as uint64 value in variable declaration (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 x := 1 << 64
                 fmt.Println(x)
                 """)
-                == "constant 18446744073709551616 overflows int")
+                == "cannot use 1 << 64 (untyped int constant 18446744073709551616) as int value in assignment (overflows)")
         #expect(
             goMainDiagnostic(
                 """
@@ -321,24 +321,24 @@ struct GoSizedIntegerTests: GoTestHarness {
                 x += 70000
                 fmt.Println(x)
                 """)
-                == "constant 70000 overflows int16")
+                == "70000 (untyped int constant) overflows int16")
         #expect(
             goMainDiagnostic("fmt.Println([]uint8{1, 256})")
-                == "constant 256 overflows byte")
+                == "cannot use 256 (untyped int constant) as byte value in array or slice literal (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 const c int8 = 100
                 fmt.Println(c * 2)
                 """)
-                == "constant 200 overflows int8")
+                == "c * 2 (constant 200 of type int8) overflows int8")
         #expect(
             goMainDiagnostic(
                 """
                 const k uint = 3
                 fmt.Println(-k)
                 """)
-                == "constant -3 overflows uint")
+                == "-k (constant -3 of type uint) overflows uint")
         #expect(
             goMainDiagnostic("fmt.Println(int8(-129))")
                 == "constant -129 overflows int8")
@@ -348,10 +348,10 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var x int32 = 5
                 fmt.Println(x / 0)
                 """)
-                == "division by zero")
+                == "invalid operation: division by zero")
         #expect(
             goMainDiagnostic("fmt.Println(f(1 << 40))", declarations: "func f(v int32) int32 { return v }")
-                == "constant 1099511627776 overflows int32")
+                == "cannot use 1 << 40 (untyped int constant 1099511627776) as int32 value in argument to f (overflows)")
     }
 
     /// Two integer types are two types: an operator takes operands of one,
@@ -364,7 +364,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var b int32 = 2
                 fmt.Println(a + b)
                 """)
-                == "mismatched types int and int32")
+                == "invalid operation: a + b (mismatched types int and int32)")
         #expect(
             goMainDiagnostic(
                 """
@@ -372,7 +372,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var b int = 2
                 fmt.Println(a == b)
                 """)
-                == "mismatched types int64 and int")
+                == "invalid operation: a == b (mismatched types int64 and int)")
         #expect(
             goMainDiagnostic(
                 """
@@ -380,10 +380,10 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var b uint16 = 2
                 fmt.Println(a | b)
                 """)
-                == "mismatched types byte and uint16")
+                == "invalid operation: a | b (mismatched types byte and uint16)")
         #expect(
             goMainDiagnostic("fmt.Println(int32(1) + int64(2))")
-                == "mismatched types int32 and int64")
+                == "invalid operation: int32(1) + int64(2) (mismatched types int32 and int64)")
         #expect(
             goMainDiagnostic(
                 """
@@ -391,7 +391,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var i int = r
                 fmt.Println(i)
                 """)
-                == "cannot use int32 as int value")
+                == "cannot use r (variable of type int32) as int value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -400,7 +400,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                     fmt.Println(x)
                 }
                 """)
-                == "cannot use int32 as int value")
+                == "cannot use r (variable of type int32) as int value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -408,7 +408,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 fmt.Println(f(n))
                 """,
                 declarations: "func f(v int32) int32 { return v }")
-                == "cannot use int as int32 value in argument to f")
+                == "cannot use n (variable of type int) as int32 value in argument to f")
         #expect(
             goMainDiagnostic(
                 """
@@ -420,7 +420,7 @@ struct GoSizedIntegerTests: GoTestHarness {
 
                     func f(id ID) ID { return id }
                     """)
-                == "cannot use int64 as ID value in argument to f")
+                == "cannot use i (variable of type int64) as ID value in argument to f")
         #expect(
             goMainDiagnostic(
                 """
@@ -428,7 +428,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 var u uint = p
                 fmt.Println(u)
                 """)
-                == "cannot use uintptr as uint value")
+                == "cannot use p (variable of type uintptr) as uint value in variable declaration")
         #expect(
             try runGoMain(
                 """
@@ -868,7 +868,7 @@ struct GoSizedIntegerTests: GoTestHarness {
                 """)
         #expect(
             goMainDiagnostic("fmt.Println(math.MaxUint64)", imports: ["fmt", "math"])
-                == "constant 18446744073709551615 overflows int")
+                == "cannot use math.MaxUint64 (untyped int constant 18446744073709551615) as int value in argument to fmt.Println (overflows)")
         #expect(
             try runGoMain(
                 #"""

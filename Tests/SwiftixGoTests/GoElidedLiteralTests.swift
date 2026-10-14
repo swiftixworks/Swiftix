@@ -552,20 +552,20 @@ struct GoElidedLiteralTests: GoTestHarness {
             goMainDiagnostic("fmt.Println([]*int{{1}})")
                 == "invalid composite literal element type int")
         #expect(
-            goMainDiagnostic("fmt.Println([]point{{1, \"a\"}})", declarations: """
+            firstError("fmt.Println([]point{{1, \"a\"}})", declarations: """
                     type point struct{ X, Y int }
                     type line struct{ A, B point }
                     """)
-                == "cannot use string as int value in struct literal")
+                == "6:25: cannot use \"a\" (untyped string constant) as int value in struct literal")
         #expect(
-            goMainDiagnostic("fmt.Println(map[string][]int{\"a\": {1, \"b\"}})")
-                == "cannot use string as int value in array or slice literal")
+            firstError("fmt.Println(map[string][]int{\"a\": {1, \"b\"}})")
+                == "5:39: cannot use \"b\" (untyped string constant) as int value in array or slice literal")
         #expect(
-            goMainDiagnostic("fmt.Println(map[string]int{1: 2})")
-                == "cannot use int as string value in map literal")
+            firstError("fmt.Println(map[string]int{1: 2})")
+                == "5:28: cannot use 1 (untyped int constant) as string value in map literal")
         #expect(
-            goMainDiagnostic("fmt.Println([]int{\"a\": 1})")
-                == "cannot convert string to type int")
+            firstError("fmt.Println([]int{\"a\": 1})")
+                == "5:19: cannot convert \"a\" (untyped string constant) to type int")
         #expect(
             goMainDiagnostic(
                 """

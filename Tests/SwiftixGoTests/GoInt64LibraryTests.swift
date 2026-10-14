@@ -48,7 +48,7 @@ struct GoInt64LibraryTests: GoTestHarness {
                 fmt.Println(s)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int64 as int value")
+                == "cannot use t.Unix() (value of type int64) as int value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -57,7 +57,7 @@ struct GoInt64LibraryTests: GoTestHarness {
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int64 as int value")
+                == "cannot use d.Milliseconds() (value of type int64) as int value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -65,7 +65,7 @@ struct GoInt64LibraryTests: GoTestHarness {
                 fmt.Println(time.Unix(sec, 0).Unix())
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as int64 value")
+                == "cannot use sec (variable of type int) as int64 value in argument to time.Unix")
         #expect(
             goMainDiagnostic(
                 """
@@ -74,7 +74,7 @@ struct GoInt64LibraryTests: GoTestHarness {
                 fmt.Println(i)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Duration as int64 value")
+                == "cannot use d (variable of int64 type time.Duration) as int64 value in variable declaration")
     }
 
     /// `ContentLength` of a request and of a response.

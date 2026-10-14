@@ -479,17 +479,17 @@ struct GoLocalTypeTests: GoTestHarness {
     @Test func aDiagnosticNamesWhatTheSourceNames() {
         #expect(
             diagnostic(program(" type T int\n type U string\n var x T = 1\n var y U = x\n fmt.Println(x, y)"))
-                == "main.go:7:12: cannot use T as U value")
+                == "main.go:7:12: cannot use x (variable of int type T) as U value in variable declaration")
         #expect(
             diagnostic(program(" type T struct{ A int }\n var v T\n v.B = 1\n fmt.Println(v)"))
-                == "main.go:6:4: T has no field or method B")
+                == "main.go:6:4: v.B undefined (type T has no field or method B)")
         #expect(
             diagnostic(program(" type T struct{ A int }\n fmt.Println(T{B: 1})"))
                 == "main.go:5:16: unknown field B in struct literal of type T")
         // A method belongs to a type of the package.
         #expect(
             diagnostic("package main\nfunc main() {\n type T int\n}\nfunc (t T) M() {}\n")
-                == "main.go:5:9: invalid receiver type T")
+                == "main.go:5:9: undefined: T")
     }
 
     // MARK: gofmt -r

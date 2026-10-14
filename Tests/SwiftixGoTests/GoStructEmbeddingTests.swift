@@ -285,7 +285,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s setter = derived{}
                 fmt.Println(s)
@@ -318,7 +318,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     type describer interface{ Describe() string }
                     type setter interface{ SetID(int) }
                     """)
-                == "cannot use derived as setter value")
+                == "30:16: cannot use derived{} (value of struct type derived) as setter value in variable declaration: derived does not implement setter (method SetID has pointer receiver)")
         #expect(
             goMainDiagnostic("derived{}.SetID(1)", declarations: """
                     type base struct {
@@ -348,7 +348,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     type describer interface{ Describe() string }
                     type setter interface{ SetID(int) }
                     """)
-                == "cannot call pointer method on non-addressable value")
+                == "cannot call pointer method SetID on base")
         #expect(
             firstError("fmt.Println(derived.SetID)", declarations: """
                     type base struct {
@@ -479,7 +479,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     """)
                 == "12:3: ambiguous selector v.x")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var v c
                 var g getter = v
@@ -498,7 +498,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     }
                     type getter interface{ get() int }
                     """)
-                == "cannot use c as getter value")
+                == "16:16: cannot use v (variable of struct type c) as getter value in variable declaration: c does not implement getter (ambiguous selector c.get)")
     }
 
     /// Without keys an embedded field is given in its place; with keys its
@@ -581,7 +581,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     """)
                 == "30:14: unknown field id in struct literal of type derived")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 v := derived{1, "x"}
                 fmt.Println(v)
@@ -614,7 +614,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     type describer interface{ Describe() string }
                     type setter interface{ SetID(int) }
                     """)
-                == "cannot use int as base value in struct literal")
+                == "30:14: cannot use 1 (untyped int constant) as base value in struct literal")
     }
 
     /// `%+v` and `%#v` name the field by its type; `==` compares it; a copy
@@ -1194,7 +1194,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
     /// name, and a type that is not declared.
     @Test func whatAStructMayNotEmbed() {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var v derived
                 fmt.Println(v)
@@ -1206,7 +1206,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                         base int
                     }
                     """)
-                == "base redeclared in this block")
+                == "6:5: base redeclared\n\tmain.go:5:5: other declaration of base")
         #expect(
             firstError(
                 """
@@ -1234,7 +1234,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                     """)
                 == "4:5: undefined: undefinedType")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var v c
                 fmt.Println(v.y)
@@ -1245,7 +1245,7 @@ struct GoStructEmbeddingTests: GoTestHarness {
                         a
                     }
                     """)
-                == "c has no field or method y")
+                == "9:15: v.y undefined (type c has no field or method y)")
     }
 
     /// Whether a field is embedded is part of what makes two struct types

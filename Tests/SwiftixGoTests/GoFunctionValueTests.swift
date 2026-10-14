@@ -154,12 +154,12 @@ struct GoFunctionValueTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f, g := func() {}, func() {}
                 fmt.Println(f == g)
                 """)
-                == "invalid operation: func can only be compared to nil")
+                == "6:13: invalid operation: f == g (func can only be compared to nil)")
         #expect(
             firstError(
                 """
@@ -368,7 +368,7 @@ struct GoFunctionValueTests: GoTestHarness {
                     """)
                 == "21:14: counter.n undefined (type counter has no method n)")
         #expect(
-            goMainDiagnostic("fmt.Println(counter.get(1))", declarations: """
+            firstError("fmt.Println(counter.get(1))", declarations: """
                     type counter struct{ n int }
 
                     func (c counter) get() int            { return c.n }
@@ -387,9 +387,9 @@ struct GoFunctionValueTests: GoTestHarness {
                         return t
                     }
                     """)
-                == "cannot use int as counter value in argument to counter.get")
+                == "21:25: cannot use 1 (untyped int constant) as counter value in argument to counter.get")
         #expect(
-            goMainDiagnostic("fmt.Println((*counter).get(1))", declarations: """
+            firstError("fmt.Println((*counter).get(1))", declarations: """
                     type counter struct{ n int }
 
                     func (c counter) get() int            { return c.n }
@@ -408,9 +408,9 @@ struct GoFunctionValueTests: GoTestHarness {
                         return t
                     }
                     """)
-                == "cannot use int as *counter value in argument to (*counter).get")
+                == "21:28: cannot use 1 (untyped int constant) as *counter value in argument to (*counter).get")
         #expect(
-            goMainDiagnostic("fmt.Println(counter.get())", declarations: """
+            firstError("fmt.Println(counter.get())", declarations: """
                     type counter struct{ n int }
 
                     func (c counter) get() int            { return c.n }
@@ -429,7 +429,7 @@ struct GoFunctionValueTests: GoTestHarness {
                         return t
                     }
                     """)
-                == "not enough arguments in call to counter.get")
+                == "21:13: not enough arguments in call to counter.get\n\thave ()\n\twant (counter)")
     }
 
     /// `s.area` with `s` an interface is the method of what `s` holds when it
@@ -501,14 +501,14 @@ struct GoFunctionValueTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s shape
                 f := s.volume
                 f()
                 """,
                 declarations: "type shape interface{ area() int }")
-                == "shape has no field or method volume")
+                == "6:8: s.volume undefined (type shape has no field or method volume)")
     }
 
     /// Which is how a function becomes a value of an interface: the adapter
@@ -728,42 +728,42 @@ struct GoFunctionValueTests: GoTestHarness {
                 """)
                 == "6:1: invalid operation: cannot call non-function x (variable of type int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := func(a, b int) int { return a + b }
                 fmt.Println(f(1))
                 """)
-                == "not enough arguments in call to f")
+                == "6:15: not enough arguments in call to f\n\thave (number)\n\twant (int, int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := func(a int) int { return a }
                 fmt.Println(f(1, 2))
                 """)
-                == "too many arguments in call to f")
+                == "6:18: too many arguments in call to f\n\thave (number, number)\n\twant (int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := func(a int) int { return a }
                 fmt.Println(f("s"))
                 """)
-                == "cannot use string as int value in argument to f")
+                == "6:15: cannot use \"s\" (untyped string constant) as int value in argument to f")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var f func(int) int = add
                 fmt.Println(f(1))
                 """,
                 declarations: "func add(a, b int) int { return a + b }")
-                == "cannot use func(int, int) int as func(int) int value")
+                == "5:23: cannot use add (value of type func(a int, b int) int) as func(int) int value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := func() int { return 1 }
                 f = 2
                 fmt.Println(f())
                 """)
-                == "cannot use int as func() int value")
+                == "6:5: cannot use 2 (untyped int constant) as func() int value in assignment")
         #expect(
             firstError(
                 """
@@ -772,12 +772,12 @@ struct GoFunctionValueTests: GoTestHarness {
                 """)
                 == "5:18: missing return")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := func() int { return "s" }
                 fmt.Println(f())
                 """)
-                == "cannot use string as int value in return statement")
+                == "5:26: cannot use \"s\" (untyped string constant) as int value in return statement")
     }
 
     /// The handler is a function of the two parameters Go gives it, by name
@@ -795,10 +795,10 @@ struct GoFunctionValueTests: GoTestHarness {
                 declarations: "func index(w http.ResponseWriter, r *http.Request) {}")
                 == "registered 0\n")
         #expect(
-            goMainDiagnostic("http.HandleFunc(\"/\", 42)", imports: ["fmt", "net/http"])
-                == "cannot use int as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
+            firstError("http.HandleFunc(\"/\", 42)", imports: ["fmt", "net/http"])
+                == "6:22: cannot use 42 (untyped int constant) as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
         #expect(
-            goMainDiagnostic("http.HandleFunc(\"/\", func() {})", imports: ["fmt", "net/http"])
-                == "cannot use func() as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
+            firstError("http.HandleFunc(\"/\", func() {})", imports: ["fmt", "net/http"])
+                == "6:22: cannot use func() {} (value of type func()) as func(http.ResponseWriter, *http.Request) value in argument to http.HandleFunc")
     }
 }

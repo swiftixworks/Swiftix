@@ -474,19 +474,19 @@ struct GoLibraryFunctionValueTests: GoTestHarness {
                 fmt.Println(f(1))
                 """,
                 imports: ["fmt", "strings"])
-                == "cannot use func(string) string as func(int) int value")
+                == "cannot use strings.ToUpper (value of type func(string) string) as func(int) int value in variable declaration")
         #expect(
             goMainDiagnostic("fmt.Println(apply(strings.ToUpper))", imports: ["fmt", "strings"],
                 declarations: "func apply(f func(int) string) string { return f(1) }")
-                == "cannot use func(string) string as func(int) string value in argument to apply")
+                == "cannot use strings.ToUpper (value of type func(string) string) as func(int) string value in argument to apply")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := strings.ToUpper
                 fmt.Println(f(1))
                 """,
                 imports: ["fmt", "strings"])
-                == "cannot use int as string value in argument to f")
+                == "7:15: cannot use 1 (untyped int constant) as string value in argument to f")
         #expect(
             goMainDiagnostic(
                 """
@@ -495,10 +495,10 @@ struct GoLibraryFunctionValueTests: GoTestHarness {
                 fmt.Println(f)
                 """,
                 imports: ["fmt", "sync"])
-                == "cannot use func(int) as func(int) int value")
+                == "cannot use wg.Add (value of type func(int)) as func(int) int value in variable declaration")
         #expect(
-            goMainDiagnostic("fmt.Println(strings.ToUpper == strings.ToLower)", imports: ["fmt", "strings"])
-                == "invalid operation: func can only be compared to nil")
+            firstError("fmt.Println(strings.ToUpper == strings.ToLower)", imports: ["fmt", "strings"])
+                == "6:13: invalid operation: strings.ToUpper == strings.ToLower (func can only be compared to nil)")
         #expect(
             firstError(
                 """
@@ -523,7 +523,7 @@ struct GoLibraryFunctionValueTests: GoTestHarness {
                 imports: ["errors", "fmt"])
                 == "errors.As is a function of the run-time library, which can only be called: wrap the call in a function literal to pass it")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 f := http.HandleFunc
                 fmt.Println(f)

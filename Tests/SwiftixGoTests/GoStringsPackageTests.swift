@@ -267,11 +267,11 @@ struct GoStringsPackageTests: GoTestHarness {
         }
         #expect(
             diagnostic("fmt.Println(strings.ToUpper())")
-                == "wrong number of arguments in call to strings.ToUpper")
-        #expect(diagnostic("fmt.Println(strings.ToLower(5))") == "cannot use int as string value")
+                == "not enough arguments in call to strings.ToUpper\n\thave ()\n\twant (string)")
+        #expect(diagnostic("fmt.Println(strings.ToLower(5))") == "cannot use 5 (untyped int constant) as string value in argument to strings.ToLower")
         #expect(
             diagnostic("fmt.Println(strings.TrimPrefix(\"a\"))")
-                == "wrong number of arguments in call to strings.TrimPrefix")
+                == "not enough arguments in call to strings.TrimPrefix\n\thave (string)\n\twant (string, string)")
         #expect(diagnostic("var n int = strings.TrimSuffix(\"a\", \"b\")\nfmt.Println(n)") != nil)
         #expect(diagnostic("var s string = strings.Fields(\"a\")\nfmt.Println(s)") != nil)
         #expect(diagnostic("fmt.Println(strings.Title(\"a\"))") == "undefined: strings.Title")

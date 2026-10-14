@@ -622,13 +622,13 @@ struct GoFileSystemTests: GoTestHarness {
     @Test func fileCallsAreTypeChecked() {
         #expect(
             diagnostic("g := os.Open(\"/x\")\nfmt.Println(g)")
-                == "multiple-value Open() in single-value context")
+                == "assignment mismatch: 1 variable but os.Open returns 2 values")
         #expect(
             diagnostic("f, err = os.OpenFile(\"/x\", os.O_RDONLY)\nfmt.Println(f, err)")
-                == "wrong number of arguments in call to os.OpenFile")
+                == "not enough arguments in call to os.OpenFile\n\thave (string, int)\n\twant (string, int, int)")
         #expect(
             diagnostic("fmt.Println(os.Stdout.Seek(0))")
-                == "wrong number of arguments in call to os.File.Seek")
+                == "not enough arguments in call to os.Stdout.Seek\n\thave (number)\n\twant (int, int)")
         #expect(diagnostic("var count int = os.Stdout.Close()\nfmt.Println(count)") != nil)
         #expect(diagnostic("var count int = io.EOF\nfmt.Println(count)") != nil)
         #expect(diagnostic("var flag string = os.O_APPEND\nfmt.Println(flag)") != nil)

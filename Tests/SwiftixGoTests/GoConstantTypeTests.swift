@@ -139,7 +139,7 @@ struct GoConstantTypeTests: GoTestHarness {
                 fmt.Println(s)
                 """,
                 declarations: "type S string")
-                == "cannot use string as S value")
+                == "cannot use x (variable of type string) as S value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -152,7 +152,7 @@ struct GoConstantTypeTests: GoTestHarness {
 
                     const a A = "a"
                     """)
-                == "cannot use A as B value")
+                == #"cannot use a (constant "a" of string type A) as B value in variable declaration"#)
         #expect(
             goMainDiagnostic("fmt.Println(a + b)", declarations: """
                     type A string
@@ -161,7 +161,7 @@ struct GoConstantTypeTests: GoTestHarness {
                     const a A = "a"
                     const b B = "b"
                     """)
-                == "mismatched types A and B")
+                == "invalid operation: a + b (mismatched types A and B)")
         #expect(
             goMainDiagnostic(
                 """
@@ -169,7 +169,7 @@ struct GoConstantTypeTests: GoTestHarness {
                 fmt.Println(s)
                 """,
                 declarations: "type S string")
-                == "cannot use int as S value")
+                == "cannot use 5 (untyped int constant) as S value in variable declaration")
     }
 
     /// `true`, `false`, an untyped boolean constant, and the result of any
@@ -230,7 +230,7 @@ struct GoConstantTypeTests: GoTestHarness {
 
                     const on Flag = true
                     """)
-                == "cannot use Flag as Other value")
+                == "cannot use on (constant of bool type Flag) as Other value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -239,7 +239,7 @@ struct GoConstantTypeTests: GoTestHarness {
                 fmt.Println(f)
                 """,
                 declarations: "type Flag bool")
-                == "cannot use bool as Flag value")
+                == "cannot use b (variable of type bool) as Flag value in variable declaration")
     }
 
     /// `len` of a constant string is a constant of type `int`: it names one
@@ -265,10 +265,10 @@ struct GoConstantTypeTests: GoTestHarness {
                 var small int8 = len("abc")
                 fmt.Println(small)
                 """)
-                == "cannot use int as int8 value")
+                == "cannot use len(\"abc\") (constant 3 of type int) as int8 value in variable declaration")
         #expect(
             goMainDiagnostic("fmt.Println(uint8(len(\"abc\")) + 253)")
-                == "constant 256 overflows byte")
+                == #"uint8(len("abc")) + 253 (constant 256 of type byte) overflows byte"#)
     }
 
     /// The length of an array is any constant expression of integers: a named

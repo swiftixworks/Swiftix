@@ -115,19 +115,19 @@ struct GoParallelAssignmentTests: GoTestHarness {
         #expect(diagnostic("a, a := 1, 2\nfmt.Println(a)") == "a repeated on left side of :=")
         #expect(
             diagnostic("a, b := 1, 2\na, b = \"x\", 4\nfmt.Println(a, b)")
-                == "cannot use string as int value in assignment")
+                == "cannot use \"x\" (untyped string constant) as int value in assignment")
         #expect(
             diagnostic("var a, b int = 1, \"x\"\nfmt.Println(a, b)")
-                == "cannot use string as int value in variable declaration")
+                == "cannot use \"x\" (untyped string constant) as int value in variable declaration")
         #expect(
             diagnostic("var a, b = 1\nfmt.Println(a, b)")
                 == "assignment mismatch: 2 variables but 1 value")
         #expect(
             diagnostic("a := 1\nvar a, b = 2, 3\nfmt.Println(a, b)")
-                == "a redeclared in this block")
+                == "a redeclared in this block\n\tmain.go:8:1: other declaration of a")
         // A call with several results is not one value of a list.
         #expect(diagnostic("a, b := two(), 3\nfmt.Println(a, b)") != nil)
-        #expect(diagnostic("_ = nil") == "use of untyped nil in assignment")
+        #expect(diagnostic("_ = nil") == "use of untyped nil in assignment to _ identifier")
         #expect(diagnostic("a, b := 1, \"x\"\na, c := 2, true\nfmt.Println(a, b, c)") == nil)
     }
 

@@ -390,7 +390,7 @@ struct GoLabelTests: GoTestHarness {
             firstError("goto L")
                 == "5:6: label L not defined")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 L:
                     for {
@@ -401,7 +401,7 @@ struct GoLabelTests: GoTestHarness {
                         break L
                     }
                 """)
-                == "label L already defined at main.go:5:1")
+                == "9:1: label L already defined at main.go:5:1")
         #expect(
             goMainDiagnostic(
                 """
@@ -512,7 +512,7 @@ struct GoLabelTests: GoTestHarness {
     /// variable into its scope. Go says where the block starts and what is declared.
     @Test func gotoMustNotEnterABlockOrAScope() throws {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 goto L
                 x := 1
@@ -520,18 +520,18 @@ struct GoLabelTests: GoTestHarness {
                 L:
                     fmt.Println("x")
                 """)
-                == "goto L jumps over declaration of x at main.go:6:3")
+                == "5:6: goto L jumps over declaration of x at main.go:6:3")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 goto L
                 var a, b = 1, 2
                 _, _ = a, b
                 L:
                 """)
-                == "goto L jumps over declaration of a at main.go:6:5")
+                == "5:6: goto L jumps over declaration of a at main.go:6:5")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 goto L
                 {
@@ -539,9 +539,9 @@ struct GoLabelTests: GoTestHarness {
                     fmt.Println("x")
                 }
                 """)
-                == "goto L jumps into block starting at main.go:6:1")
+                == "5:6: goto L jumps into block starting at main.go:6:1")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 1
                 switch x {
@@ -552,7 +552,7 @@ struct GoLabelTests: GoTestHarness {
                     fmt.Println()
                 }
                 """)
-                == "goto L jumps into block starting at main.go:9:1")
+                == "8:10: goto L jumps into block starting at main.go:9:1")
         #expect(
             try runGoMain(
                 """

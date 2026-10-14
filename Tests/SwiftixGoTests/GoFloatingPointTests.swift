@@ -104,14 +104,14 @@ struct GoFloatingPointTests: GoTestHarness {
                 var i int = 1.5
                 fmt.Println(i)
                 """)
-                == "constant 1.5 truncated to int")
+                == "cannot use 1.5 (untyped float constant) as int value in variable declaration (truncated)")
         #expect(
             goMainDiagnostic(
                 """
                 var i int = 3
                 fmt.Println(i + 2.5)
                 """)
-                == "constant 2.5 truncated to int")
+                == "2.5 (untyped float constant) truncated to int")
         #expect(
             goMainDiagnostic("fmt.Println(int(2.5))")
                 == "constant 2.5 truncated to int")
@@ -121,24 +121,24 @@ struct GoFloatingPointTests: GoTestHarness {
                 var f float64 = 1e400
                 fmt.Println(f)
                 """)
-                == "constant 1e+400 overflows float64")
+                == "cannot use 1e400 (untyped float constant 1e+400) as float64 value in variable declaration (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 var f float32 = 1e39
                 fmt.Println(f)
                 """)
-                == "constant 1e+39 overflows float32")
+                == "cannot use 1e39 (untyped float constant 1e+39) as float32 value in variable declaration (overflows)")
         #expect(
             goMainDiagnostic(
                 """
                 x := 5 % 2.0
                 fmt.Println(x)
                 """)
-                == "operator % not defined on float64")
+                == "invalid operation: 5 % 2.0 (mismatched types untyped int and untyped float)")
         #expect(
             goMainDiagnostic("fmt.Println(1.5 / 0)")
-                == "division by zero")
+                == "invalid operation: division by zero")
     }
 
     /// The four operations and the six comparisons. A division by zero is
@@ -183,7 +183,7 @@ struct GoFloatingPointTests: GoTestHarness {
                 i := 2
                 fmt.Println(f * i)
                 """)
-                == "mismatched types float64 and int")
+                == "invalid operation: f * i (mismatched types float64 and int)")
         #expect(
             goMainDiagnostic(
                 """
@@ -191,7 +191,7 @@ struct GoFloatingPointTests: GoTestHarness {
                 var g float32 = 2
                 fmt.Println(f + g)
                 """)
-                == "mismatched types float64 and float32")
+                == "invalid operation: f + g (mismatched types float64 and float32)")
         #expect(
             goMainDiagnostic(
                 """
@@ -199,21 +199,21 @@ struct GoFloatingPointTests: GoTestHarness {
                 var i int = f
                 fmt.Println(i)
                 """)
-                == "cannot use float64 as int value")
+                == "cannot use f (variable of type float64) as int value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
                 var f float64 = 2
                 fmt.Println(f % 2)
                 """)
-                == "operator % not defined on float64")
+                == "invalid operation: operator % not defined on f (variable of type float64)")
         #expect(
             goMainDiagnostic(
                 """
                 var f float64 = 2
                 fmt.Println(f << 1)
                 """)
-                == "operator << requires integer operands")
+                == "invalid operation: shifted operand f (variable of type float64) must be integer")
         #expect(
             goMainDiagnostic(
                 """
@@ -221,7 +221,7 @@ struct GoFloatingPointTests: GoTestHarness {
                 f := 1.0
                 fmt.Println(s[f])
                 """)
-                == "index must be integer")
+                == "invalid argument: index f (variable of type float64) must be integer")
     }
 
     /// An integer becomes the nearest floating-point number, and a

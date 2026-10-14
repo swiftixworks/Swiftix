@@ -85,28 +85,28 @@ struct GoTimeContextTests: GoTestHarness {
         // Go's `time.After` and `time.Tick` return `<-chan time.Time`.
         #expect(
             diagnostic("var c <-chan int = time.After(time.Millisecond)\nfmt.Println(len(c))")
-                == "cannot use <-chan time.Time as <-chan int value")
+                == "cannot use time.After(time.Millisecond) (value of type <-chan time.Time) as <-chan int value in variable declaration")
         #expect(
             diagnostic("var c <-chan int = time.Tick(time.Millisecond)\nfmt.Println(len(c))")
-                == "cannot use <-chan time.Time as <-chan int value")
+                == "cannot use time.Tick(time.Millisecond) (value of type <-chan time.Time) as <-chan int value in variable declaration")
         #expect(
             diagnostic("var n int = <-time.After(time.Millisecond)\nfmt.Println(n)")
-                == "cannot use time.Time as int value")
+                == "cannot use <-time.After(time.Millisecond) (comma, ok expression of struct type time.Time) as int value in variable declaration")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\nfmt.Println(t + 1)")
-                == "mismatched types time.Time and int")
+                == "cannot convert 1 (untyped int constant) to type time.Time")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\nfmt.Println(t - t)")
-                == "operator requires integer operands")
+                == "invalid operation: operator - not defined on t (variable of struct type time.Time)")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\ntime.Sleep(t)")
-                == "cannot use time.Time as time.Duration value in argument to time.Sleep")
+                == "cannot use t (variable of struct type time.Time) as time.Duration value in argument to time.Sleep")
         #expect(
             diagnostic("t := <-time.After(time.Millisecond)\nfmt.Println(int(t))")
-                == "cannot convert time.Time to type int")
+                == "cannot convert t (variable of struct type time.Time) to type int")
         #expect(
             diagnostic("c := make(chan int, 1)\nc <- <-time.After(time.Millisecond)")
-                == "cannot send time.Time value on int channel")
+                == "cannot use <-time.After(time.Millisecond) (comma, ok expression of struct type time.Time) as int value in send")
     }
 
     // MARK: - M5: context

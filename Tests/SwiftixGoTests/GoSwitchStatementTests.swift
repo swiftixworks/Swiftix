@@ -245,7 +245,7 @@ struct GoSwitchStatementTests: GoTestHarness {
     /// quotes the case; this dialect does not.
     @Test func aConstantIsACaseOnce() {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 1
                 switch x {
@@ -253,9 +253,9 @@ struct GoSwitchStatementTests: GoTestHarness {
                 case 2, 1:
                 }
                 """)
-                == "duplicate case in expression switch")
+                == "8:9: duplicate case 1 (constant of type int) in expression switch\n\tmain.go:7:6: previous case")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 1
                 switch x {
@@ -265,18 +265,18 @@ struct GoSwitchStatementTests: GoTestHarness {
                 }
                 """,
                 declarations: "const one = 1")
-                == "duplicate case in expression switch")
+                == "9:6: duplicate case 3 - 2 (constant 1 of type int) in expression switch\n\tmain.go:7:6: previous case")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := "a"
                 switch x {
                 case "a", "b", "a":
                 }
                 """)
-                == "duplicate case in expression switch")
+                == "7:16: duplicate case \"a\" (constant of type string) in expression switch\n\tmain.go:7:6: previous case")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var b byte = 1
                 switch b {
@@ -284,7 +284,7 @@ struct GoSwitchStatementTests: GoTestHarness {
                 case 97:
                 }
                 """)
-                == "duplicate case in expression switch")
+                == "8:6: duplicate case 97 (constant of type byte) in expression switch\n\tmain.go:7:6: previous case")
     }
 
     /// Go compares constants only: a variable may be a case twice, and so
@@ -316,7 +316,7 @@ struct GoSwitchStatementTests: GoTestHarness {
     /// the place of the first, which is the file as the compiler was given it.
     @Test func aSwitchHasOneDefault() {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 1
                 switch x {
@@ -325,16 +325,16 @@ struct GoSwitchStatementTests: GoTestHarness {
                 default:
                 }
                 """)
-                == "multiple defaults (first at main.go:7:1)")
+                == "9:1: multiple defaults (first at main.go:7:1)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 select {
                 default:
                 default:
                 }
                 """)
-                == "multiple defaults (first at main.go:6:1)")
+                == "7:1: multiple defaults (first at main.go:6:1)")
     }
 
     /// What stands before the `{` of a switch is a value. Go quotes the

@@ -348,16 +348,16 @@ struct GoFormatVerbTests: GoTestHarness {
         }
         #expect(
             diagnostic("fmt.Println(fmt.Sprintf())")
-                == "wrong number of arguments in call to fmt.Sprintf")
-        #expect(diagnostic("fmt.Println(fmt.Sprintf(5))") == "cannot use int as string value")
+                == "not enough arguments in call to fmt.Sprintf\n\thave ()\n\twant (string, ...any)")
+        #expect(diagnostic("fmt.Println(fmt.Sprintf(5))") == "cannot use 5 (untyped int constant) as string value in argument to fmt.Sprintf")
         #expect(
-            diagnostic("fmt.Fprintf(\"%d\", 1)") == "cannot use string as io.Writer value in argument to fmt.Fprintf")
+            diagnostic("fmt.Fprintf(\"%d\", 1)") == "cannot use \"%d\" (constant of type string) as io.Writer value in argument to fmt.Fprintf: string does not implement io.Writer (missing method Write)")
         #expect(
             diagnostic("fmt.Fprintf(os.Stdout)")
-                == "wrong number of arguments in call to fmt.Fprintf")
+                == "not enough arguments in call to fmt.Fprintf\n\thave (*os.File)\n\twant (io.Writer, string, ...any)")
         #expect(
             diagnostic("n := fmt.Printf(\"a\")\nfmt.Println(n)")
-                == "multiple-value fmt.Printf() in single-value context")
+                == "assignment mismatch: 1 variable but fmt.Printf returns 2 values")
         #expect(
             diagnostic("n, err, more := fmt.Fprintf(os.Stdout, \"a\")\nfmt.Println(n, err, more)")
                 != nil)

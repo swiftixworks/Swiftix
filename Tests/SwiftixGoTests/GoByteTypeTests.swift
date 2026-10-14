@@ -135,34 +135,34 @@ struct GoByteTypeTests: GoTestHarness {
         // Each variable is read once, so that the error is the first Go
         // reports as well.
         let prelude = "s := \"ab\"\ni := 1\nvar b byte = 1\nfmt.Println(s, i, b)\n"
-        #expect(goMainDiagnostic(prelude + "var n int = s[0]\nfmt.Println(n, i, b)") == "cannot use byte as int value")
-        #expect(goMainDiagnostic(prelude + "fmt.Println(i + s[0], b)") == "mismatched types int and byte")
-        #expect(goMainDiagnostic(prelude + "fmt.Println(b == i)") == "mismatched types byte and int")
-        #expect(goMainDiagnostic(prelude + "b = i\nfmt.Println(b)") == "cannot use int as byte value")
-        #expect(goMainDiagnostic(prelude + "i = b\nfmt.Println(i)") == "cannot use byte as int value")
+        #expect(goMainDiagnostic(prelude + "var n int = s[0]\nfmt.Println(n, i, b)") == "cannot use s[0] (value of type byte) as int value in variable declaration")
+        #expect(goMainDiagnostic(prelude + "fmt.Println(i + s[0], b)") == "invalid operation: i + s[0] (mismatched types int and byte)")
+        #expect(goMainDiagnostic(prelude + "fmt.Println(b == i)") == "invalid operation: b == i (mismatched types byte and int)")
+        #expect(goMainDiagnostic(prelude + "b = i\nfmt.Println(b)") == "cannot use i (variable of type int) as byte value in assignment")
+        #expect(goMainDiagnostic(prelude + "i = b\nfmt.Println(i)") == "cannot use b (variable of type byte) as int value in assignment")
         #expect(
             goMainDiagnostic(prelude + "fmt.Println(take(b), i)", declarations: "func take(n int) int { return n }")
-                == "cannot use byte as int value in argument to take")
+                == "cannot use b (variable of type byte) as int value in argument to take")
         #expect(
             goMainDiagnostic(prelude + "bs := []byte{1}\nbs = append(bs, i)\nfmt.Println(b)")
-                == "cannot use int as byte value")
+                == "cannot use i (variable of type int) as byte value in argument to append")
         #expect(
             goMainDiagnostic(
-                prelude + "switch b {\ncase i:\n}\nfmt.Println(s)") == "invalid case int in switch on byte")
+                prelude + "switch b {\ncase i:\n}\nfmt.Println(s)") == "invalid case i in switch on b (mismatched types int and byte)")
         #expect(
             goMainDiagnostic(prelude + "fmt.Println(b + typed, i)", declarations: "const typed int = 1")
-                == "mismatched types byte and int")
+                == "invalid operation: b + typed (mismatched types byte and int)")
     }
 
     @Test func constantsMustFitInAByte() {
-        #expect(goMainDiagnostic("var b byte = 256\nfmt.Println(b)") == "constant 256 overflows byte")
-        #expect(goMainDiagnostic("var b uint8 = -1\nfmt.Println(b)") == "constant -1 overflows byte")
-        #expect(goMainDiagnostic("s := \"a\"\nfmt.Println(s[0] == 300)") == "constant 300 overflows byte")
-        #expect(goMainDiagnostic("s := \"a\"\nfmt.Println(s[0] + 128 * 2)") == "constant 256 overflows byte")
-        #expect(goMainDiagnostic("bs := []byte{1, 999}\nfmt.Println(bs)") == "constant 999 overflows byte")
+        #expect(goMainDiagnostic("var b byte = 256\nfmt.Println(b)") == "cannot use 256 (untyped int constant) as byte value in variable declaration (overflows)")
+        #expect(goMainDiagnostic("var b uint8 = -1\nfmt.Println(b)") == "cannot use -1 (untyped int constant) as byte value in variable declaration (overflows)")
+        #expect(goMainDiagnostic("s := \"a\"\nfmt.Println(s[0] == 300)") == "300 (untyped int constant) overflows byte")
+        #expect(goMainDiagnostic("s := \"a\"\nfmt.Println(s[0] + 128 * 2)") == "128 * 2 (untyped int constant 256) overflows byte")
+        #expect(goMainDiagnostic("bs := []byte{1, 999}\nfmt.Println(bs)") == "cannot use 999 (untyped int constant) as byte value in array or slice literal (overflows)")
         #expect(
             goMainDiagnostic("var b byte = big\nfmt.Println(b)", declarations: "const big = 1 << 8")
-                == "constant 256 overflows byte")
+                == "cannot use big (untyped int constant 256) as byte value in variable declaration (overflows)")
         #expect(goMainDiagnostic("var b byte = 255\nfmt.Println(b)") == nil)
     }
 

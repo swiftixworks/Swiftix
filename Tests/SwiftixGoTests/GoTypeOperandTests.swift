@@ -211,21 +211,21 @@ struct GoTypeOperandTests: GoTestHarness {
     /// A type alone is no value, and a value converts only to a type it fits.
     @Test func whatIsNoConversion() {
         #expect(
-            goMainDiagnostic("fmt.Println(error(T{1}))", declarations: "type T struct{ a int }")
-                == "cannot convert T to type interface{...}")
+            firstError("fmt.Println(error(T{1}))", declarations: "type T struct{ a int }")
+                == "5:19: cannot convert T{…} (value of struct type T) to type error: T does not implement error (missing method Error)")
         #expect(
-            goMainDiagnostic("fmt.Println((int)(\"x\"))")
-                == "cannot convert string to type int")
+            firstError("fmt.Println((int)(\"x\"))")
+                == "5:19: cannot convert \"x\" (untyped string constant) to type int")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := (func())
                 fmt.Println(x)
                 """)
-                == "type is not an expression")
+                == "5:6: (func()) (type) is not an expression")
         #expect(
-            goMainDiagnostic("fmt.Println(chan int)")
-                == "type is not an expression")
+            firstError("fmt.Println(chan int)")
+                == "5:13: chan int (type) is not an expression")
         #expect(
             firstError(
                 """
@@ -234,19 +234,19 @@ struct GoTypeOperandTests: GoTestHarness {
                 """)
                 == "5:11: undefined: undefined")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := make(int, 1)
                 fmt.Println(x)
                 """)
-                == "cannot make int")
+                == "5:11: invalid argument: cannot make int; type must be slice, map, or channel")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := make(T)
                 fmt.Println(x)
                 """,
                 declarations: "type T struct{ a int }")
-                == "cannot make T")
+                == "5:11: invalid argument: cannot make T; type must be slice, map, or channel")
     }
 }

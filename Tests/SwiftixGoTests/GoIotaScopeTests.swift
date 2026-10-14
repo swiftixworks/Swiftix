@@ -249,14 +249,14 @@ struct GoIotaScopeTests: GoTestHarness {
 
                     const c = v + 1
                     """)
-                == "5:11: value of type int is not constant")
+                == "5:11: v + 1 (value of type int) is not constant")
         #expect(
             firstError("", declarations: """
                     func f() int { return 1 }
 
                     const c = f()
                     """)
-                == "5:11: value of type int is not constant")
+                == "5:11: f() (value of type int) is not constant")
         #expect(
             firstError(
                 """
@@ -264,21 +264,21 @@ struct GoIotaScopeTests: GoTestHarness {
                 const c = len(s)
                 fmt.Println(c)
                 """)
-                == "6:11: value of type int is not constant")
+                == "6:11: len(s) (value of type int) is not constant")
         #expect(
             firstError(
                 """
                 const a = []int{1}
                 fmt.Println(a)
                 """)
-                == "5:11: value of type []int is not constant")
+                == "5:11: []int{…} (value of type []int) is not constant")
         #expect(
             firstError(
                 """
                 const c = "abc"[1]
                 fmt.Println(c)
                 """)
-                == "5:11: value of type byte is not constant")
+                == "5:11: \"abc\"[1] (value of type byte) is not constant")
         #expect(
             firstError(
                 """
@@ -286,7 +286,7 @@ struct GoIotaScopeTests: GoTestHarness {
                 const c = p == nil
                 fmt.Println(c)
                 """)
-                == "6:11: value of type bool is not constant")
+                == "6:11: p == nil (untyped bool value) is not constant")
         #expect(
             firstError("", declarations: """
                     type t struct{ n int }
@@ -295,6 +295,6 @@ struct GoIotaScopeTests: GoTestHarness {
 
                     const c = v.n
                     """)
-                == "7:11: value of type int is not constant")
+                == "7:11: v.n (variable of type int) is not constant")
     }
 }

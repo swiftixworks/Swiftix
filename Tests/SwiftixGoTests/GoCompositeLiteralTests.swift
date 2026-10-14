@@ -127,7 +127,7 @@ struct GoCompositeLiteralTests: GoTestHarness {
         #expect(diagnostic("fmt.Println(&point{X: \"a\"})") != nil)
         #expect(
             diagnostic("p := &5\nfmt.Println(p)")
-                == "invalid operation: cannot take address of a value that is not a variable")
+                == "invalid operation: cannot take address of 5 (untyped int constant)")
         #expect(diagnostic("var p *point = &node{}\nfmt.Println(p)") != nil)
         #expect(diagnostic("var p *point = &point{}\nfmt.Println(p, point{}, &node{})") == nil)
     }

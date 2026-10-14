@@ -181,7 +181,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
 
                     var _ shape = square{}
                     """)
-                == "8:15: cannot use square as shape value")
+                == "8:15: cannot use square{} (value of struct type square) as shape value in variable declaration: square does not implement shape (method area has pointer receiver)")
         #expect(
             firstError("", declarations: """
                     type shape interface{ area() int }
@@ -193,7 +193,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
 
                     var _ shape = (*circle)(nil)
                     """)
-                == "10:15: cannot use *circle as shape value")
+                == "10:15: cannot use (*circle)(nil) (value of type *circle) as shape value in variable declaration: *circle does not implement shape (missing method area)")
         #expect(
             firstError("", declarations: """
                     type shape interface{ area() int }
@@ -208,7 +208,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
                         _ shape = &circle{}
                     )
                     """)
-                == "12:15: cannot use *circle as shape value")
+                == "12:15: cannot use &circle{} (value of type *circle) as shape value in variable declaration: *circle does not implement shape (missing method area)")
         #expect(
             firstError("", declarations: """
                     type shape interface{ area() int }
@@ -222,7 +222,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
 
                     var _ shape = (*circle)(nil)
                     """)
-                == "12:15: cannot use *circle as shape value")
+                == "12:15: cannot use (*circle)(nil) (value of type *circle) as shape value in variable declaration: *circle does not implement shape (wrong type for method area)\n\t\thave area(int) int\n\t\twant area() int")
         #expect(
             firstError("var _ shape = (*circle)(nil)", declarations: """
                     type shape interface{ area() int }
@@ -232,7 +232,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
 
                     type circle struct{}
                     """)
-                == "10:15: cannot use *circle as shape value")
+                == "10:15: cannot use (*circle)(nil) (value of type *circle) as shape value in variable declaration: *circle does not implement shape (missing method area)")
     }
 
     /// It takes the value at its place and keeps none.
@@ -359,7 +359,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
                 == "3:13: undefined: missing")
         #expect(
             firstError("", declarations: "var _ int = \"s\"")
-                == "3:13: cannot use string as int value")
+                == "3:13: cannot use \"s\" (untyped string constant) as int value in variable declaration")
         #expect(
             firstError("", declarations: "var _, _ = 1, undefined")
                 == "3:15: undefined: undefined")
@@ -514,7 +514,7 @@ struct GoBlankDeclarationTests: GoTestHarness {
                     """
                 ),
             ])
-                == "lib/lib.go:6:15: cannot use *Circle as Shape value")
+                == "lib/lib.go:6:15: cannot use (*Circle)(nil) (value of type *Circle) as Shape value in variable declaration: *Circle does not implement Shape (missing method Area)")
     }
 
     /// A blank variable of an alias's type, and one in a function beside a

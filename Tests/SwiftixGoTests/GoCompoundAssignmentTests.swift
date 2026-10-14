@@ -59,13 +59,13 @@ struct GoCompoundAssignmentTests: GoTestHarness {
     }
 
     @Test func invalidCompoundAssignmentsAreDiagnosed() {
-        #expect(goMainDiagnostic("x := 1\nx += \"s\"") == "mismatched types int and string")
-        #expect(goMainDiagnostic("s := \"a\"\ns -= \"a\"") == "operator requires integer operands")
+        #expect(goMainDiagnostic("x := 1\nx += \"s\"") == "invalid operation: x += \"s\" (mismatched types int and untyped string)")
+        #expect(goMainDiagnostic("s := \"a\"\ns -= \"a\"") == "invalid operation: operator - not defined on s (variable of type string)")
         #expect(goMainDiagnostic("x += 1") == "undefined: x")
-        #expect(goMainDiagnostic("x := 1\nx <<= -1") == "invalid negative shift count -1")
+        #expect(goMainDiagnostic("x := 1\nx <<= -1") == "invalid operation: negative shift count -1 (untyped int constant)")
         #expect(goMainDiagnostic("x := 1\nx +=") == "expected expression")
         #expect(
-            goMainDiagnostic("x += 1", declarations: "const x = 1") == "cannot assign to x")
+            goMainDiagnostic("x += 1", declarations: "const x = 1") == "cannot assign to x (neither addressable nor a map index expression)")
         // The target is evaluated twice, so anything with an effect is refused.
         #expect(
             goMainDiagnostic(
@@ -143,21 +143,21 @@ struct GoCompoundAssignmentTests: GoTestHarness {
         let one = "func one() int { return 1 }\nfunc two() (int, int) { return 1, 2 }\n"
         #expect(
             goMainDiagnostic("f()", declarations: one + "func f() (int, string) { return one() }")
-                == "not enough return values")
+                == "not enough return values\n\thave (int)\n\twant (int, string)")
         #expect(
             goMainDiagnostic("f()", declarations: one + "func f() (int, string) { return two() }")
-                == "cannot use int as string value in return statement")
+                == "cannot use two() (value of type int) as string value in return statement")
         #expect(
             goMainDiagnostic(
                 "f()",
                 declarations: one + "func three() (int, int, int) { return 1, 2, 3 }\nfunc f() (int, int) { return three() }")
-                == "too many return values")
+                == "too many return values\n\thave (int, int, int)\n\twant (int, int)")
         // As the arguments of a call they must match its parameters.
         #expect(
             goMainDiagnostic(
                 "fmt.Println(sum(two()))",
                 declarations: one + "func sum(a int, b int, c int) int { return a + b + c }")
-                == "not enough arguments in call to sum")
+                == "not enough arguments in call to sum\n\thave (int, int)\n\twant (int, int, int)")
     }
 
     // MARK: Package-level initializers

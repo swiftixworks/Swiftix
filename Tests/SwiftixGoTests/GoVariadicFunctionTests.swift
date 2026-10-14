@@ -38,13 +38,13 @@ struct GoVariadicFunctionTests: GoTestHarness {
     }
 
     @Test func argumentsAreCheckedAgainstTheElementType() {
-        #expect(diagnostic("fmt.Println(sum(1, \"a\"))") == "cannot use string as int value in argument to sum")
+        #expect(diagnostic("fmt.Println(sum(1, \"a\"))") == "cannot use \"a\" (untyped string constant) as int value in argument to sum")
         #expect(
             diagnostic("fmt.Println(sum([]string{\"a\"}...))")
-                == "cannot use []string as []int value in argument to sum")
-        #expect(diagnostic("fmt.Println(sum(1, []int{2}...))") == "can only use ... with final argument in list")
-        #expect(diagnostic("fmt.Println(join())") == "not enough arguments in call to join")
-        #expect(diagnostic("fmt.Println(join(1))") == "cannot use int as string value in argument to join")
+                == "cannot use []string{…} (value of type []string) as []int value in argument to sum")
+        #expect(diagnostic("fmt.Println(sum(1, []int{2}...))") == "too many arguments in call to sum\n\thave (number, []int...)\n\twant (...int)")
+        #expect(diagnostic("fmt.Println(join())") == "not enough arguments in call to join\n\thave ()\n\twant (string, ...string)")
+        #expect(diagnostic("fmt.Println(join(1))") == "cannot use 1 (untyped int constant) as string value in argument to join")
         #expect(diagnostic("var b box\nfmt.Println(b.add(1))") != nil)
         #expect(diagnostic("var text string = sum()\nfmt.Println(text)") != nil)
         #expect(

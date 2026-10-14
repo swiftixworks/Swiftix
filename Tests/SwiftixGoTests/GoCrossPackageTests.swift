@@ -778,11 +778,11 @@ struct GoCrossPackageTests: GoTestHarness {
                 ("main.go", "package main\nimport \"example/m/lib\"\nfunc main() {\n\t\(body)\n}\n"),
             ]))
         }
-        #expect(message("lib.helper()") == "/m/main.go:4:6: cannot refer to unexported name lib.helper")
-        #expect(message("x := lib.hidden")?.hasSuffix("cannot refer to unexported name lib.hidden") == true)
-        #expect(message("x := lib.limit")?.hasSuffix("cannot refer to unexported name lib.limit") == true)
-        #expect(message("var s lib.secret")?.hasSuffix("cannot refer to unexported name lib.secret") == true)
-        #expect(message("s := lib.secret{N: 1}")?.hasSuffix("cannot refer to unexported name lib.secret") == true)
+        #expect(message("lib.helper()") == "/m/main.go:4:6: name helper not exported by package lib")
+        #expect(message("x := lib.hidden")?.hasSuffix("name hidden not exported by package lib") == true)
+        #expect(message("x := lib.limit")?.hasSuffix("name limit not exported by package lib") == true)
+        #expect(message("var s lib.secret")?.hasSuffix("name secret not exported by package lib") == true)
+        #expect(message("s := lib.secret{N: 1}")?.hasSuffix("name secret not exported by package lib") == true)
         #expect(message("lib.Missing()")?.hasSuffix("undefined: lib.Missing") == true)
         #expect(message("var m lib.Missing")?.hasSuffix("undefined: lib.Missing") == true)
         #expect(message("lib.Public()") == nil)

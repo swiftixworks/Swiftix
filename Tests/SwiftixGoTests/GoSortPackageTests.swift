@@ -194,29 +194,29 @@ struct GoSortPackageTests: GoTestHarness {
         let sort = ["fmt", "sort"]
         #expect(
             goMainDiagnostic("sort.Strings([]int{1})", imports: sort)
-                == "cannot use []int as []string value")
-        #expect(goMainDiagnostic("sort.Ints(\"x\")", imports: sort) == "cannot use string as []int value")
+                == "cannot use []int{…} (value of type []int) as []string value in argument to sort.Strings")
+        #expect(goMainDiagnostic("sort.Ints(\"x\")", imports: sort) == "cannot use \"x\" (untyped string constant) as []int value in argument to sort.Ints")
         #expect(
-            goMainDiagnostic("sort.Ints([]byte{1})", imports: sort) == "cannot use []byte as []int value")
+            goMainDiagnostic("sort.Ints([]byte{1})", imports: sort) == "cannot use []byte{…} (value of type []byte) as []int value in argument to sort.Ints")
         #expect(
             goMainDiagnostic("sort.Ints()", imports: sort)
-                == "wrong number of arguments in call to sort.Ints")
+                == "not enough arguments in call to sort.Ints\n\thave ()\n\twant ([]int)")
         #expect(
             goMainDiagnostic("x := sort.Ints([]int{1})\nfmt.Println(x)", imports: sort)
-                == "no value used as value")
+                == "sort.Ints([]int{…}) (no value) used as value")
         #expect(
             goMainDiagnostic("sort.Float64s([]int{1})", imports: sort)
-                == "cannot use []int as []float64 value")
+                == "cannot use []int{…} (value of type []int) as []float64 value in argument to sort.Float64s")
         #expect(goMainDiagnostic("sort.Ints([]int{1})") == "undefined: sort")
         #expect(
             goMainDiagnostic("fmt.Println(strconv.Itoa(\"1\"))", imports: ["fmt", "strconv"])
-                == "cannot use string as int value")
+                == "cannot use \"1\" (untyped string constant) as int value in argument to strconv.Itoa")
         #expect(
             goMainDiagnostic("var n int = strconv.Itoa(1)\nfmt.Println(n)", imports: ["fmt", "strconv"])
-                == "cannot use string as int value")
+                == "cannot use strconv.Itoa(1) (value of type string) as int value in variable declaration")
         #expect(
             goMainDiagnostic("a, b := strconv.Itoa(1)\nfmt.Println(a, b)", imports: ["fmt", "strconv"])
-                == "assignment mismatch: 2 variables but function returns 1 values")
+                == "assignment mismatch: 2 variables but strconv.Itoa returns 1 value")
     }
 
     @Test func nativesValidateOperandsAndCollectionLimits() throws {

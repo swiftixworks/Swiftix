@@ -19,7 +19,14 @@
 enum GoForwardedResults {
     /// The name the type checker gives result `index` of the inner call
     /// while it checks the call that takes it.
-    static func name(_ index: Int) -> String { "$forwarded.\(index)" }
+    static func name(_ index: Int) -> String { prefix + String(index) }
+
+    /// What the name of every such result begins with.
+    static let prefix = "$forwarded."
+
+    /// The name under which the scope of those results keeps how the source
+    /// writes the inner call: a message about a result names the call.
+    static let spellingName = "$forwarded"
 
     /// The inner call when `arguments` is one call and `callee` is something
     /// that takes arguments. An operator and the `...` of `values...` are
@@ -47,8 +54,7 @@ extension GoExpression {
     /// the name a selection selects, the operator between two operands.
     var start: GoSourcePosition {
         switch self {
-        case .selector(let base, _, _), .index(let base, _, _), .slicing(let base, _, _, _),
-            .typeAssertion(let base, _, _):
+        case .selector(let base, _, _), .index(let base, _, _), .typeAssertion(let base, _, _):
             return base.start
         case .binary(let left, _, _, _):
             return left.start

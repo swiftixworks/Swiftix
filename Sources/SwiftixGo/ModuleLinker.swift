@@ -435,7 +435,7 @@ private struct FileRewriter {
         guard GoModuleLinker.isExported(member) else {
             throw GoDiagnostic(
                 position: position,
-                message: "cannot refer to unexported name \(qualifier).\(member)")
+                message: "name \(member) not exported by package \(qualifier)")
         }
         guard imported.declared.contains(member) else {
             throw GoDiagnostic(position: position, message: "undefined: \(qualifier).\(member)")

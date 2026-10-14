@@ -596,7 +596,7 @@ struct GoForwardedResultTests: GoTestHarness {
                     func ints() (int, int)    { return 1, 2 }
                     func bytes(b byte, n int) {}
                     """)
-                == "6:7: cannot use int as byte value in argument to bytes")
+                == "6:7: cannot use ints() (value of type int) as byte value in argument to bytes")
         #expect(
             firstError("plain(named())", declarations: """
                     type code int
@@ -604,7 +604,7 @@ struct GoForwardedResultTests: GoTestHarness {
                     func named() (code, string) { return 1, "a" }
                     func plain(n int, s string) {}
                     """)
-                == "8:7: cannot use code as int value in argument to plain")
+                == "8:7: cannot use named() (value of int type code) as int value in argument to plain")
     }
 
     /// Go makes the calls of an expression in the order the source has them:
@@ -1267,7 +1267,7 @@ struct GoForwardedResultTests: GoTestHarness {
                 == "5:6: cannot use ... with 2-valued list()")
         #expect(
             firstError("fmt.Println(strconv.Atoi(\"5\") + 1)", imports: ["fmt", "strconv"])
-                == "6:13: multiple-value strconv.Atoi() (value of type (int, interface{...})) in single-value context")
+                == "6:13: multiple-value strconv.Atoi(\"5\") (value of type (int, error)) in single-value context")
         #expect(
             firstError(
                 """
@@ -1279,7 +1279,7 @@ struct GoForwardedResultTests: GoTestHarness {
 
                     func (b box) both() (int, string) { return 1, "a" }
                     """)
-                == "8:13: multiple-value both() (value of type (int, string)) in single-value context")
+                == "8:13: multiple-value b.both() (value of type (int, string)) in single-value context")
         #expect(
             firstError(
                 """
@@ -1287,14 +1287,14 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(s.both() == 1)
                 """,
                 declarations: "type shower interface{ both() (int, string) }")
-                == "6:13: multiple-value both() (value of type (int, string)) in single-value context")
+                == "6:13: multiple-value s.both() (value of type (int, string)) in single-value context")
         #expect(
             firstError("fmt.Println(box.both(box{}) + 1)", declarations: """
                     type box struct{}
 
                     func (b box) both() (int, string) { return 1, "a" }
                     """)
-                == "7:13: multiple-value box.both() (value of type (int, string)) in single-value context")
+                == "7:13: multiple-value box.both(box{}) (value of type (int, string)) in single-value context")
         #expect(
             firstError(
                 """
@@ -1302,7 +1302,7 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(h.run() + 1)
                 """,
                 declarations: "type holder struct{ run func() (int, string) }")
-                == "6:13: multiple-value run() (value of type (int, string)) in single-value context")
+                == "6:13: multiple-value h.run() (value of type (int, string)) in single-value context")
         #expect(
             firstError(
                 """
@@ -1310,13 +1310,13 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(list[0]() + 1)
                 """,
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:13: multiple-value function() (value of type (int, string)) in single-value context")
+                == "6:13: multiple-value list[0]() (value of type (int, string)) in single-value context")
         #expect(
             firstError("fmt.Println(func() (int, string) { return 1, \"a\" }() + 1)")
-                == "5:13: multiple-value function() (value of type (int, string)) in single-value context")
+                == "5:13: multiple-value func() (int, string) {…}() (value of type (int, string)) in single-value context")
         #expect(
             firstError("fmt.Println(named() * 2)", declarations: "func named() (q, r int) { return 1, 2 }")
-                == "5:13: multiple-value named() (value of type (int, int)) in single-value context")
+                == "5:13: multiple-value named() (value of type (q int, r int)) in single-value context")
         #expect(
             firstError(
                 """
@@ -1325,7 +1325,7 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(n)
                 """,
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:5: multiple-value two() (value of type (int, string)) in single-value context")
+                == "6:5: assignment mismatch: 1 variable but two returns 2 values")
         #expect(
             firstError(
                 """
@@ -1334,13 +1334,13 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(n)
                 """,
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:6: multiple-value f() (value of type (int, string)) in single-value context")
+                == "6:6: assignment mismatch: 1 variable but f returns 2 values")
         #expect(
             firstError("fmt.Println(one())", declarations: """
                     func two() (int, string) { return 1, "a" }
                     func one() int           { return two() }
                     """)
-                == "4:35: too many return values")
+                == "4:35: too many return values\n\thave (int, string)\n\twant (int)")
     }
 
     /// Too many results, too few, or one of another type than its parameter:
@@ -1352,25 +1352,25 @@ struct GoForwardedResultTests: GoTestHarness {
                     func two() (int, string) { return 1, "a" }
                     func take(n int)         {}
                     """)
-                == "6:6: too many arguments in call to take")
+                == "6:6: too many arguments in call to take\n\thave (int, string)\n\twant (int)")
         #expect(
             firstError("take(two())", declarations: """
                     func two() (int, string)           { return 1, "a" }
                     func take(n int, s string, b bool) {}
                     """)
-                == "6:6: not enough arguments in call to take")
+                == "6:6: not enough arguments in call to take\n\thave (int, string)\n\twant (int, string, bool)")
         #expect(
             firstError("take(two())", declarations: """
                     func two() (int, string) { return 1, "a" }
                     func take(a, b string)   {}
                     """)
-                == "6:6: cannot use int as string value in argument to take")
+                == "6:6: cannot use two() (value of type int) as string value in argument to take")
         #expect(
             firstError("take(two())", declarations: """
                     func two() (int, string) { return 1, "a" }
                     func take(a, b int)      {}
                     """)
-                == "6:6: cannot use string as int value in argument to take")
+                == "6:6: cannot use two() (value of type string) as int value in argument to take")
         #expect(
             firstError("box{}.take(two())", declarations: """
                     func two() (int, string) { return 1, "a" }
@@ -1379,7 +1379,7 @@ struct GoForwardedResultTests: GoTestHarness {
 
                     func (b box) take(n int) {}
                     """)
-                == "9:12: too many arguments in call to take")
+                == "9:12: too many arguments in call to box{}.take\n\thave (int, string)\n\twant (int)")
         #expect(
             firstError("box{}.take(two())", declarations: """
                     func two() (int, string) { return 1, "a" }
@@ -1388,7 +1388,7 @@ struct GoForwardedResultTests: GoTestHarness {
 
                     func (b box) take(n int, s string, b2 bool) {}
                     """)
-                == "9:12: not enough arguments in call to take")
+                == "9:12: not enough arguments in call to box{}.take\n\thave (int, string)\n\twant (int, string, bool)")
         #expect(
             firstError(
                 """
@@ -1400,7 +1400,7 @@ struct GoForwardedResultTests: GoTestHarness {
 
                     type taker interface{ take(n int, s string, b bool) }
                     """)
-                == "8:8: wrong number of arguments in call to take")
+                == "8:8: not enough arguments in call to t.take\n\thave (int, string)\n\twant (int, string, bool)")
         #expect(
             firstError(
                 """
@@ -1408,34 +1408,34 @@ struct GoForwardedResultTests: GoTestHarness {
                 f(two())
                 """,
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:3: cannot use int as string value in argument to f")
+                == "6:3: cannot use two() (value of type int) as string value in argument to f")
         #expect(
             firstError("func(a int) {}(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:16: wrong number of arguments in function literal call")
+                == "5:16: too many arguments in call to func(a int) {}\n\thave (int, string)\n\twant (int)")
         #expect(
             firstError("func(a, b int) {}(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:19: cannot use string as int value")
+                == "5:19: cannot use two() (value of type string) as int value in argument to func(a, b int) {}")
         #expect(
             firstError("many(two())", declarations: """
                     func two() (int, string) { return 1, "a" }
                     func many(xs ...string)  {}
                     """)
-                == "6:6: cannot use int as string value in argument to many")
+                == "6:6: cannot use two() (value of type int) as string value in argument to many")
         #expect(
             firstError("many(two())", declarations: """
                     func two() (int, string)    { return 1, "a" }
                     func many(n int, xs ...int) {}
                     """)
-                == "6:6: cannot use string as int value in argument to many")
+                == "6:6: cannot use two() (value of type string) as int value in argument to many")
         #expect(
             firstError("many(two())", declarations: """
                     func two() (int, string)                         { return 1, "a" }
                     func many(n int, s string, b bool, xs ...string) {}
                     """)
-                == "6:6: not enough arguments in call to many")
+                == "6:6: not enough arguments in call to many\n\thave (int, string)\n\twant (int, string, bool, ...string)")
         #expect(
             firstError("fmt.Printf(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:12: cannot use int as string value")
+                == "5:12: cannot use two() (value of type int) as string value in argument to fmt.Printf")
         #expect(
             firstError(
                 """
@@ -1443,22 +1443,22 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(s)
                 """,
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:18: cannot use int as string value")
+                == "5:18: cannot use two() (value of type int) as string value in argument to fmt.Sprintf")
         #expect(
             firstError("fmt.Fprintln(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:14: cannot use int as io.Writer value in argument to fmt.Fprintln")
+                == "5:14: cannot use two() (value of type int) as io.Writer value in argument to fmt.Fprintln: int does not implement io.Writer (missing method Write)")
         #expect(
             firstError("fmt.Println(strings.Repeat(two()))", imports: ["fmt", "strings"],
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:28: cannot use int as string value")
+                == "6:28: cannot use two() (value of type int) as string value in argument to strings.Repeat")
         #expect(
             firstError("fmt.Println(strings.ToUpper(two()))", imports: ["fmt", "strings"],
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:29: wrong number of arguments in call to strings.ToUpper")
+                == "6:29: too many arguments in call to strings.ToUpper\n\thave (int, string)\n\twant (string)")
         #expect(
             firstError("fmt.Println(strconv.Itoa(two()))", imports: ["fmt", "strconv"],
                 declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "6:26: wrong number of arguments in call to strconv.Itoa")
+                == "6:26: too many arguments in call to strconv.Itoa\n\thave (int, string)\n\twant (int)")
         #expect(
             firstError(
                 """
@@ -1466,22 +1466,22 @@ struct GoForwardedResultTests: GoTestHarness {
                 fmt.Println(x)
                 """,
                 declarations: "func list() ([]int, string) { return nil, \"a\" }")
-                == "5:13: cannot use string as int value")
+                == "5:13: cannot use list() (value of type string) as int value in argument to append")
         #expect(
             firstError("fmt.Println(len(two()))", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:13: invalid argument count for len")
+                == "5:13: invalid operation: too many arguments for len(two()) (expected 1, found 2)")
         #expect(
             firstError("fmt.Println(cap(two()))", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:13: invalid argument count for cap")
+                == "5:13: invalid operation: too many arguments for cap(two()) (expected 1, found 2)")
         #expect(
             firstError("panic(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:1: panic takes exactly one argument")
+                == "5:1: invalid operation: too many arguments for panic(two()) (expected 1, found 2)")
         #expect(
             firstError("close(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
-                == "5:1: close takes exactly one argument")
+                == "5:1: invalid operation: too many arguments for close(two()) (expected 1, found 2)")
         #expect(
             firstError("fmt.Println(copy(three()))", declarations: "func three() ([]int, []int, int) { return nil, nil, 1 }")
-                == "5:13: copy takes exactly two arguments")
+                == "5:13: invalid operation: too many arguments for copy(three()) (expected 2, found 3)")
         #expect(
             firstError("missing(two())", declarations: "func two() (int, string) { return 1, \"a\" }")
                 == "5:1: undefined: missing")

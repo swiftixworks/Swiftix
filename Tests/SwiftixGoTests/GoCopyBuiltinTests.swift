@@ -98,14 +98,14 @@ struct GoCopyBuiltinTests: GoTestHarness {
     }
 
     @Test func copyIsTypeChecked() {
-        #expect(goMainDiagnostic("copy([]int{1})") == "copy takes exactly two arguments")
+        #expect(goMainDiagnostic("copy([]int{1})") == "invalid operation: not enough arguments for copy([]int{…}) (expected 2, found 1)")
         #expect(
-            goMainDiagnostic("copy(1, []int{1})") == "first argument to copy must be slice")
+            goMainDiagnostic("copy(1, []int{1})") == "invalid argument: copy expects slice arguments; found 1 (untyped int constant) and []int{…} (value of type []int)")
         #expect(
             goMainDiagnostic("copy([]int{1}, []string{\"a\"})")
-                == "cannot copy []string into []int")
-        #expect(goMainDiagnostic("copy([]int{1}, \"text\")") == "cannot copy string into []int")
-        #expect(goMainDiagnostic("copy([]byte{1}, 7)") == "cannot copy int into []byte")
+                == "invalid argument: arguments to copy []int{…} (value of type []int) and []string{…} (value of type []string) have different element types int and string")
+        #expect(goMainDiagnostic("copy([]int{1}, \"text\")") == "invalid argument: arguments to copy []int{…} (value of type []int) and \"text\" (untyped string constant) have different element types int and byte")
+        #expect(goMainDiagnostic("copy([]byte{1}, 7)") == "invalid argument: copy expects slice arguments; found []byte{…} (value of type []byte) and 7 (untyped int constant)")
         #expect(goMainDiagnostic("var text string = copy([]int{1}, []int{2})\nfmt.Println(text)") != nil)
         #expect(
             goMainDiagnostic(

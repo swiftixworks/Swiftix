@@ -139,7 +139,7 @@ struct GoShortDeclarationTests: GoTestHarness {
                 flag := true
                 number, flag := pair(1, 2)
                 fmt.Println(number, flag)
-                """) == "cannot use int as bool value")
+                """) == "cannot use pair(1, 2) (value of type int) as bool value in assignment")
     }
 
     @Test func aStatementWithoutANewNameIsStillARedeclaration() {

@@ -109,7 +109,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:26: cannot refer to unexported field secret")
+                == "main.go:11:26: v.secret undefined (cannot refer to unexported field secret)")
         #expect(
             moduleError([
                 (
@@ -161,7 +161,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:7: cannot refer to unexported field secret")
+                == "main.go:11:7: v.secret undefined (cannot refer to unexported field secret)")
         #expect(
             moduleError([
                 (
@@ -213,7 +213,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:7: cannot refer to unexported field secret")
+                == "main.go:11:7: v.secret undefined (cannot refer to unexported field secret)")
         #expect(
             moduleError([
                 (
@@ -265,7 +265,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:13: cannot refer to unexported field secret")
+                == "main.go:11:13: v.secret undefined (cannot refer to unexported field secret)")
     }
 
     /// Called or taken as a value, of a struct, a pointer, or an interface.
@@ -320,7 +320,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:30: cannot refer to unexported method hidden")
+                == "main.go:11:30: v.hidden undefined (cannot refer to unexported method hidden)")
         #expect(
             moduleError([
                 (
@@ -371,7 +371,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:19: cannot refer to unexported method bump")
+                == "main.go:11:19: v.bump undefined (cannot refer to unexported method bump)")
         #expect(
             moduleError([
                 (
@@ -422,7 +422,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:29: cannot refer to unexported method closed")
+                == "main.go:11:29: v.closed undefined (cannot refer to unexported method closed)")
         #expect(
             moduleError([
                 (
@@ -474,7 +474,7 @@ struct GoUnexportedMemberTests: GoTestHarness {
                     """
                 ),
             ])
-                == "main.go:11:12: cannot refer to unexported method hidden")
+                == "main.go:11:12: v.hidden undefined (cannot refer to unexported method hidden)")
         #expect(
             moduleError([
                 (

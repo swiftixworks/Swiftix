@@ -133,7 +133,7 @@ struct GoPackageNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 main: imports + "func main() {\n var r geometry.Rect = api.Request{}\n fmt.Println(r)\n}\n")
-                == "/m/main.go:8:24: cannot use api.Request as geometry.Rect value")
+                == "/m/main.go:8:24: cannot use api.Request{} (value of struct type api.Request) as geometry.Rect value in variable declaration")
         #expect(
             diagnostic(
                 main: imports + "func main() {\n fmt.Println(geometry.Missing, api.Request{})\n}\n")
@@ -142,7 +142,7 @@ struct GoPackageNameTests: GoTestHarness {
         #expect(
             diagnostic(
                 main: "package main\nimport (\n \"fmt\"\n \"example/m/v2\"\n)\nfunc main() {\n var n int = api.Request{}\n fmt.Println(n)\n}\n")
-                == "/m/main.go:7:14: cannot use api.Request as int value")
+                == "/m/main.go:7:14: cannot use api.Request{} (value of struct type api.Request) as int value in variable declaration")
     }
 
     @Test func theSymbolsOfAPackageCarryItsName() {

@@ -38,10 +38,10 @@ struct GoDiagnosticPositionTests {
     @Test func aFunctionIsReportedAtItsName() {
         #expect(
             diagnostic("package main\nfunc f() {}\nfunc f() {}\nfunc main() { f() }\n")
-                == "main.go:3:6: f redeclared in this block")
+                == "main.go:3:6: f redeclared in this block\n\tmain.go:2:6: other declaration of f")
         #expect(
             diagnostic("package main\nvar f = 1\nfunc f() {}\nfunc main() {}\n")
-                == "main.go:3:6: f redeclared in this block")
+                == "main.go:3:6: f redeclared in this block\n\tmain.go:2:5: other declaration of f")
         #expect(
             diagnostic("package main\nfunc init(n int) {}\nfunc main() {}\n")
                 == "main.go:2:6: func init must have no arguments and no return values")
@@ -65,15 +65,15 @@ struct GoDiagnosticPositionTests {
     @Test func aResultIsReportedAtItsName() {
         #expect(
             diagnostic("package main\nfunc f(a int) (a int) { return a }\nfunc main() { _ = f(1) }\n")
-                == "main.go:2:16: a redeclared in this block")
+                == "main.go:2:16: a redeclared in this block\n\tmain.go:2:8: other declaration of a")
         #expect(
             diagnostic(
                 "package main\nfunc f(a int) (n int, a string) { return 1, \"\" }\nfunc main() { _, _ = f(1) }\n")
-                == "main.go:2:23: a redeclared in this block")
+                == "main.go:2:23: a redeclared in this block\n\tmain.go:2:8: other declaration of a")
         #expect(
             diagnostic(
                 "package main\nfunc f(b int) (a, b int) { return 1, 2 }\nfunc main() { _, _ = f(1) }\n")
-                == "main.go:2:19: b redeclared in this block")
+                == "main.go:2:19: b redeclared in this block\n\tmain.go:2:8: other declaration of b")
     }
 
     @Test func aSelectionIsReportedAtTheSelectedName() {
@@ -82,13 +82,13 @@ struct GoDiagnosticPositionTests {
         let declarations = "package main\ntype box struct {\n inner *box\n name string\n}\n"
         #expect(
             diagnostic(declarations + "func main() {\n b := &box{}\n _ = b.inner.missing\n}\n")
-                == "main.go:8:14: *box has no field or method missing")
+                == "main.go:8:14: b.inner.missing undefined (type *box has no field or method missing)")
         // Also where the name is on a line of its own.
         #expect(
             diagnostic(declarations + "func main() {\n b := &box{}\n _ = b.\n  inner.\n  missing\n}\n")
-                == "main.go:10:3: *box has no field or method missing")
+                == "main.go:10:3: b.inner.missing undefined (type *box has no field or method missing)")
         #expect(
             diagnostic(declarations + "func main() {\n b := &box{}\n b.inner.grow()\n}\n")
-                == "main.go:8:10: *box has no field or method grow")
+                == "main.go:8:10: b.inner.grow undefined (type *box has no field or method grow)")
     }
 }

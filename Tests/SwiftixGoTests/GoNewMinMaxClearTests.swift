@@ -299,12 +299,12 @@ struct GoNewMinMaxClearTests: GoTestHarness {
             firstError("fmt.Println(new(undefined))")
                 == "5:17: undefined: undefined")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := 5
                 fmt.Println(new(x))
                 """)
-                == "x is not a type")
+                == "6:17: x is not a type")
         #expect(
             firstError("fmt.Println(min())")
                 == "5:13: invalid operation: not enough arguments for min() (expected 1, found 0)")
@@ -384,12 +384,12 @@ struct GoNewMinMaxClearTests: GoTestHarness {
                 """)
                 == "6:7: invalid argument: cannot clear s (variable of type string): argument must be (or constrained by) map or slice")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 m := map[string]int{}
                 clear(m, m)
                 """)
-                == "invalid operation: too many arguments for clear(m, m) (expected 1, found 2)")
+                == "6:1: invalid operation: too many arguments for clear(m, m) (expected 1, found 2)")
         #expect(
             goMainDiagnostic(
                 """
@@ -405,48 +405,48 @@ struct GoNewMinMaxClearTests: GoTestHarness {
                 """)
                 == "constant 300 overflows byte")
         #expect(
-            goMainDiagnostic("fmt.Println(min(true, false))")
-                == "invalid argument: true (value of type bool) cannot be ordered")
+            firstError("fmt.Println(min(true, false))")
+                == "5:17: invalid argument: true (untyped bool constant) cannot be ordered")
     }
 
     /// A builtin that is called for its value is no statement of its own, and
     /// nothing for `go` or `defer` to start: Go says so, with the call.
     @Test func aValueNothingTakes() {
         #expect(
-            goMainDiagnostic("min(1, 2)")
-                == "min(1, 2) is not used")
+            firstError("min(1, 2)")
+                == "5:1: min(1, 2) (untyped int constant 1) is not used")
         #expect(
-            goMainDiagnostic("new(int)")
-                == "new(int) is not used")
+            firstError("new(int)")
+                == "5:1: new(int) (value of type *int) is not used")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s []int
                 len(s)
                 """)
-                == "len(s) is not used")
+                == "6:1: len(s) (value of type int) is not used")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s []int
                 append(s, 1)
                 """)
-                == "append(s, 1) is not used")
+                == "6:1: append(s, 1) (value of type []int) is not used")
         #expect(
-            goMainDiagnostic("make([]int, 1)")
-                == "make([]int, 1) is not used")
+            firstError("make([]int, 1)")
+                == "5:1: make([]int, 1) (value of type []int) is not used")
         #expect(
-            goMainDiagnostic("go min(1, 2)")
-                == "go discards result of min(1, 2)")
+            firstError("go min(1, 2)")
+                == "5:4: go discards result of min(1, 2) (untyped int constant 1)")
         #expect(
-            goMainDiagnostic("defer new(int)")
-                == "defer discards result of new(int)")
+            firstError("defer new(int)")
+                == "5:7: defer discards result of new(int) (value of type *int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s []int
                 defer len(s)
                 """)
-                == "defer discards result of len(s)")
+                == "6:7: defer discards result of len(s) (value of type int)")
     }
 }

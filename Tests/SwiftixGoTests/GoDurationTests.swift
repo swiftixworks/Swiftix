@@ -226,39 +226,39 @@ struct GoDurationTests: GoTestHarness {
     /// Go does.
     @Test func anIntIsNoDuration() {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 time.Sleep(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to time.Sleep")
+                == "7:12: cannot use n (variable of type int) as time.Duration value in argument to time.Sleep")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 const k int = 3
                 time.Sleep(k)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to time.Sleep")
+                == "7:12: cannot use k (constant 3 of type int) as time.Duration value in argument to time.Sleep")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 <-time.After(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to time.After")
+                == "7:14: cannot use n (variable of type int) as time.Duration value in argument to time.After")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 <-time.Tick(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to time.Tick")
+                == "7:13: cannot use n (variable of type int) as time.Duration value in argument to time.Tick")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 ctx, cancel := context.WithTimeout(context.Background(), n)
@@ -266,44 +266,44 @@ struct GoDurationTests: GoTestHarness {
                 fmt.Println(ctx)
                 """,
                 imports: ["context", "fmt", "time"])
-                == "cannot use int as time.Duration value in argument to context.WithTimeout")
+                == "8:58: cannot use n (variable of type int) as time.Duration value in argument to context.WithTimeout")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 t := time.Now()
                 fmt.Println(t.Add(n))
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to t.Add")
+                == "8:19: cannot use n (variable of type int) as time.Duration value in argument to t.Add")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 fmt.Println(time.Now().Add(n))
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to time.Now().Add")
+                == "7:28: cannot use n (variable of type int) as time.Duration value in argument to time.Now().Add")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 n := 3
                 fmt.Println(d.Round(n))
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to d.Round")
+                == "8:21: cannot use n (variable of type int) as time.Duration value in argument to d.Round")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 n := 3
                 fmt.Println(d.Truncate(n))
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value in argument to d.Truncate")
+                == "8:24: cannot use n (variable of type int) as time.Duration value in argument to d.Truncate")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 fmt.Println(retry(n))
@@ -326,59 +326,59 @@ struct GoDurationTests: GoTestHarness {
                         return sum
                     }
                     """)
-                == "cannot use int as time.Duration value in argument to retry")
+                == "21:19: cannot use n (variable of type int) as time.Duration value in argument to retry")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 d := 2 * time.Second
                 fmt.Println(d * n)
                 """,
                 imports: ["fmt", "time"])
-                == "mismatched types time.Duration and int")
+                == "8:13: invalid operation: d * n (mismatched types time.Duration and int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 d := 2 * time.Second
                 fmt.Println(n + d)
                 """,
                 imports: ["fmt", "time"])
-                == "mismatched types int and time.Duration")
+                == "8:13: invalid operation: n + d (mismatched types int and time.Duration)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 fmt.Println(n * time.Second)
                 """,
                 imports: ["fmt", "time"])
-                == "mismatched types int and time.Duration")
+                == "7:13: invalid operation: n * time.Second (mismatched types int and time.Duration)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 fmt.Println(time.Second > n)
                 """,
                 imports: ["fmt", "time"])
-                == "mismatched types time.Duration and int")
+                == "7:27: invalid operation: time.Second > n (mismatched types time.Duration and int)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var d time.Duration = 5
                 var n int = d
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Duration as int value")
+                == "7:13: cannot use d (variable of int64 type time.Duration) as int value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 var d time.Duration = n
                 fmt.Println(d)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value")
+                == "7:23: cannot use n (variable of type int) as time.Duration value in variable declaration")
         #expect(
             goMainDiagnostic(
                 """
@@ -387,26 +387,26 @@ struct GoDurationTests: GoTestHarness {
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Duration as int value")
+                == "cannot use timeout (constant of int64 type time.Duration) as int value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var n int = time.Since(time.Now())
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Duration as int value")
+                == "6:13: cannot use time.Since(time.Now()) (value of int64 type time.Duration) as int value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 t := time.Now()
                 var n int = t.Sub(t)
                 fmt.Println(n)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Duration as int value")
+                == "7:13: cannot use t.Sub(t) (value of int64 type time.Duration) as int value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 c := config{Timeout: n}
@@ -430,9 +430,9 @@ struct GoDurationTests: GoTestHarness {
                         return sum
                     }
                     """)
-                == "cannot use int as time.Duration value in struct literal")
+                == "21:22: cannot use n (variable of type int) as time.Duration value in struct literal")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 var c config
@@ -457,9 +457,9 @@ struct GoDurationTests: GoTestHarness {
                         return sum
                     }
                     """)
-                == "cannot use int as time.Duration value")
+                == "22:13: cannot use n (variable of type int) as time.Duration value in assignment")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 ds := []time.Duration{1}
@@ -467,63 +467,63 @@ struct GoDurationTests: GoTestHarness {
                 fmt.Println(ds)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as time.Duration value")
+                == "8:17: cannot use n (variable of type int) as time.Duration value in argument to append")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 n := 3
                 waits := make(chan time.Duration, 1)
                 waits <- n
                 """,
                 imports: ["fmt", "time"])
-                == "cannot send int value on time.Duration channel")
+                == "8:10: cannot use n (variable of type int) as time.Duration value in send")
         #expect(
-            goMainDiagnostic("fmt.Println(wait())", imports: ["fmt", "time"],
+            firstError("fmt.Println(wait())", imports: ["fmt", "time"],
                 declarations: """
                     func wait() time.Duration {
                         n := 1
                         return n
                     }
                     """)
-                == "cannot use int as time.Duration value in return statement")
+                == "6:12: cannot use n (variable of type int) as time.Duration value in return statement")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 fmt.Println(strconv.Itoa(d))
                 """,
                 imports: ["fmt", "strconv", "time"])
-                == "cannot use time.Duration as int value")
+                == "8:26: cannot use d (variable of int64 type time.Duration) as int value in argument to strconv.Itoa")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 fmt.Println(d + "s")
                 """,
                 imports: ["fmt", "time"])
-                == "mismatched types time.Duration and string")
+                == "7:13: invalid operation: d + \"s\" (mismatched types time.Duration and untyped string)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var d time.Duration = time.Now()
                 fmt.Println(d)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use time.Time as time.Duration value")
+                == "6:23: cannot use time.Now() (value of struct type time.Time) as time.Duration value in variable declaration")
         #expect(
-            goMainDiagnostic("fmt.Println(time.Until(5))", imports: ["fmt", "time"])
-                == "cannot use int as time.Time value")
+            firstError("fmt.Println(time.Until(5))", imports: ["fmt", "time"])
+                == "6:24: cannot use 5 (untyped int constant) as time.Time value in argument to time.Until")
         #expect(
-            goMainDiagnostic("fmt.Println(time.Duration(\"1s\"))", imports: ["fmt", "time"])
-                == "cannot convert string to type time.Duration")
+            firstError("fmt.Println(time.Duration(\"1s\"))", imports: ["fmt", "time"])
+                == "6:27: cannot convert \"1s\" (untyped string constant) to type time.Duration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d, err := time.ParseDuration(5)
                 fmt.Println(d, err)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use int as string value")
+                == "6:30: cannot use 5 (untyped int constant) as string value in argument to time.ParseDuration")
     }
 
     /// Reported as Go reports them, word for word.
@@ -537,21 +537,21 @@ struct GoDurationTests: GoTestHarness {
                 imports: ["fmt", "time"])
                 == "6:6: time.Duration (type) is not an expression")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 fmt.Println(d.Seconds2())
                 """,
                 imports: ["fmt", "time"])
-                == "time.Duration has no field or method Seconds2")
+                == "7:15: d.Seconds2 undefined (type time.Duration has no field or method Seconds2)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 fmt.Println(d / 0)
                 """,
                 imports: ["fmt", "time"])
-                == "division by zero")
+                == "7:17: invalid operation: division by zero")
     }
 
     /// `String`: the largest unit first, no unit that is zero before it, one
@@ -1060,7 +1060,7 @@ struct GoDurationTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s absInt = time.Second
                 fmt.Println(s)
@@ -1081,7 +1081,7 @@ struct GoDurationTests: GoTestHarness {
                         Name() string
                     }
                     """)
-                == "cannot use time.Duration as absInt value")
+                == "18:16: cannot use time.Second (constant 1000000000 of int64 type time.Duration) as absInt value in variable declaration: time.Duration does not implement absInt (wrong type for method Abs)\n\t\thave Abs() time.Duration\n\t\twant Abs() int")
     }
 
     /// It has the integer and none of the methods, as in Go: it prints as a
@@ -1132,32 +1132,32 @@ struct GoDurationTests: GoTestHarness {
 
                 """)
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 t := interval(time.Second)
                 fmt.Println(t.String())
                 """,
                 imports: ["fmt", "time"],
                 declarations: "type interval time.Duration")
-                == "interval has no field or method String")
+                == "7:15: t.String undefined (type interval has no field or method String)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 t := interval(time.Second)
                 time.Sleep(t)
                 """,
                 imports: ["fmt", "time"],
                 declarations: "type interval time.Duration")
-                == "cannot use interval as time.Duration value in argument to time.Sleep")
+                == "7:12: cannot use t (variable of int64 type interval) as time.Duration value in argument to time.Sleep")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var t interval = time.Second
                 fmt.Println(t)
                 """,
                 imports: ["fmt", "time"],
                 declarations: "type interval time.Duration")
-                == "cannot use time.Duration as interval value")
+                == "6:18: cannot use time.Second (constant 1000000000 of int64 type time.Duration) as interval value in variable declaration")
     }
 
     /// A method value has its receiver, read when the method is selected.
@@ -1188,14 +1188,14 @@ struct GoDurationTests: GoTestHarness {
                 imports: ["fmt", "time"])
                 == "1m30s 2m0s 0s 1h0m0s\n1h0m0s 1ms 2h0m0s\n1h0m0s 1s\n-1s -1s \ndeferred\n")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 d := time.Second
                 var s string = d.String
                 fmt.Println(s)
                 """,
                 imports: ["fmt", "time"])
-                == "cannot use func() string as string value")
+                == "7:16: cannot use d.String (value of type func() string) as string value in variable declaration")
     }
 
     /// Behind an import that names the package, behind one that lends its
@@ -1275,7 +1275,7 @@ struct GoDurationTests: GoTestHarness {
                     t.Sleep(n)
                 }
                 """)
-                == "cannot use int as time.Duration value in argument to t.Sleep")
+                == "cannot use n (variable of type int) as time.Duration value in argument to t.Sleep")
     }
 
     /// A recovered duration is the value with its type, and one nothing

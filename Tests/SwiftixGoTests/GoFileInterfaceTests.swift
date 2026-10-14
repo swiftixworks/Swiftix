@@ -211,42 +211,42 @@ struct GoFileInterfaceTests: GoTestHarness {
         func diagnostic(_ body: String, declarations: String = "") -> String? {
             goMainDiagnostic(body, imports: ["fmt", "os"], declarations: declarations)
         }
-        #expect(diagnostic("fmt.Fprintln(1, \"x\")") == "cannot use int as io.Writer value in argument to fmt.Fprintln")
-        #expect(diagnostic("fmt.Fprint()") == "wrong number of arguments in call to fmt.Fprint")
+        #expect(diagnostic("fmt.Fprintln(1, \"x\")") == "cannot use 1 (constant of type int) as io.Writer value in argument to fmt.Fprintln: int does not implement io.Writer (missing method Write)")
+        #expect(diagnostic("fmt.Fprint()") == "not enough arguments in call to fmt.Fprint\n\thave ()\n\twant (io.Writer, ...any)")
         #expect(
             diagnostic("n, err := fmt.Fprintln(os.Stdout, \"x\")\nfmt.Println(n, err)") == nil)
         #expect(
             diagnostic("n := fmt.Fprint(os.Stdout, \"x\")\nfmt.Println(n)")
-                == "multiple-value fmt.Fprint() in single-value context")
+                == "assignment mismatch: 1 variable but fmt.Fprint returns 2 values")
         #expect(
             diagnostic("n := os.Stdout.Write([]byte(\"x\"))\nfmt.Println(n)")
-                == "multiple-value Write() in single-value context")
+                == "assignment mismatch: 1 variable but os.Stdout.Write returns 2 values")
         #expect(
             diagnostic("fmt.Println(1 + os.Stdout.WriteString(\"x\"))")
-                == "multiple-value os.File.WriteString() in single-value context")
-        #expect(diagnostic("os.Stdout.Write(\"x\")") == "cannot use string as []byte value")
-        #expect(diagnostic("os.Stdout.Write([]int{1})") == "cannot use []int as []byte value")
-        #expect(diagnostic("os.Stdout.WriteString([]byte(\"x\"))") == "cannot use []byte as string value")
+                == "multiple-value os.Stdout.WriteString(\"x\") (value of type (int, error)) in single-value context")
+        #expect(diagnostic("os.Stdout.Write(\"x\")") == "cannot use \"x\" (untyped string constant) as []byte value in argument to os.Stdout.Write")
+        #expect(diagnostic("os.Stdout.Write([]int{1})") == "cannot use []int{…} (value of type []int) as []byte value in argument to os.Stdout.Write")
+        #expect(diagnostic("os.Stdout.WriteString([]byte(\"x\"))") == "cannot use []byte(\"x\") (value of type []byte) as string value in argument to os.Stdout.WriteString")
         #expect(
-            diagnostic("os.Stdin.Read()") == "wrong number of arguments in call to os.File.Read")
-        #expect(diagnostic("os.Stdout.Chmod(420)") == "*os.File has no field or method Chmod")
+            diagnostic("os.Stdin.Read()") == "not enough arguments in call to os.Stdin.Read\n\thave ()\n\twant ([]byte)")
+        #expect(diagnostic("os.Stdout.Chmod(420)") == "os.Stdout.Chmod undefined (type *os.File has no field or method Chmod)")
         #expect(diagnostic("os.Stdout = os.Stderr") == "undefined: os")
-        #expect(diagnostic("var n int = os.Stdout\nfmt.Println(n)") == "cannot use *os.File as int value")
-        #expect(diagnostic("fmt.Println(os.Stdout + 1)") == "mismatched types *os.File and int")
+        #expect(diagnostic("var n int = os.Stdout\nfmt.Println(n)") == "cannot use os.Stdout (variable of type *os.File) as int value in variable declaration")
+        #expect(diagnostic("fmt.Println(os.Stdout + 1)") == "invalid operation: os.Stdout + 1 (mismatched types *os.File and untyped int)")
         #expect(
             diagnostic("f := *os.Stdout\nfmt.Println(f)")
                 == "os.File is opaque; a *os.File cannot be dereferenced")
         #expect(
             diagnostic("data := os.ReadFile(\"/x\")\nfmt.Println(data)")
-                == "multiple-value ReadFile() in single-value context")
+                == "assignment mismatch: 1 variable but os.ReadFile returns 2 values")
         #expect(
-            diagnostic("os.WriteFile(\"/x\", \"text\", 420)") == "cannot use string as []byte value")
+            diagnostic("os.WriteFile(\"/x\", \"text\", 420)") == "cannot use \"text\" (untyped string constant) as []byte value in argument to os.WriteFile")
         #expect(
             diagnostic("os.WriteFile(\"/x\", []byte(\"t\"))")
-                == "wrong number of arguments in call to os.WriteFile")
+                == "not enough arguments in call to os.WriteFile\n\thave (string, []byte)\n\twant (string, []byte, int)")
         #expect(
             diagnostic("var n int = os.WriteFile(\"/x\", []byte(\"t\"), 420)\nfmt.Println(n)")
-                == "cannot use interface{...} as int value")
+                == "cannot use os.WriteFile(\"/x\", []byte(\"t\"), 420) (value of interface type error) as int value in variable declaration")
         #expect(diagnostic("os.Getwd()") == "undefined: os.Getwd")
         #expect(
             goMainDiagnostic("fmt.Fprintln(os.Stdout, 1)") == "undefined: os")

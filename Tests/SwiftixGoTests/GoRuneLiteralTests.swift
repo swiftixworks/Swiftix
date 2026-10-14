@@ -282,19 +282,19 @@ struct GoRuneLiteralTests: GoTestHarness {
     /// `byte` when a sum leaves the range.
     @Test func aRuneLiteralThatIsNoByteOverflowsOne() throws {
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var b byte = '世'
                 _ = b
                 """)
-                == "constant 19990 overflows byte")
+                == "5:14: cannot use '世' (untyped rune constant 19990) as byte value in variable declaration (overflows)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 b := []byte{'a', '世'}
                 _ = b
                 """)
-                == "constant 19990 overflows byte")
+                == "5:18: cannot use '世' (untyped rune constant 19990) as byte value in array or slice literal (overflows)")
         #expect(
             try runGoMain(
                 """

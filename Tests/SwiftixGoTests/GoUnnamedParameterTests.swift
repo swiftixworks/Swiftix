@@ -250,14 +250,14 @@ struct GoUnnamedParameterTests: GoTestHarness {
                 == "3:8: can only use ... with final parameter in list")
         #expect(
             firstError("", declarations: "func f(a int, a string) {}")
-                == "3:15: a redeclared in this block")
+                == "3:15: a redeclared in this block\n\tmain.go:3:8: other declaration of a")
         #expect(
             firstError(
                 """
                 f := func(a int, a string) {}
                 _ = f
                 """)
-                == "5:18: a redeclared in this block")
+                == "5:18: a redeclared in this block\n\tmain.go:5:11: other declaration of a")
         #expect(
             firstError("", declarations: "func f(_ int, _ int) int { return _ }")
                 == "3:35: cannot use _ as value or type")

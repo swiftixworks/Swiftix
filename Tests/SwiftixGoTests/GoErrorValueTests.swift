@@ -135,10 +135,10 @@ struct GoErrorValueTests: GoTestHarness {
                 """) == nil)
         #expect(diagnostic("var count int = errors.New(\"x\")\nfmt.Println(count)") != nil)
         #expect(
-            diagnostic("fmt.Println(errors.New(1))") == "cannot use int as string value")
+            diagnostic("fmt.Println(errors.New(1))") == "cannot use 1 (untyped int constant) as string value in argument to errors.New")
         #expect(
             diagnostic("fmt.Println(errors.New())")
-                == "wrong number of arguments in call to errors.New")
+                == "not enough arguments in call to errors.New\n\thave ()\n\twant (string)")
         #expect(
             diagnostic(
                 """

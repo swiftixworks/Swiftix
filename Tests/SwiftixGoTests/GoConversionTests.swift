@@ -122,30 +122,30 @@ struct GoConversionTests: GoTestHarness {
                 == "true true true 0 0 4 -1 true\n*main.t true\n4 4\n")
         #expect(
             goMainDiagnostic("x := 1\np := (*t)(x)\n_ = p", declarations: "type t struct{ n int }")
-                == "cannot convert int to type *t")
+                == "cannot convert x (variable of type int) to type *t")
         #expect(goMainDiagnostic("x := int(nil)\n_ = x") == "cannot convert nil to type int")
     }
 
     @Test func invalidConversionsAreDiagnosed() {
-        #expect(goMainDiagnostic("fmt.Println(int(\"x\"))") == "cannot convert string to type int")
-        #expect(goMainDiagnostic("fmt.Println(string(true))") == "cannot convert bool to type string")
-        #expect(goMainDiagnostic("fmt.Println([]byte(1))") == "cannot convert int to type []byte")
-        #expect(goMainDiagnostic("fmt.Println([]int(\"x\"))") == "cannot convert string to type []int")
-        #expect(goMainDiagnostic("fmt.Println(string([]int{1}))") == "cannot convert []int to type string")
-        #expect(goMainDiagnostic("fmt.Println(byte(\"x\"))") == "cannot convert string to type byte")
-        #expect(goMainDiagnostic("fmt.Println(bool(1))") == "cannot convert int to type bool")
-        #expect(goMainDiagnostic("fmt.Println(byte(1, 2))") == "conversion to byte requires exactly one argument")
-        #expect(goMainDiagnostic("fmt.Println(int())") == "conversion to int requires exactly one argument")
+        #expect(goMainDiagnostic("fmt.Println(int(\"x\"))") == "cannot convert \"x\" (untyped string constant) to type int")
+        #expect(goMainDiagnostic("fmt.Println(string(true))") == "cannot convert true (untyped bool constant) to type string")
+        #expect(goMainDiagnostic("fmt.Println([]byte(1))") == "cannot convert 1 (untyped int constant) to type []byte")
+        #expect(goMainDiagnostic("fmt.Println([]int(\"x\"))") == "cannot convert \"x\" (untyped string constant) to type []int")
+        #expect(goMainDiagnostic("fmt.Println(string([]int{1}))") == "cannot convert []int{…} (value of type []int) to type string")
+        #expect(goMainDiagnostic("fmt.Println(byte(\"x\"))") == "cannot convert \"x\" (untyped string constant) to type byte")
+        #expect(goMainDiagnostic("fmt.Println(bool(1))") == "cannot convert 1 (untyped int constant) to type bool")
+        #expect(goMainDiagnostic("fmt.Println(byte(1, 2))") == "too many arguments in conversion to byte")
+        #expect(goMainDiagnostic("fmt.Println(int())") == "missing argument in conversion to int")
         #expect(goMainDiagnostic("fmt.Println(byte(256))") == "constant 256 overflows byte")
         #expect(goMainDiagnostic("fmt.Println(uint8(-1))") == "constant -1 overflows byte")
-        #expect(goMainDiagnostic("x := 1\nint(x)") == "expression evaluated but not used")
-        #expect(goMainDiagnostic("x := 1\ndefer byte(x)") == "expression in defer must be function call")
-        #expect(goMainDiagnostic("x := 1\ngo int(x)") == "expression in go must be function call")
+        #expect(goMainDiagnostic("x := 1\nint(x)") == "int(x) (value of type int) is not used")
+        #expect(goMainDiagnostic("x := 1\ndefer byte(x)") == "defer requires function call, not conversion byte(x) (value of type byte)")
+        #expect(goMainDiagnostic("x := 1\ngo int(x)") == "go requires function call, not conversion int(x) (value of type int)")
         #expect(
             goMainDiagnostic(
                 "fmt.Println(B(A{1}))",
                 declarations: "type A struct { X int }\ntype B struct { Y int }")
-                == "cannot convert A to type B")
+                == "cannot convert A{…} (value of struct type A) to type B")
         #expect(goMainDiagnostic("a, b := int(1)\nfmt.Println(a, b)") != nil)
     }
 

@@ -319,33 +319,33 @@ struct GoAnonymousStructTests: GoTestHarness {
                 """)
                 == "5:26: too few values in struct literal of type struct{a int; b int}")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var t named = struct{ b int }{1}
                 fmt.Println(t)
                 """,
                 declarations: "type named struct{ a int }")
-                == "cannot use struct{b int} as named value")
+                == "5:15: cannot use struct{b int}{…} (value of type struct{b int}) as named value in variable declaration")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := struct{ a int }{1}
                 y := struct{ b int }{1}
                 fmt.Println(x == y)
                 """)
-                == "mismatched types struct{a int} and struct{b int}")
+                == "7:18: invalid operation: x == y (mismatched types struct{a int} and struct{b int})")
         #expect(
-            goMainDiagnostic("fmt.Println(other(point{1, 2}))", declarations: """
+            firstError("fmt.Println(other(point{1, 2}))", declarations: """
                     type point struct{ x, y int }
                     type other struct{ a, b int }
                     """)
-                == "cannot convert point to type other")
+                == "6:19: cannot convert point{…} (value of struct type point) to type other")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 x := struct{ a int }
                 fmt.Println(x)
                 """)
-                == "type is not an expression")
+                == "5:6: struct{a int} (type) is not an expression")
     }
 }

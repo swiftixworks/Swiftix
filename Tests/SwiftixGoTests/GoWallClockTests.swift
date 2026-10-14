@@ -133,10 +133,10 @@ struct GoWallClockTests: GoTestHarness {
         }
         #expect(
             diagnostic("fmt.Println(time.Now(1))")
-                == "wrong number of arguments in call to time.Now")
+                == "too many arguments in call to time.Now\n\thave (number)\n\twant ()")
         #expect(
             diagnostic("fmt.Println(time.Now().Unix(1))")
-                == "wrong number of arguments in call to time.Time.Unix")
+                == "too many arguments in call to time.Now().Unix\n\thave (number)\n\twant ()")
         #expect(diagnostic("fmt.Println(time.Now().Sub(5))") != nil)
         #expect(diagnostic("fmt.Println(time.Now().Add(time.Now()))") != nil)
         #expect(diagnostic("var seconds string = time.Now().Unix()\nfmt.Println(seconds)") != nil)

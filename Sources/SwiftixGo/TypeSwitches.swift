@@ -88,8 +88,9 @@ extension GoExpression {
     /// Where the expression begins: Go reports an operand there.
     var startPosition: GoSourcePosition {
         switch self {
-        case .selector(let base, _, _), .index(let base, _, _), .slicing(let base, _, _, _),
-            .typeAssertion(let base, _, _):
+        case .selector(let base, _, _), .index(let base, _, _), .typeAssertion(let base, _, _):
+            // A slice expression is where its `[` is: Go's checker corrects
+            // the place of every other node that begins with an operand.
             return base.startPosition
         case .call(let callee, let arguments, let position):
             if let operation = bitwiseOperation {

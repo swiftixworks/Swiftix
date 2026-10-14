@@ -256,7 +256,7 @@ struct GoInterfaceAssertionTests: GoTestHarness {
                 "backing := memory{total: 0}\nvar s store = &backing\n" + body,
                 declarations: Self.declarations + "\n" + declarations)
         }
-        #expect(diagnostic("fmt.Println(s.add())") == "wrong number of arguments in call to add")
+        #expect(diagnostic("fmt.Println(s.add())") == "not enough arguments in call to s.add\n\thave ()\n\twant (string, ...int)")
         #expect(diagnostic("fmt.Println(s.add(\"k\", \"v\"))") != nil)
         #expect(diagnostic("fmt.Println(s.add(\"k\", []string{\"v\"}...))") != nil)
         #expect(diagnostic("text, found := s.get()\nfmt.Println(text, found)") != nil)

@@ -57,7 +57,7 @@ struct GoFieldListTests: GoTestHarness {
     @Test func aFieldListIsChecked() {
         #expect(
             goMainDiagnostic("", declarations: "type t struct {\n X, Y int\n Y, Z string\n}")
-                == "Y redeclared in this block")
+                == "Y redeclared\n\tmain.go:4:5: other declaration of Y")
         #expect(
             goMainDiagnostic("", declarations: "type t struct {\n X, Y\n}") == "expected type")
         #expect(

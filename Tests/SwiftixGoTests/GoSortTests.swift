@@ -808,7 +808,7 @@ struct GoSortTests: GoTestHarness {
                 fmt.Println(xs)
                 """,
                 imports: ["fmt", "sort"])
-                == "cannot use int as func(int, int) bool value in argument to sort.Slice")
+                == "cannot use 1 (untyped int constant) as func(int, int) bool value in argument to sort.Slice")
         #expect(
             goMainDiagnostic(
                 """
@@ -817,7 +817,7 @@ struct GoSortTests: GoTestHarness {
                 fmt.Println(xs)
                 """,
                 imports: ["fmt", "sort"])
-                == "cannot use func(int, int) int as func(int, int) bool value in argument to sort.Slice")
+                == "cannot use func(i, j int) int {…} (value of type func(i int, j int) int) as func(int, int) bool value in argument to sort.Slice")
         #expect(
             goMainDiagnostic(
                 """
@@ -826,24 +826,24 @@ struct GoSortTests: GoTestHarness {
                 fmt.Println(xs)
                 """,
                 imports: ["fmt", "sort"])
-                == "not enough arguments in call to sort.Slice")
+                == "not enough arguments in call to sort.Slice\n\thave ([]int)\n\twant (any, func(int, int) bool)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 xs := []int{2, 1}
                 sort.Sort(xs)
                 fmt.Println(xs)
                 """,
                 imports: ["fmt", "sort"])
-                == "cannot use []int as sort.Interface value in argument to sort.Sort")
+                == "7:11: cannot use xs (variable of type []int) as sort.Interface value in argument to sort.Sort: []int does not implement sort.Interface (missing method Len)")
         #expect(
-            goMainDiagnostic(
+            firstError(
                 """
                 var s sort.IntSlice = []string{"a"}
                 fmt.Println(s)
                 """,
                 imports: ["fmt", "sort"])
-                == "cannot use []string as sort.IntSlice value")
+                == "6:23: cannot use []string{…} (value of type []string) as sort.IntSlice value in variable declaration")
         #expect(
             firstError("fmt.Println(sort.NoSuch(1))", imports: ["fmt", "sort"])
                 == "6:18: undefined: sort.NoSuch")

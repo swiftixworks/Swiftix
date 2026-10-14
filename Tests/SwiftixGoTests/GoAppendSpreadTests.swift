@@ -191,13 +191,13 @@ struct GoAppendSpreadTests: GoTestHarness {
     @Test func spreadIsTypeChecked() {
         #expect(
             goMainDiagnostic("x := append([]int{1}, []string{\"a\"}...)\nfmt.Println(x)")
-                == "cannot use []string as []int value in append")
+                == "cannot use []string{…} (value of type []string) as []int value in argument to append")
         #expect(
             goMainDiagnostic("x := append([]int{1}, \"text\"...)\nfmt.Println(x)")
-                == "cannot use string as []int value in append")
+                == "cannot use \"text\" (untyped string constant) as []int value in argument to append")
         #expect(
             goMainDiagnostic("x := append([]int{1}, 5 ...)\nfmt.Println(x)")
-                == "cannot use int as []int value in append")
+                == "cannot use 5 (untyped int constant) as []int value in argument to append")
         #expect(
             goMainDiagnostic("x := append([]int{1}, 2, []int{3}...)\nfmt.Println(x)")
                 == "can only use ... with final argument in list")
@@ -208,13 +208,13 @@ struct GoAppendSpreadTests: GoTestHarness {
         // variadic takes no spread at all.
         #expect(
             goMainDiagnostic("fmt.Println([]int{1}...)")
-                == "cannot use []int as []interface{} value in argument")
+                == "cannot use []int{…} (value of type []int) as []any value in argument to fmt.Println")
         #expect(goMainDiagnostic("fmt.Println(1, []any{2}...)") != nil)
         #expect(
             goMainDiagnostic(
                 "fmt.Println(total([]int{1}...))",
                 declarations: "func total(values []int) int {\n\treturn len(values)\n}")
-                == "can only use ... with final argument in list")
+                == "cannot use ... in call to non-variadic total")
         #expect(goMainDiagnostic("x := []int{1}...\nfmt.Println(x)") != nil)
         #expect(goMainDiagnostic("var x int = 1 ... 2\nfmt.Println(x)") != nil)
     }

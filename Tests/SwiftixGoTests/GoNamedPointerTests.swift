@@ -243,7 +243,7 @@ struct GoNamedPointerTests: GoTestHarness {
 
                     func (x *t) get() int { return x.n }
                     """)
-                == "12:15: ptr has no field or method get")
+                == "12:15: p.get undefined (type ptr has no field or method get)")
         #expect(
             firstError(
                 """
@@ -260,7 +260,7 @@ struct GoNamedPointerTests: GoTestHarness {
 
                     type pp *ptr
                     """)
-                == "13:23: pp has no field or method n")
+                == "13:23: q.n undefined (type pp has no field or method n)")
         #expect(
             try runGoMain(
                 """
@@ -295,7 +295,7 @@ struct GoNamedPointerTests: GoTestHarness {
                     }
                     type ptr *t
                     """)
-                == "10:13: cannot use ptr as int value")
+                == "10:13: cannot use p (variable of pointer type ptr) as int value in variable declaration")
         #expect(
             firstError(
                 """
@@ -311,7 +311,7 @@ struct GoNamedPointerTests: GoTestHarness {
 
                     type u struct{ n int }
                     """)
-                == "11:13: cannot use *u as ptr value")
+                == "11:13: cannot use &u{} (value of type *u) as ptr value in variable declaration")
         #expect(
             firstError(
                 """
@@ -328,7 +328,7 @@ struct GoNamedPointerTests: GoTestHarness {
 
                     type other *t
                     """)
-                == "12:15: cannot use ptr as other value")
+                == "12:15: cannot use p (variable of pointer type ptr) as other value in variable declaration")
         #expect(
             try runGoMain(
                 """
