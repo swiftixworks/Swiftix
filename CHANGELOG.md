@@ -491,6 +491,12 @@ format, behavior and platform changes are recorded here.
   after a tab, as Go prints them.
 - `GoType.description` prints `error`, `any`, and an interface type with its
   methods (was `interface{...}` and `interface{}`).
+- The library packages written in Go are linked by one mechanism, and only
+  what a program reaches of `net/http`, `net/url`, `io`, `strings`, `sort`,
+  and `sync` is linked, variables and their initializers included: a program
+  that uses `net/http` for its status constants alone is linked with no
+  function of it. Their Go text is the files under `Sources/SwiftixGoLibrary`;
+  `Scripts/generate-go-library.py` writes the Swift file the build reads.
 
 ### Fixed
 
