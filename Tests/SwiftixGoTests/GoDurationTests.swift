@@ -1446,7 +1446,8 @@ struct GoDurationTests: GoTestHarness {
     /// a unit is its number of nanoseconds, a conversion to the type is no
     /// instruction, and a method is one native call.
     @Test func aProgramThatBoxesNoDurationIsCompiledAsItWas() throws {
-        let executable = try GoCompiler.compile(sources: [
+        // The lowering, before the pass that removes temporaries.
+        let executable = try GoTemporaryElimination.$isEnabled.withValue(false) { try GoCompiler.compile(sources: [
             GoSourceFile(
                 path: "main.go",
                 text: goMainSource(
@@ -1459,7 +1460,7 @@ struct GoDurationTests: GoTestHarness {
                         time.Sleep(d.Round(time.Second))
                     }
                     """, imports: ["time"]))
-        ])
+        ]) }
         let main = try #require(executable.functions.first { $0.name == "main" })
 
         #expect(executable.functions.count == 1)

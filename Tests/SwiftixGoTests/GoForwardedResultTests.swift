@@ -129,13 +129,14 @@ struct GoForwardedResultTests: GoTestHarness {
     /// The results go from where the inner call left them to the call that
     /// takes them: no variable is made for them, and no instruction is new.
     @Test func forwardingCostsTheTwoCalls() throws {
-        let executable = try GoCompiler.compile(sources: [
+        // The lowering, before the pass that removes temporaries.
+        let executable = try GoTemporaryElimination.$isEnabled.withValue(false) { try GoCompiler.compile(sources: [
             GoSourceFile(
                 path: "main.go",
                 text: goMainSource(
                     "take(pair())",
                     declarations: "func pair() (int, string) { return 7, \"seven\" }\nfunc take(n int, s string) {}"))
-        ])
+        ]) }
         let main = try #require(executable.functions.first { $0.name == "main" })
 
         #expect(main.localCount == 2)

@@ -66,13 +66,13 @@ struct GoPanicTraceTests: GoTestHarness {
                 panic: runtime error: index out of range [3] with length 1
                 goroutine 1 [running]:
                 main.(*T).get(...)
-                \t/m/main.go:8 +0xc
+                \t/m/main.go:8 +0x6
                 main.f(...)
-                \t/m/main.go:13 +0x16
+                \t/m/main.go:13 +0x8
                 main.main.func1()
-                \t/m/main.go:19 +0x3
+                \t/m/main.go:19 +0x1
                 main.main()
-                \t/m/main.go:20 +0xa
+                \t/m/main.go:20 +0x4
                 exit status 2
                 status=1
                 """)
@@ -85,7 +85,7 @@ struct GoPanicTraceTests: GoTestHarness {
         let traces = output.split(separator: "start\n", omittingEmptySubsequences: true)
         #expect(traces.count == 2)
         #expect(traces.first?.trimmingSuffix() == traces.last?.trimmingSuffix())
-        #expect(output.contains("\t/m/main.go:8 +0xc"))
+        #expect(output.contains("\t/m/main.go:8 +0x6"))
     }
 
     /// A panic in another goroutine names it (Go numbers its goroutines
@@ -122,9 +122,9 @@ struct GoPanicTraceTests: GoTestHarness {
                 \tpanic: again
                 goroutine 2 [running]:
                 main.work.func1()
-                \t/m/main.go:11 +0x3
+                \t/m/main.go:11 +0x1
                 main.work()
-                \t/m/main.go:13 +0xa
+                \t/m/main.go:13 +0x4
                 exit status 2
                 """)
     }
@@ -141,11 +141,11 @@ struct GoPanicTraceTests: GoTestHarness {
                 panic: runtime error: index out of range [3] with length 1
                 goroutine 1 [running]:
                 main.(*T).get(...)
-                \t?:0 +0xc
+                \t?:0 +0x6
                 main.f(...)
-                \t?:0 +0x16
+                \t?:0 +0x8
                 """))
-        #expect(output.contains("main.func·215()\n\t?:0 +0x3\nmain.main()\n\t?:0 +0xa\nstatus=2"))
+        #expect(output.contains("main.func·215()\n\t?:0 +0x1\nmain.main()\n\t?:0 +0x4\nstatus=2"))
     }
 
     /// The names Go gives the functions of an image without lines.

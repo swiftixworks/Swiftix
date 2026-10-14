@@ -332,10 +332,11 @@ format, behavior and platform changes are recorded here.
   `Server.ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`,
   `ConnState`, `Shutdown`, `Close`, and `RegisterOnShutdown`;
   `Client.Timeout`; `http.TimeoutHandler`; `url.Error.Timeout` and `Temporary`.
-- An optional bytecode pass that removes the compiler's single-use
-  temporaries, about 40% fewer instructions executed. It is off unless the
-  toolchain is built with `-DSWIFTIX_GO_TEMPORARIES`, because it changes every
-  image.
+- A bytecode pass that removes the compiler's single-use temporaries runs on
+  every image: programs execute about 40% fewer instructions and their images
+  are about 30% smaller (the coreutils package from 894 KB to 606 KB; the
+  redis-style key-value server example runs in half the time). A panic's
+  trace keeps its lines; the instruction offsets it prints are the new ones.
 - `time.Time` has Go's calendar: `Year`, `Month` (`time.Month` with
   `String`), `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`
   (`time.Weekday`), `YearDay`, `ISOWeek`, `Date`, `Clock`, `IsZero`,
@@ -643,9 +644,10 @@ format, behavior and platform changes are recorded here.
 - A program that uses `strings.NewReader` (and so `http.NewRequest`) or
   `io.Copy` is linked with more of the library and compiles to a larger
   image.
-- The Go tool reports `go1.24-swiftix.0.6`, so images cached by an earlier
-  tool are built again rather than replayed. The coreutils and sysutils
-  packages are rebuilt for the `os` file functions linked from Go text.
+- The Go tool reports `go1.24-swiftix.0.7`, so images cached by an earlier
+  tool are built again rather than replayed. The coreutils, sysutils, and
+  editors packages are rebuilt for the `os` file functions linked from Go
+  text and for the pass that removes temporaries.
 - `go run` and `go test` no longer stop a program after 1,000,000 VM
   instructions (`instruction limit exceeded`); like Go's, they bound no CPU
   time. Embedding hosts that call `GoVirtualMachine.run` keep the budget.

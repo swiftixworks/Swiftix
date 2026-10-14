@@ -1,11 +1,10 @@
 /// The bytecode pass that removes the compiler's single-use temporaries
 /// (`GoTemporaryElimination`).
 ///
-/// The compiler runs it only in a build compiled with
-/// `-DSWIFTIX_GO_TEMPORARIES`, because it changes every image. These tests
-/// apply it to images built the ordinary way and check that the programs
-/// print the same and execute fewer instructions, so the pass keeps working
-/// while it is off.
+/// The compiler runs it on every image. These tests build each program with
+/// the pass turned off, apply it, and check that the program prints the
+/// same with fewer instructions, and that the compiler's image is the one
+/// the pass makes.
 
 @testable import SwiftixGo
 import SwiftixGoRuntime
@@ -19,12 +18,16 @@ struct GoTemporaryEliminationTests: GoTestHarness {
     private func compare(
         _ body: String, imports: [String] = ["fmt"], declarations: String = ""
     ) throws -> (before: String, after: String, instructions: (Int, Int)) {
-        let executable = try GoCompiler.compile(sources: [
+        let sources = [
             GoSourceFile(
                 path: "main.go",
                 text: goMainSource(body, imports: imports, declarations: declarations))
-        ])
+        ]
+        let executable = try GoTemporaryElimination.$isEnabled.withValue(false) {
+            try GoCompiler.compile(sources: sources)
+        }
         let eliminated = GoTemporaryElimination.apply(to: executable)
+        #expect(try GoCompiler.compile(sources: sources) == eliminated)
         var before = ""
         var after = ""
         try GoVirtualMachine().run(executable) { before += $0 }

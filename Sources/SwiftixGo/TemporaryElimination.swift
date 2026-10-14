@@ -15,30 +15,62 @@ import SwiftixGoRuntime
 ///   `t` is loaded, when only side-effect-free code that does not change its
 ///   inputs lies between.
 ///
-/// It changes every image and the instruction count programs are charged,
-/// so it is off: the compiler runs it only in a build compiled with
-/// `-DSWIFTIX_GO_TEMPORARIES`, where `GoExecutable.eliminatingTemporaries()`
-/// also applies it to an image that was already built.
+/// The table of source lines a panic's trace reads is kept in step: each
+/// statement's first instruction is moved with the code. The pass runs on
+/// every image the compiler emits; `GoExecutable.eliminatingTemporaries()`
+/// applies it to an image built by an earlier compiler.
 enum GoTemporaryElimination {
+    /// Whether the compiler runs the pass; tests turn it off to compare
+    /// an image with the one the pass makes of it.
+    @TaskLocal static var isEnabled = true
+
     static func apply(to executable: GoExecutable) -> GoExecutable {
-        GoExecutable(
+        var lines = executable.sourceLines
+        var result = GoExecutable(
             entryPoint: executable.entryPoint,
             initializers: executable.initializers,
             globalCount: executable.globalCount,
-            functions: executable.functions.map(apply(to:)))
+            functions: executable.functions.map { function in
+                let known = lines.functions[function.name]
+                var offsets = known?.offsets ?? []
+                let applied = apply(to: function, statementOffsets: &offsets)
+                if let known, offsets != known.offsets {
+                    lines.functions[function.name] = GoSourceLines.Function(
+                        goName: known.goName, path: known.path,
+                        hasArguments: known.hasArguments,
+                        offsets: offsets, lines: known.lines)
+                }
+                return applied
+            })
+        result.sourceLines = lines
+        return result
     }
 
     static func apply(to function: GoBytecodeFunction) -> GoBytecodeFunction {
+        var offsets: [Int] = []
+        return apply(to: function, statementOffsets: &offsets)
+    }
+
+    /// `function` with its temporaries removed, and `statementOffsets`, the
+    /// first instruction of each statement, moved with them.
+    static func apply(
+        to function: GoBytecodeFunction, statementOffsets: inout [Int]
+    ) -> GoBytecodeFunction {
         var instructions = function.instructions
         // The safepoints are left alone unless they are every program
         // counter, which is what the compiler emits.
         guard function.safepointProgramCounters == Array(0...instructions.count) else {
             return function
         }
-        while let rewritten = eliminateOne(
+        // Each round rewrites every temporary whose code does not overlap
+        // another's; a rewrite can make room for another, so rounds repeat
+        // until none is left. A round is one scan of the function, so a long
+        // function costs a few scans, not one per temporary.
+        while let (rewritten, moved) = eliminateRound(
             in: instructions, parameterCount: function.parameterCount)
         {
             instructions = rewritten
+            statementOffsets = statementOffsets.map(moved)
         }
         guard instructions.count != function.instructions.count else { return function }
         return GoBytecodeFunction(
@@ -131,94 +163,157 @@ enum GoTemporaryElimination {
         }
     }
 
-    /// One elimination, or nil when there is none left.
-    private static func eliminateOne(
-        in instructions: [GoInstruction],
-        parameterCount: Int
-    ) -> [GoInstruction]? {
-        let table = uses(in: instructions)
-        let targets = jumpTargets(in: instructions)
-        for (local, use) in table.sorted(by: { $0.key < $1.key }) {
-            guard local >= parameterCount, !use.pinned,
-                use.stores.count == 1, use.loads.count == 1
-            else { continue }
-            let store = use.stores[0]
-            let load = use.loads[0]
-            guard store < load, !(store + 1...load).contains(where: targets.contains) else {
-                continue
-            }
-            if load == store + 1 {
-                var result = instructions
-                result.removeSubrange(store...load)
-                return remapped(result, removed: store...load, inserted: 0, at: store)
-            }
-            // The code that computes the value: walk back until it has
-            // produced exactly the one value the store takes.
-            var needed = 1
-            var start = store
-            while needed > 0 {
-                start -= 1
-                guard start >= 0, let effect = pureStackEffect(instructions[start]) else {
-                    break
-                }
-                needed += effect.pops - effect.pushes
-            }
-            guard needed == 0, start >= 0,
-                !(start + 1...store).contains(where: targets.contains)
-            else { continue }
-            let definition = Array(instructions[start..<store])
-            let inputs = Set(definition.compactMap { instruction -> Int? in
-                if case .load(let local) = instruction { return local }
-                return nil
-            })
-            let between = instructions[(store + 1)..<load]
-            let movable = between.allSatisfy { instruction in
-                if case .store(let local) = instruction { return !inputs.contains(local) }
-                return pureStackEffect(instruction) != nil
-            }
-            guard movable else { continue }
-            var result = Array(instructions[..<start])
-            result += between
-            result += definition
-            result += instructions[(load + 1)...]
-            return remapped(
-                result, removed: start...load,
-                inserted: between.count + definition.count, at: start)
-        }
-        return nil
+    /// One rewrite: the old instructions `start...load` become
+    /// `replacement`. `between` is how many of the replacement's
+    /// instructions come before the moved definition (0 when a pair was
+    /// deleted), and `store` is where the definition's store was.
+    private struct Rewrite {
+        let start: Int
+        let store: Int
+        let load: Int
+        let between: Int
+        let replacement: [GoInstruction]
     }
 
-    /// `instructions` with its jump targets moved: the old instructions in
-    /// `removed` became the `inserted` ones at `at`, and no jump lands
-    /// inside that range except at its start.
-    private static func remapped(
-        _ instructions: [GoInstruction],
-        removed: ClosedRange<Int>,
-        inserted: Int,
-        at start: Int
-    ) -> [GoInstruction] {
-        let shift = inserted - removed.count
-        func map(_ target: Int) -> Int {
-            target <= removed.lowerBound ? target : target + shift
+    /// The rewrite of `local`, if it is a single-use temporary that can go.
+    private static func rewrite(
+        of use: Uses, in instructions: [GoInstruction], targets: Set<Int>
+    ) -> Rewrite? {
+        guard !use.pinned, use.stores.count == 1, use.loads.count == 1 else { return nil }
+        let store = use.stores[0]
+        let load = use.loads[0]
+        guard store < load, !(store + 1...load).contains(where: targets.contains) else {
+            return nil
         }
-        return instructions.map { instruction in
+        if load == store + 1 {
+            return Rewrite(start: store, store: store, load: load, between: 0, replacement: [])
+        }
+        // The code that computes the value: walk back until it has
+        // produced exactly the one value the store takes.
+        var needed = 1
+        var start = store
+        while needed > 0 {
+            start -= 1
+            guard start >= 0, let effect = pureStackEffect(instructions[start]) else {
+                break
+            }
+            needed += effect.pops - effect.pushes
+        }
+        guard needed == 0, start >= 0,
+            !(start + 1...store).contains(where: targets.contains)
+        else { return nil }
+        let definition = instructions[start..<store]
+        let inputs = Set(definition.compactMap { instruction -> Int? in
+            if case .load(let local) = instruction { return local }
+            return nil
+        })
+        let between = instructions[(store + 1)..<load]
+        let movable = between.allSatisfy { instruction in
+            if case .store(let local) = instruction { return !inputs.contains(local) }
+            return pureStackEffect(instruction) != nil
+        }
+        guard movable else { return nil }
+        return Rewrite(
+            start: start, store: store, load: load, between: between.count,
+            replacement: Array(between) + Array(definition))
+    }
+
+    /// One round of rewrites that do not overlap, with where each old
+    /// instruction offset moved, or nil when there is none left.
+    private static func eliminateRound(
+        in instructions: [GoInstruction],
+        parameterCount: Int
+    ) -> ([GoInstruction], (Int) -> Int)? {
+        let targets = jumpTargets(in: instructions)
+        var rewrites: [Rewrite] = []
+        for (local, use) in uses(in: instructions) where local >= parameterCount {
+            if let rewrite = rewrite(of: use, in: instructions, targets: targets) {
+                rewrites.append(rewrite)
+            }
+        }
+        rewrites.sort { $0.start < $1.start }
+        var chosen: [Rewrite] = []
+        for rewrite in rewrites where chosen.last.map({ $0.load < rewrite.start }) ?? true {
+            chosen.append(rewrite)
+        }
+        guard !chosen.isEmpty else { return nil }
+
+        // Where each kept instruction lands, and where each rewrite starts.
+        var result: [GoInstruction] = []
+        result.reserveCapacity(instructions.count)
+        var newIndex = [Int](repeating: -1, count: instructions.count + 1)
+        var newStarts: [Int] = []
+        var cursor = 0
+        for rewrite in chosen {
+            for index in cursor..<rewrite.start {
+                newIndex[index] = result.count
+                result.append(instructions[index])
+            }
+            newStarts.append(result.count)
+            result += rewrite.replacement
+            cursor = rewrite.load + 1
+        }
+        for index in cursor..<instructions.count {
+            newIndex[index] = result.count
+            result.append(instructions[index])
+        }
+        newIndex[instructions.count] = result.count
+
+        /// The rewrite whose old code holds `offset`, and its new start.
+        func region(of offset: Int) -> (Rewrite, Int)? {
+            var low = 0
+            var high = chosen.count
+            while low < high {
+                let middle = (low + high) / 2
+                if chosen[middle].start <= offset { low = middle + 1 } else { high = middle }
+            }
+            guard low > 0, offset <= chosen[low - 1].load else { return nil }
+            return (chosen[low - 1], newStarts[low - 1])
+        }
+        // No jump lands inside a rewrite, only at its start.
+        func target(_ old: Int) -> Int {
+            if let (_, newStart) = region(of: old) { return newStart }
+            return newIndex[old]
+        }
+        // A statement that began in moved code begins where that code now
+        // is; one that began at the store or the load, where the definition
+        // now is.
+        let moved: (Int) -> Int = { offset in
+            guard let (rewrite, newStart) = region(of: offset) else { return newIndex[offset] }
+            if offset == rewrite.start { return newStart }
+            if offset < rewrite.store {
+                return newStart + rewrite.between + (offset - rewrite.start)
+            }
+            if offset == rewrite.store || offset == rewrite.load {
+                return newStart + rewrite.between
+            }
+            return newStart + (offset - rewrite.store - 1)
+        }
+        return (retargeted(result, target), moved)
+    }
+
+    /// `instructions` with each jump target given by `target` of the old one.
+    private static func retargeted(
+        _ instructions: [GoInstruction], _ target: (Int) -> Int
+    ) -> [GoInstruction] {
+        instructions.map { instruction in
             switch instruction {
-            case .jump(let target): return .jump(map(target))
-            case .jumpIfFalse(let target): return .jumpIfFalse(map(target))
-            case .jumpIfTrue(let target): return .jumpIfTrue(map(target))
+            case .jump(let old): return .jump(target(old))
+            case .jumpIfFalse(let old): return .jumpIfFalse(target(old))
+            case .jumpIfTrue(let old): return .jumpIfTrue(target(old))
             case .select(let cases, let defaultTarget):
                 return .select(
                     cases: cases.map { selectCase in
                         switch selectCase {
-                        case .send(let channel, let value, let target):
-                            return .send(channelLocal: channel, valueLocal: value, target: map(target))
-                        case .receive(let channel, let destination, let ok, let zero, let target):
+                        case .send(let channel, let value, let old):
+                            return .send(channelLocal: channel, valueLocal: value, target: target(old))
+                        case .receive(let channel, let destination, let ok, let zero, let old):
                             return .receive(
                                 channelLocal: channel, destinationLocal: destination,
-                                okLocal: ok, zeroLocal: zero, target: map(target))
+                                okLocal: ok, zeroLocal: zero, target: target(old))
                         }
                     },
-                    defaultTarget: defaultTarget.map(map))
+                    defaultTarget: defaultTarget.map(target))
             default:
                 return instruction
             }
@@ -226,7 +321,6 @@ enum GoTemporaryElimination {
     }
 }
 
-#if SWIFTIX_GO_TEMPORARIES
 extension GoExecutable {
     /// This image with the compiler's single-use temporaries removed (see
     /// `GoTemporaryElimination`).
@@ -234,4 +328,3 @@ extension GoExecutable {
         GoTemporaryElimination.apply(to: self)
     }
 }
-#endif

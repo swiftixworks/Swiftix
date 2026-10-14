@@ -6,7 +6,7 @@
 /// themselves belong to the VM and are covered with it, so nothing here runs
 /// a `$fmt.*` or `$os.*` call.
 
-import SwiftixGo
+@testable import SwiftixGo
 import SwiftixGoRuntime
 import Testing
 
@@ -64,7 +64,10 @@ struct GoFileInterfaceTests: GoTestHarness {
     }
 
     @Test func standardFilesLowerToTheirDescriptorNumbers() throws {
-        let executable = try compile("a := os.Stdin\nb := os.Stdout\nc := os.Stderr\nfmt.Println(a, b, c)")
+        // The lowering, before the pass that removes temporaries.
+        let executable = try GoTemporaryElimination.$isEnabled.withValue(false) {
+            try compile("a := os.Stdin\nb := os.Stdout\nc := os.Stderr\nfmt.Println(a, b, c)")
+        }
         let pushes = executable.functions[0].instructions.compactMap { instruction -> Int64? in
             if case .push(.int(let value)) = instruction { return value }
             return nil
@@ -74,13 +77,16 @@ struct GoFileInterfaceTests: GoTestHarness {
     }
 
     @Test func printingToAFileEmitsTheDescriptorThenTheValues() throws {
-        let executable = try compile(
-            """
-            fmt.Fprint(os.Stderr, "a", 2, true)
-            fmt.Fprintln(os.Stdout)
-            log(os.Stderr, "x")
-            """,
-            declarations: "func log(f *os.File, message string) { fmt.Fprintln(f, message, 1) }")
+        // The lowering, before the pass that removes temporaries.
+        let executable = try GoTemporaryElimination.$isEnabled.withValue(false) {
+            try compile(
+                """
+                fmt.Fprint(os.Stderr, "a", 2, true)
+                fmt.Fprintln(os.Stdout)
+                log(os.Stderr, "x")
+                """,
+                declarations: "func log(f *os.File, message string) { fmt.Fprintln(f, message, 1) }")
+        }
 
         #expect(calls(in: executable) == ["call $fmt.Fprint/4", "call $fmt.Fprintln/1", "call log/2"])
         #expect(calls(in: executable, function: "log") == ["call $fmt.Fprintln/3"])
