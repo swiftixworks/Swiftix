@@ -135,6 +135,7 @@ enum GoSourceLibrary {
         case "bufio", "bytes":
             return GoStandardLibrary.bytesNativeFunction(package: package, member: name)
         case "strconv": return GoNumberLibrary.parsingFunction(name)
+        case "time": return GoTimeLibrary.textNative(name)
         default: return nil
         }
     }

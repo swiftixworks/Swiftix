@@ -56,73 +56,21 @@ func New(out io.Writer, prefix string, flag int) *Logger {
 // write through.
 func Default() *Logger { return std }
 
-// digits is i in decimal, with zeros before it up to width digits.
-func digits(i int64, width int) string {
-	s := ""
-	for i >= 10 || width > 1 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-		width--
-	}
-	return string(rune('0'+i)) + s
-}
-
-// date is the calendar date in UTC of the instant sec seconds after the
-// Unix epoch, as log writes it: 2009/01/23.
-func date(sec int64) string {
-	days := sec / 86400
-	if sec%86400 < 0 {
-		days--
-	}
-	// Count from 0000-03-01, so that a leap day ends a year, in eras of
-	// the 400 years after which the calendar repeats.
-	z := days + 719468
-	era := z / 146097
-	if z%146097 < 0 {
-		era--
-	}
-	dayOfEra := z - era*146097
-	yearOfEra := (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
-	year := yearOfEra + era*400
-	dayOfYear := dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
-	m := (5*dayOfYear + 2) / 153
-	day := dayOfYear - (153*m+2)/5 + 1
-	month := m + 3
-	if m >= 10 {
-		month = m - 9
-	}
-	if month <= 2 {
-		year++
-	}
-	return digits(year, 4) + "/" + digits(month, 2) + "/" + digits(day, 2)
-}
-
-// clock is the time of day in UTC of that instant, 01:23:23, with the
-// microseconds of nsec after it when micro is set.
-func clock(sec, nsec int64, micro bool) string {
-	s := sec % 86400
-	if s < 0 {
-		s += 86400
-	}
-	text := digits(s/3600, 2) + ":" + digits(s/60%60, 2) + ":" + digits(s%60, 2)
-	if micro {
-		text += "." + digits(nsec/1000, 6)
-	}
-	return text
-}
-
-// header is what comes before the message of a line written at the instant
-// sec seconds and nsec nanoseconds after the Unix epoch.
-func header(prefix string, flag int, sec, nsec int64) string {
+// header is what comes before the message of a line written at now.
+func header(prefix string, flag int, now time.Time) string {
 	h := ""
 	if flag&Lmsgprefix == 0 {
 		h = prefix
 	}
 	if flag&Ldate != 0 {
-		h += date(sec) + " "
+		h += now.Format("2006/01/02 ")
 	}
 	if flag&(Ltime|Lmicroseconds) != 0 {
-		h += clock(sec, nsec, flag&Lmicroseconds != 0) + " "
+		if flag&Lmicroseconds != 0 {
+			h += now.Format("15:04:05.000000 ")
+		} else {
+			h += now.Format("15:04:05 ")
+		}
 	}
 	if flag&(Lshortfile|Llongfile) != 0 {
 		h += "???:0: "
@@ -136,14 +84,12 @@ func header(prefix string, flag int, sec, nsec int64) string {
 // Output writes s as one line of the log, with a newline after it if it
 // does not end in one. calldepth would say whose file and line to print.
 func (l *Logger) Output(calldepth int, s string) error {
-	var sec, nsec int64
+	var now time.Time
 	// The time is read before the lock is waited for, as in Go.
 	if l.flag&(Ldate|Ltime|Lmicroseconds) != 0 {
-		now := time.Now()
-		sec = now.Unix()
-		nsec = now.UnixNano() - sec*1000000000
+		now = time.Now()
 	}
-	line := header(l.prefix, l.flag, sec, nsec) + s
+	line := header(l.prefix, l.flag, now) + s
 	if len(s) == 0 || s[len(s)-1] != '\n' {
 		line += "\n"
 	}

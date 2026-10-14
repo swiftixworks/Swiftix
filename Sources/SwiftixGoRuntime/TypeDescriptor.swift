@@ -213,6 +213,9 @@ struct GoTypeDescriptor: Equatable, Sendable {
         case .named(let symbol): return symbol
         case .pointer(.named(let symbol)): return "*" + symbol
         case .pointer(.other("os.File")): return GoLibraryMethods.fileTypeName
+        // A time and a location, which have no definition and have methods.
+        case .other(let name) where GoCalendar.isOwner(name): return name
+        case .pointer(.other(let name)) where GoCalendar.isOwner("*" + name): return "*" + name
         // A pointer to a mutex, which has no definition and has methods.
         case .pointer(.other(let name)) where GoLibraryStructMethods.owners.contains(name):
             return "*" + name

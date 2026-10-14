@@ -294,6 +294,8 @@ enum GoLibraryMethods {
         }
         // And those of the handles: a connection, a listener, a file.
         functions.merge(handleFunctions) { first, _ in first }
+        // And those of a time, a location, a month, and a weekday.
+        functions.merge(GoCalendar.functions) { first, _ in first }
         return functions
     }()
 
@@ -308,6 +310,7 @@ enum GoLibraryMethods {
     static func text(
         of value: GoValue, owner: String, read: (GoPointer) throws -> GoValue
     ) throws -> String? {
+        if let text = GoCalendar.text(of: value, owner: owner) { return text }
         guard owner == durationTypeName || owner == "*" + durationTypeName else { return nil }
         var held = value
         if owner.hasPrefix("*") {

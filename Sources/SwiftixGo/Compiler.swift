@@ -4209,6 +4209,8 @@ struct IRLowerer {
             throw GoDiagnostic(position: expression.position, message: "unsupported expression")
         }
         let literalType = resolve(typeExpression)
+        // `time.Time{}` is Go's zero time, which a variable is zeroed to.
+        if literalType == GoPredeclared.time { return try zeroValue(for: literalType, position: position) }
         let destination = allocateRegister()
         switch underlying(literalType) {
         case .structure(let fields):

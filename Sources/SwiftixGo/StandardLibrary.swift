@@ -258,6 +258,7 @@ extension GoStandardLibrary {
             return GoNumberLibrary.nativeFunction(package: package, member: member)
                 ?? GoLibraryStructs.nativeFunction(package: package, member: member)
                 ?? GoProcessLibrary.nativeFunction(package: package, member: member)
+                ?? GoTimeLibrary.nativeFunction(package: package, member: member)
         }
     }
 
@@ -267,6 +268,7 @@ extension GoStandardLibrary {
         if receiver == GoPredeclared.filePointer { return fileMethod(member) }
         if receiver == GoPredeclared.time { return timeMethod(member) }
         if receiver == GoLibraryTypes.duration { return GoLibraryTypes.durationMethod(member) }
+        if let method = GoTimeLibrary.method(of: receiver, named: member) { return method }
         return GoLibraryStructs.method(of: receiver, named: member)
     }
 
@@ -282,7 +284,7 @@ extension GoStandardLibrary {
         case "Sub": (parameters, result) = ([time, time], duration)
         case "Add": (parameters, result) = ([time, duration], time)
         case "Before", "After", "Equal": (parameters, result) = ([time, time], .bool)
-        default: return nil
+        default: return GoTimeLibrary.timeMethod(member)
         }
         return GoNativeFunction(
             symbol: "$time.Time.\(member)", goName: "time.Time.\(member)",
@@ -359,6 +361,7 @@ extension GoStandardLibrary {
             || GoLibraryTypes.nativeCallNames.contains(name)
             || GoProcessLibrary.nativeCallNames.contains(name)
             || GoNumberLibrary.isCallName(name)
+            || GoTimeLibrary.nativeCallNames.contains(name)
     }
 
     private static let nativeCallNames: Set<String> = Set(

@@ -511,7 +511,7 @@ extension GoEmbedding {
     /// which it knows by name alone.
     static let timeMethods = [
         "Unix", "UnixMilli", "UnixNano", "Sub", "Add", "Before", "After", "Equal",
-    ]
+    ] + GoTimeLibrary.addedTimeMethods
     static let fileMethods = [
         "Write", "WriteString", "Read", "ReadAt", "WriteAt", "Seek", "Close", "Sync",
     ]

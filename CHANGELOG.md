@@ -332,6 +332,23 @@ format, behavior and platform changes are recorded here.
   `Server.ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`,
   `ConnState`, `Shutdown`, `Close`, and `RegisterOnShutdown`;
   `Client.Timeout`; `http.TimeoutHandler`; `url.Error.Timeout` and `Temporary`.
+- `time.Time` has Go's calendar: `Year`, `Month` (`time.Month` with
+  `String`), `Day`, `Hour`, `Minute`, `Second`, `Nanosecond`, `Weekday`
+  (`time.Weekday`), `YearDay`, `ISOWeek`, `Date`, `Clock`, `IsZero`,
+  `Compare`, `UnixMicro`, `AddDate`, `Truncate`, `Round`; `time.Date`
+  normalizes its fields as Go's does; `time.UnixMilli` and `time.UnixMicro`
+  (was `time.Time has no field or method IsZero`).
+- `Format`, `AppendFormat`, `String`, `GoString` (`%#v`), `MarshalText`,
+  `time.Parse`, and `time.ParseInLocation` with Go's reference layout and its
+  errors, and the layout constants `Layout`, `ANSIC`, `UnixDate`, `RubyDate`,
+  `RFC822`, `RFC822Z`, `RFC850`, `RFC1123`, `RFC1123Z`, `RFC3339`,
+  `RFC3339Nano`, `Kitchen`, `Stamp*`, `DateTime`, `DateOnly`, and `TimeOnly`
+  (was `time.Time has no field or method Format`).
+- Locations: `time.UTC`, `time.Local` (UTC, as Go's with `TZ=UTC`),
+  `time.FixedZone`, `time.LoadLocation` of `UTC` and `Local`, `t.In`, `t.UTC`,
+  `t.Local`, `t.Location`, and `t.Zone`.
+- `time.Time` values compare with `==` and are map keys, by the instant and
+  the location (was `values are not comparable`).
 
 
 ### Changed
@@ -564,6 +581,13 @@ format, behavior and platform changes are recorded here.
   strconv.ErrRange)` and `errors.As` work; they are Go text around the native
   readers, and a program that calls one is about 4 KB larger. The coreutils
   package is rebuilt for it.
+- The zero `time.Time` is Go's, January 1 of year 1 in UTC, and
+  `time.Time{}` is allowed (was the Unix epoch, and `invalid composite literal
+  type time.Time`).
+- A `time.Time` prints as Go prints it (`2023-11-14 22:13:20 +0000 UTC`); it
+  printed its nanoseconds (`1700000000000000000`).
+- `log` formats its date and time with `time.Time.Format`; a program that logs
+  is about 5.6 KB smaller.
 
 
 ### Fixed

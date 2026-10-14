@@ -61,6 +61,7 @@ enum GoTypeSpelling {
     static func libraryKind(of name: String) -> String {
         switch name {
         case GoLibraryTypes.durationName: return "int64"
+        case GoTimeLibrary.monthName, GoTimeLibrary.weekdayName: return "int"
         case "context.Context", "net.Conn", "net.Listener", "http.ResponseWriter", "http.Handler",
             "io.Reader", "io.Writer", "io.Closer", "io.ReadWriter", "io.ReadCloser",
             "io.WriteCloser", "io.ReadWriteCloser", "io.Seeker", "io.ReaderAt", "io.WriterAt",

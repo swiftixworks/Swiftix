@@ -105,7 +105,7 @@ struct GoWallClockTests: GoTestHarness {
                 1760000000 1760000000123 1760000000123456789
                 1760000090 true true
                 -2 -1001 -1000000001
-                0 true true
+                -62135596800 false true
 
                 """)
     }
@@ -140,7 +140,7 @@ struct GoWallClockTests: GoTestHarness {
         #expect(diagnostic("fmt.Println(time.Now().Sub(5))") != nil)
         #expect(diagnostic("fmt.Println(time.Now().Add(time.Now()))") != nil)
         #expect(diagnostic("var seconds string = time.Now().Unix()\nfmt.Println(seconds)") != nil)
-        #expect(diagnostic("fmt.Println(time.Now().Format(\"2006\"))") != nil)
+        #expect(diagnostic("fmt.Println(time.Now().Format(2006))") != nil)
         #expect(diagnostic("fmt.Println(time.Since(5))") != nil)
         #expect(
             diagnostic(

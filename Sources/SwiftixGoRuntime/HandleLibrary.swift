@@ -26,7 +26,7 @@ extension GoLibraryMethods {
     /// interface value that holds one names it as a type known by name
     /// only, and so must what it is compared with.
     static let opaqueTypeNames: Set<String> = [
-        "os.File", "time.Time", "sync.Mutex", "sync.WaitGroup", "testing.T",
+        "os.File", "time.Time", "sync.Mutex", "sync.WaitGroup", "testing.T", "time.Location",
     ]
 
     /// The type the methods of `value` are looked up under when it is a
@@ -74,5 +74,6 @@ extension GoLibraryMethods {
     static func isLibraryType(_ owner: String) -> Bool {
         owner == durationTypeName || owner == "*" + durationTypeName
             || owner == connectionTypeName || owner == listenerTypeName || owner == fileTypeName
+            || GoCalendar.isOwner(owner)
     }
 }

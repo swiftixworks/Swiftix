@@ -2360,6 +2360,12 @@ public struct GoVirtualMachine: Sendable {
             func typeName() -> String {
                 type.map(GoTypeDescriptor.name(of:)) ?? inferredTypeName(of: value)
             }
+            // `%#v` prints a time by its `GoString`.
+            if directive.goSyntax, scope.callsMethods, depth == 0 || scope.accessible,
+                case .other(GoCalendar.timeTypeName)? = type, let time = GoTime(value)
+            {
+                return GoTimeFormat.goString(time)
+            }
             // Under a verb for text Go prints a value by its `Error` method,
             // or else its `String` method: an operand always, and inside
             // another value wherever it is not behind an unexported field.
@@ -2373,6 +2379,10 @@ public struct GoVirtualMachine: Sendable {
                 switch type {
                 case .named(let symbol)?: owner = symbol
                 case .pointer(.named(let symbol))?: owner = "*" + symbol
+                // A time and a location, which have no definition.
+                case .other(let symbol)? where GoCalendar.isOwner(symbol): owner = symbol
+                case .pointer(.other(let symbol))? where GoCalendar.isOwner("*" + symbol):
+                    owner = "*" + symbol
                 default: break
                 }
                 if let owner {
@@ -2414,6 +2424,11 @@ public struct GoVirtualMachine: Sendable {
                         break
                     }
                 }
+            }
+            if case .other(GoCalendar.timeTypeName)? = type, let time = GoTime(value) {
+                // Go's struct, where `fmt` calls no method of a time.
+                return GoTimeFormat.fields(
+                    of: time, labeled: directive.labelsFields, goSyntax: directive.goSyntax)
             }
             /// Go's marker for a verb that does not apply: the type, and the
             /// value as `%v` prints it under the same flags.
@@ -3469,6 +3484,30 @@ public struct GoVirtualMachine: Sendable {
                 return false
             }
             stack.append(result)
+            return true
+        }
+
+        /// Run a native of `time.Time` and the types of its calendar: see
+        /// `GoCalendar`. Returns `false` when `name` is not such a function.
+        func executeCalendarNative(_ name: String, argumentCount: Int) throws -> Bool {
+            guard let counts = GoCalendar.natives[name] else { return false }
+            guard argumentCount == counts.operands else {
+                throw GoRuntimeError.argumentCountMismatch(
+                    function: name, expected: counts.operands, actual: argumentCount)
+            }
+            guard stack.count >= argumentCount else { throw GoRuntimeError.stackUnderflow }
+            let start = stack.count - argumentCount
+            let operands = Array(stack[start...])
+            stack.removeSubrange(start...)
+            for result in try GoCalendar.call(
+                name, operands, now: runtimeTimestamp(), bytes: { try sliceBytes($0) })
+            {
+                switch result {
+                case .value(let value): stack.append(value)
+                case .bytes(let bytes): stack.append(try makeByteSlice(bytes))
+                case .error(let message): stack.append(errorValue(message))
+                }
+            }
             return true
         }
 
@@ -5201,6 +5240,7 @@ public struct GoVirtualMachine: Sendable {
                                 name, argumentCount: argumentCount, stack: &stack)
                                 || executeHostNative(name, argumentCount: argumentCount)
                                 || executeFileNative(name, argumentCount: argumentCount)
+                                || executeCalendarNative(name, argumentCount: argumentCount)
                                 || executeTimeNative(name, argumentCount: argumentCount)
                                 || executeSyncNative(name, argumentCount: argumentCount)
                                 || executeTimerNative(name, argumentCount: argumentCount)

@@ -599,6 +599,7 @@ public enum GoTypeChecker {
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             case _ where GoLibraryStructs.isTypeName(name): return .named(name)
+            case _ where GoTimeLibrary.isTypeName(name): return .named(name)
             default:
                 if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
@@ -2393,6 +2394,10 @@ struct FunctionChecker {
         }
         try requireLiteralType(typeExpression, at: position)
         let literalType = try declaredType(typeExpression)
+        if literalType == GoPredeclared.time {
+            try checkTimeLiteral(elements)
+            return literalType
+        }
         switch underlying(literalType) {
         case .structure(let fields):
             try checkStructLiteral(elements, fields: fields, type: literalType, position: position)
@@ -3557,6 +3562,7 @@ struct FunctionChecker {
                 return .named(name)
             case GoLibraryTypes.durationName: return GoLibraryTypes.duration
             case _ where GoLibraryStructs.isTypeName(name): return .named(name)
+            case _ where GoTimeLibrary.isTypeName(name): return .named(name)
             default:
                 if let numeric = GoPredeclared.numericType(name) { return numeric }
                 guard availableTypes.contains(name) else {
@@ -4183,6 +4189,8 @@ struct FunctionChecker {
 
     func isComparable(_ type: GoType) -> Bool {
         if isFloat(type) { return true }
+        // An opaque time compares its instant and location, as Go's does.
+        if type == GoPredeclared.time { return true }
         switch underlying(type) {
         case .int, .string, .bool, .pointer, .nilType, .interface, .channel: return true
         case .structure(let fields): return fields.allSatisfy { isComparable($0.type) }

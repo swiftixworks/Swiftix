@@ -24,7 +24,9 @@ enum GoLibraryTypes {
     /// library type with an underlying type. `time.Time` and `os.File` are
     /// opaque and have none.
     static func underlying(of name: String) -> GoType? {
-        name == durationName ? GoNumericKind.int64.type : GoLibraryStructs.underlying(of: name)
+        name == durationName
+            ? GoNumericKind.int64.type
+            : GoTimeLibrary.underlying(of: name) ?? GoLibraryStructs.underlying(of: name)
     }
 
     /// The library type `package.member` names when it is one a value
@@ -44,7 +46,7 @@ enum GoLibraryTypes {
     static func methodOwner(_ type: GoType) -> GoType? {
         switch type {
         case duration, .pointer(duration): return duration
-        default: return GoLibraryStructs.methodOwner(type)
+        default: return GoTimeLibrary.methodOwner(type) ?? GoLibraryStructs.methodOwner(type)
         }
     }
 
@@ -130,6 +132,11 @@ enum GoLibraryTypes {
         ("*os.File", { libraryMethod(of: GoPredeclared.filePointer, named: $0) }),
         (connectionTypeName, { handleMethod(of: connectionName, named: $0) }),
         (listenerTypeName, { handleMethod(of: listenerName, named: $0) }),
+        // A time, a month, a weekday, and a location.
+        ("time.Time", { libraryMethod(of: GoPredeclared.time, named: $0) }),
+        (GoTimeLibrary.monthName, { libraryMethod(of: GoTimeLibrary.month, named: $0) }),
+        (GoTimeLibrary.weekdayName, { libraryMethod(of: GoTimeLibrary.weekday, named: $0) }),
+        ("*" + GoTimeLibrary.locationName, { libraryMethod(of: GoTimeLibrary.location, named: $0) }),
     ]
 
     private static func libraryMethod(of type: GoType, named name: String) -> GoInterfaceMethod? {

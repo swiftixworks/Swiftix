@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "log", "net/http", "net/url", "sort", "strconv", "strings", "sync", "sync/atomic"]
+    static let paths: Set<String> = ["bufio", "bytes", "context", "io", "log", "net/http", "net/url", "sort", "strconv", "strings", "sync", "sync/atomic", "time"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -51,8 +51,7 @@ enum GoSourceLibraryText {
             "Default", "Fatal", "Fatalf", "Fatalln", "Flags", "LUTC", "Ldate", "Llongfile",
             "Lmicroseconds", "Lmsgprefix", "Logger", "Lshortfile", "LstdFlags", "Ltime", "New",
             "Output", "Panic", "Panicf", "Panicln", "Prefix", "Print", "Printf", "Println",
-            "SetFlags", "SetOutput", "SetPrefix", "Writer", "clock", "date", "digits", "header",
-            "standardError", "std",
+            "SetFlags", "SetOutput", "SetPrefix", "Writer", "header", "standardError", "std",
         ],
         "net/http": [
             "CanonicalHeaderKey", "Client", "ConnState", "DefaultClient", "DefaultMaxHeaderBytes",
@@ -154,6 +153,14 @@ enum GoSourceLibraryText {
             "StoreUint32", "StoreUint64", "SwapInt32", "SwapInt64", "SwapUint32", "SwapUint64",
             "Uint32", "Uint64", "Value", "lock", "sameType",
         ],
+        "time": [
+            "ANSIC", "April", "August", "DateOnly", "DateTime", "December", "February", "Friday",
+            "January", "July", "June", "Kitchen", "Layout", "Local", "March", "May", "Monday",
+            "November", "October", "RFC1123", "RFC1123Z", "RFC3339", "RFC3339Nano", "RFC822",
+            "RFC822Z", "RFC850", "RubyDate", "Saturday", "September", "Stamp", "StampMicro",
+            "StampMilli", "StampNano", "Sunday", "Thursday", "TimeOnly", "Tuesday", "UTC",
+            "UnixDate", "Wednesday",
+        ],
     ]
 
     /// The files of the package at `path`, in the order of their names.
@@ -171,6 +178,7 @@ enum GoSourceLibraryText {
         case "strings": return strings
         case "sync": return sync
         case "sync/atomic": return syncAtomic
+        case "time": return time
         default: return nil
         }
     }
@@ -3154,73 +3162,21 @@ func New(out io.Writer, prefix string, flag int) *Logger {
 // write through.
 func Default() *Logger { return std }
 
-// digits is i in decimal, with zeros before it up to width digits.
-func digits(i int64, width int) string {
-	s := ""
-	for i >= 10 || width > 1 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-		width--
-	}
-	return string(rune('0'+i)) + s
-}
-
-// date is the calendar date in UTC of the instant sec seconds after the
-// Unix epoch, as log writes it: 2009/01/23.
-func date(sec int64) string {
-	days := sec / 86400
-	if sec%86400 < 0 {
-		days--
-	}
-	// Count from 0000-03-01, so that a leap day ends a year, in eras of
-	// the 400 years after which the calendar repeats.
-	z := days + 719468
-	era := z / 146097
-	if z%146097 < 0 {
-		era--
-	}
-	dayOfEra := z - era*146097
-	yearOfEra := (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
-	year := yearOfEra + era*400
-	dayOfYear := dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
-	m := (5*dayOfYear + 2) / 153
-	day := dayOfYear - (153*m+2)/5 + 1
-	month := m + 3
-	if m >= 10 {
-		month = m - 9
-	}
-	if month <= 2 {
-		year++
-	}
-	return digits(year, 4) + "/" + digits(month, 2) + "/" + digits(day, 2)
-}
-
-// clock is the time of day in UTC of that instant, 01:23:23, with the
-// microseconds of nsec after it when micro is set.
-func clock(sec, nsec int64, micro bool) string {
-	s := sec % 86400
-	if s < 0 {
-		s += 86400
-	}
-	text := digits(s/3600, 2) + ":" + digits(s/60%60, 2) + ":" + digits(s%60, 2)
-	if micro {
-		text += "." + digits(nsec/1000, 6)
-	}
-	return text
-}
-
-// header is what comes before the message of a line written at the instant
-// sec seconds and nsec nanoseconds after the Unix epoch.
-func header(prefix string, flag int, sec, nsec int64) string {
+// header is what comes before the message of a line written at now.
+func header(prefix string, flag int, now time.Time) string {
 	h := ""
 	if flag&Lmsgprefix == 0 {
 		h = prefix
 	}
 	if flag&Ldate != 0 {
-		h += date(sec) + " "
+		h += now.Format("2006/01/02 ")
 	}
 	if flag&(Ltime|Lmicroseconds) != 0 {
-		h += clock(sec, nsec, flag&Lmicroseconds != 0) + " "
+		if flag&Lmicroseconds != 0 {
+			h += now.Format("15:04:05.000000 ")
+		} else {
+			h += now.Format("15:04:05 ")
+		}
 	}
 	if flag&(Lshortfile|Llongfile) != 0 {
 		h += "???:0: "
@@ -3234,14 +3190,12 @@ func header(prefix string, flag int, sec, nsec int64) string {
 // Output writes s as one line of the log, with a newline after it if it
 // does not end in one. calldepth would say whose file and line to print.
 func (l *Logger) Output(calldepth int, s string) error {
-	var sec, nsec int64
+	var now time.Time
 	// The time is read before the lock is waited for, as in Go.
 	if l.flag&(Ldate|Ltime|Lmicroseconds) != 0 {
-		now := time.Now()
-		sec = now.Unix()
-		nsec = now.UnixNano() - sec*1000000000
+		now = time.Now()
 	}
-	line := header(l.prefix, l.flag, sec, nsec) + s
+	line := header(l.prefix, l.flag, now) + s
 	if len(s) == 0 || s[len(s)-1] != '\n' {
 		line += "\n"
 	}
@@ -12400,6 +12354,81 @@ func (v *Value) CompareAndSwap(old, val any) bool {
 	lock.Unlock()
 	return swapped
 }
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let time: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/time/time.go",
+            text: #"""
+// Package time is the part of time that is written in Go: the constants
+// of its layouts, months, and weekdays, and the locations UTC and Local.
+// Time, Month, Weekday, Location, and every function and method belong to
+// the run-time library, which this file imports under the same path.
+package time
+
+import "time"
+
+// The layouts of Format and Parse, as Go declares them.
+const (
+	Layout      = "01/02 03:04:05PM '06 -0700" // The reference time, in numerical order.
+	ANSIC       = "Mon Jan _2 15:04:05 2006"
+	UnixDate    = "Mon Jan _2 15:04:05 MST 2006"
+	RubyDate    = "Mon Jan 02 15:04:05 -0700 2006"
+	RFC822      = "02 Jan 06 15:04 MST"
+	RFC822Z     = "02 Jan 06 15:04 -0700" // RFC822 with numeric zone
+	RFC850      = "Monday, 02-Jan-06 15:04:05 MST"
+	RFC1123     = "Mon, 02 Jan 2006 15:04:05 MST"
+	RFC1123Z    = "Mon, 02 Jan 2006 15:04:05 -0700" // RFC1123 with numeric zone
+	RFC3339     = "2006-01-02T15:04:05Z07:00"
+	RFC3339Nano = "2006-01-02T15:04:05.999999999Z07:00"
+	Kitchen     = "3:04PM"
+	// Handy time stamps.
+	Stamp      = "Jan _2 15:04:05"
+	StampMilli = "Jan _2 15:04:05.000"
+	StampMicro = "Jan _2 15:04:05.000000"
+	StampNano  = "Jan _2 15:04:05.000000000"
+	DateTime   = "2006-01-02 15:04:05"
+	DateOnly   = "2006-01-02"
+	TimeOnly   = "15:04:05"
+)
+
+// The months of the year.
+const (
+	January time.Month = 1 + iota
+	February
+	March
+	April
+	May
+	June
+	July
+	August
+	September
+	October
+	November
+	December
+)
+
+// The days of the week.
+const (
+	Sunday time.Weekday = iota
+	Monday
+	Tuesday
+	Wednesday
+	Thursday
+	Friday
+	Saturday
+)
+
+// UTC is Coordinated Universal Time.
+var UTC *time.Location = native.location(0)
+
+// Local is the location of the system, which is UTC: there is no time
+// zone database.
+var Local *time.Location = native.location(1)
 
 """#),
     ]
