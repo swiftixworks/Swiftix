@@ -137,6 +137,16 @@ struct GoHTTPServerTests: GoTestHarness {
         #expect(try run(middlewareSource) == middlewareExpected)
     }
 
+    /// A server in the shape of redis, the owner's measure of whether
+    /// middleware can be written here: the RESP protocol over TCP read and
+    /// written through `bufio`, a goroutine for each connection under a
+    /// `context`, a store sharded under embedded `sync.RWMutex` locks with
+    /// expiry on an injected clock, an `atomic` counter, a `log.Logger`, and
+    /// five clients at once. Printed as Go 1.24.5 printed it.
+    @Test func aRedisStyleServerAndItsClients() throws {
+        #expect(try run(redisStyleSource) == redisStyleExpected)
+    }
+
     /// `http.Handler`, `http.HandlerFunc`, `http.Handle`, `http.NewServeMux`, a
     /// server of any handler, and middleware of the shape
     /// `func(http.Handler) http.Handler`.
@@ -1709,5 +1719,361 @@ GET /items/42 200        1 uint32
 GET /missing 404         1 uint32
 GET /slow 200            3 uint32
 POST /echo 201           1 uint32
+
+"""#
+
+private let redisStyleSource = #"""
+// A small redis-style server: RESP over TCP, one goroutine per connection,
+// a sharded store with expiry, and clients that talk to it concurrently.
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const shards = 4
+
+type entry struct {
+	value   string
+	expires int64 // nanoseconds on the clock; 0 for none
+}
+
+type shard struct {
+	sync.RWMutex
+	items map[string]entry
+}
+
+type Store struct {
+	shards   [shards]*shard
+	commands atomic.Int64
+	clock    func() time.Time
+}
+
+func NewStore(clock func() time.Time) *Store {
+	s := &Store{clock: clock}
+	for i := range shards {
+		s.shards[i] = &shard{items: map[string]entry{}}
+	}
+	return s
+}
+
+func (s *Store) shardFor(key string) *shard {
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return s.shards[h%shards]
+}
+
+var ErrWrongType = errors.New("value is not an integer or out of range")
+
+func (s *Store) Get(key string) (string, bool) {
+	sh := s.shardFor(key)
+	sh.RLock()
+	defer sh.RUnlock()
+	e, ok := sh.items[key]
+	if !ok || (e.expires != 0 && s.clock().UnixNano() >= e.expires) {
+		return "", false
+	}
+	return e.value, true
+}
+
+func (s *Store) Set(key, value string, ttl time.Duration) {
+	sh := s.shardFor(key)
+	sh.Lock()
+	defer sh.Unlock()
+	e := entry{value: value}
+	if ttl > 0 {
+		e.expires = s.clock().Add(ttl).UnixNano()
+	}
+	sh.items[key] = e
+}
+
+func (s *Store) Incr(key string) (int64, error) {
+	sh := s.shardFor(key)
+	sh.Lock()
+	defer sh.Unlock()
+	n, err := strconv.ParseInt(cmpOr(sh.items[key].value, "0"), 10, 64)
+	if err != nil {
+		return 0, ErrWrongType
+	}
+	n++
+	sh.items[key] = entry{value: strconv.FormatInt(n, 10)}
+	return n, nil
+}
+
+func (s *Store) Keys(prefix string) []string {
+	var keys []string
+	for _, sh := range s.shards {
+		sh.RLock()
+		for k := range sh.items {
+			if strings.HasPrefix(k, prefix) {
+				keys = append(keys, k)
+			}
+		}
+		sh.RUnlock()
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func cmpOr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+type Reply interface{ writeTo(w *bufio.Writer) }
+
+type (
+	simple  string
+	bulk    string
+	null    struct{}
+	integer int64
+	failure struct{ err error }
+	array   []string
+)
+
+func (r simple) writeTo(w *bufio.Writer)  { fmt.Fprintf(w, "+%s\r\n", string(r)) }
+func (r bulk) writeTo(w *bufio.Writer)    { fmt.Fprintf(w, "$%d\r\n%s\r\n", len(r), string(r)) }
+func (null) writeTo(w *bufio.Writer)      { w.WriteString("$-1\r\n") }
+func (r integer) writeTo(w *bufio.Writer) { fmt.Fprintf(w, ":%d\r\n", int64(r)) }
+func (r failure) writeTo(w *bufio.Writer) { fmt.Fprintf(w, "-ERR %v\r\n", r.err) }
+func (r array) writeTo(w *bufio.Writer) {
+	fmt.Fprintf(w, "*%d\r\n", len(r))
+	for _, s := range r {
+		bulk(s).writeTo(w)
+	}
+}
+
+func readCommand(r *bufio.Reader) ([]string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if !strings.HasPrefix(line, "*") {
+		return strings.Fields(line), nil
+	}
+	n, err := strconv.Atoi(line[1:])
+	if err != nil {
+		return nil, fmt.Errorf("bad array header %q: %w", line, err)
+	}
+	args := make([]string, 0, n)
+	for range n {
+		head, err := r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		size, err := strconv.Atoi(strings.TrimSpace(head[1:]))
+		if err != nil {
+			return nil, err
+		}
+		buf := make([]byte, size+2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, err
+		}
+		args = append(args, string(buf[:size]))
+	}
+	return args, nil
+}
+
+func (s *Store) execute(args []string) Reply {
+	s.commands.Add(1)
+	if len(args) == 0 {
+		return failure{errors.New("empty command")}
+	}
+	switch cmd := strings.ToUpper(args[0]); cmd {
+	case "PING":
+		return simple("PONG")
+	case "SET":
+		if len(args) == 5 && strings.EqualFold(args[3], "PX") {
+			ms, err := strconv.Atoi(args[4])
+			if err != nil {
+				return failure{err}
+			}
+			s.Set(args[1], args[2], time.Duration(ms)*time.Millisecond)
+			return simple("OK")
+		}
+		if len(args) != 3 {
+			return failure{fmt.Errorf("wrong number of arguments for '%s'", strings.ToLower(cmd))}
+		}
+		s.Set(args[1], args[2], 0)
+		return simple("OK")
+	case "GET":
+		if v, ok := s.Get(args[1]); ok {
+			return bulk(v)
+		}
+		return null{}
+	case "INCR":
+		n, err := s.Incr(args[1])
+		if err != nil {
+			return failure{err}
+		}
+		return integer(n)
+	case "KEYS":
+		return array(s.Keys(strings.TrimSuffix(args[1], "*")))
+	default:
+		return failure{fmt.Errorf("unknown command '%s'", args[0])}
+	}
+}
+
+func (s *Store) serve(ctx context.Context, conn net.Conn, logger *log.Logger) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	w := bufio.NewWriter(conn)
+	for {
+		args, err := readCommand(r)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				logger.Printf("read: %v", err)
+			}
+			return
+		}
+		s.execute(args).writeTo(w)
+		if r.Buffered() == 0 {
+			if err := w.Flush(); err != nil {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+}
+
+func client(addr string, script []string) ([]string, error) {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	w := bufio.NewWriter(conn)
+	for _, line := range script {
+		args := strings.Fields(line)
+		fmt.Fprintf(w, "*%d\r\n", len(args))
+		for _, a := range args {
+			fmt.Fprintf(w, "$%d\r\n%s\r\n", len(a), a)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(conn)
+	var replies []string
+	for range script {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return replies, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch line[0] {
+		case '$':
+			if line == "$-1" {
+				replies = append(replies, "(nil)")
+				continue
+			}
+			body, _ := r.ReadString('\n')
+			replies = append(replies, strconv.Quote(strings.TrimRight(body, "\r\n")))
+		case '*':
+			n, _ := strconv.Atoi(line[1:])
+			var items []string
+			for range n {
+				r.ReadString('\n')
+				item, _ := r.ReadString('\n')
+				items = append(items, strings.TrimRight(item, "\r\n"))
+			}
+			replies = append(replies, "["+strings.Join(items, " ")+"]")
+		default:
+			replies = append(replies, line)
+		}
+	}
+	return replies, nil
+}
+
+func main() {
+	var now atomic.Int64
+	store := NewStore(func() time.Time { return time.Unix(0, now.Load()) })
+	logger := log.New(os.Stdout, "kv: ", 0)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:18979")
+	if err != nil {
+		logger.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go store.serve(ctx, conn, logger)
+		}
+	}()
+
+	replies, err := client("127.0.0.1:18979", []string{
+		"PING", "SET user:1 ann", "GET user:1", "GET user:2", "INCR visits", "INCR visits",
+		"SET user:1 bob", "INCR user:1", "SET session:x 1 PX 50", "GET session:x", "FLY away",
+	})
+	fmt.Println(strings.Join(replies, "\n"), err)
+
+	var wg sync.WaitGroup
+	for c := range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			script := []string{}
+			for i := range 20 {
+				script = append(script, "INCR counter", fmt.Sprintf("SET client:%d:%d v", c, i))
+			}
+			if _, err := client("127.0.0.1:18979", script); err != nil {
+				logger.Println("client:", err)
+			}
+		}()
+	}
+	wg.Wait()
+	now.Add(int64(60 * time.Millisecond))
+	replies, err = client("127.0.0.1:18979", []string{"GET counter", "GET session:x", "KEYS client:3:1*", "KEYS user:*"})
+	fmt.Println(strings.Join(replies, "\n"), err)
+	fmt.Println("commands:", store.commands.Load())
+	ln.Close()
+}
+"""#
+
+private let redisStyleExpected = #"""
++PONG
++OK
+"ann"
+(nil)
+:1
+:2
++OK
+-ERR value is not an integer or out of range
++OK
+"1"
+-ERR unknown command 'FLY' <nil>
+"100"
+(nil)
+[client:3:1 client:3:10 client:3:11 client:3:12 client:3:13 client:3:14 client:3:15 client:3:16 client:3:17 client:3:18 client:3:19]
+[user:1] <nil>
+commands: 215
 
 """#

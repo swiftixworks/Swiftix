@@ -75,6 +75,35 @@ var ErrNoProgress = errors.New("multiple Read calls return no data or error")
 // ErrUnexpectedEOF is the end of the data where more was promised.
 var ErrUnexpectedEOF = errors.New("unexpected EOF")
 
+// ErrShortBuffer is what ReadAtLeast says of a buffer smaller than the
+// least it was asked to read.
+var ErrShortBuffer = errors.New("short buffer")
+
+// ReadAtLeast reads into buf until it has read at least min bytes. It
+// gives EOF only when nothing was read, ErrUnexpectedEOF when the data
+// ended before min, and drops an error that came with enough data.
+func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
+	if len(buf) < min {
+		return 0, ErrShortBuffer
+	}
+	for n < min && err == nil {
+		var nn int
+		nn, err = r.Read(buf[n:])
+		n += nn
+	}
+	if n >= min {
+		err = nil
+	} else if n > 0 && err == io.EOF {
+		err = ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+// ReadFull reads exactly len(buf) bytes into buf.
+func ReadFull(r Reader, buf []byte) (n int, err error) {
+	return ReadAtLeast(r, buf, len(buf))
+}
+
 // ErrShortWrite is a Write that took fewer bytes than it was given and
 // reported no error.
 var ErrShortWrite = errors.New("short write")

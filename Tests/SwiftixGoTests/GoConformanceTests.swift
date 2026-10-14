@@ -205,6 +205,10 @@ struct GoConformanceTests {
     @Test func aRedisProtocolOverBufioAndBytes() throws {
         try expectSameOutput(aRedisProtocolOverBufioAndBytesSource, aRedisProtocolOverBufioAndBytesExpected)
     }
+
+    @Test func readFullAndReadAtLeast() throws {
+        try expectSameOutput(readFullAndReadAtLeastSource, readFullAndReadAtLeastExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -5218,5 +5222,50 @@ private let aRedisProtocolOverBufioAndBytesExpected = #"""
 ":1"
 ":2"
 "$-1"
+
+"""#
+
+private let readFullAndReadAtLeastSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+type trickle struct{ s string }
+
+func (t *trickle) Read(p []byte) (int, error) {
+	if t.s == "" {
+		return 0, io.EOF
+	}
+	n := copy(p[:1], t.s)
+	t.s = t.s[n:]
+	return n, nil
+}
+
+func main() {
+	buf := make([]byte, 4)
+	n, err := io.ReadFull(&trickle{"abcdef"}, buf)
+	fmt.Println(n, err, string(buf))
+	n, err = io.ReadFull(&trickle{"ab"}, buf)
+	fmt.Println(n, err, errors.Is(err, io.ErrUnexpectedEOF))
+	n, err = io.ReadFull(strings.NewReader(""), buf)
+	fmt.Println(n, err == io.EOF)
+	n, err = io.ReadAtLeast(strings.NewReader("xyz"), buf[:2], 3)
+	fmt.Println(n, err)
+	n, err = io.ReadAtLeast(strings.NewReader("xyz"), buf, 2)
+	fmt.Println(n, err, string(buf[:n]))
+}
+"""#
+
+private let readFullAndReadAtLeastExpected = #"""
+4 <nil> abcd
+2 unexpected EOF true
+0 true
+0 short buffer
+3 <nil> xyz
 
 """#

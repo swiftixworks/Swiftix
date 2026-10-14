@@ -323,6 +323,11 @@ format, behavior and platform changes are recorded here.
   `bufio.Reader` or `Writer` makes of what is under it are Go's, call by
   call. `io.ReaderFrom`, `io.WriterTo`, and `io.ErrNoProgress`; `io.Copy`
   hands the copy to a source's `WriteTo` or a destination's `ReadFrom`.
+- `io.ReadFull`, `io.ReadAtLeast`, and `io.ErrShortBuffer`. A redis-style
+  server (RESP over TCP through `bufio`, a goroutine for each connection, a
+  sharded store under `sync.RWMutex`, expiry, `atomic`, `log`, `context`)
+  with five concurrent clients prints what Go prints, and is a test.
+
 
 ### Changed
 
