@@ -14,12 +14,14 @@ public final class GoExecutionProfile: @unchecked Sendable {
     public private(set) var pairs: [String: Int] = [:]
     public private(set) var triples: [String: Int] = [:]
     private var kinds: [String: [String]] = [:]
-    private var previous: (String, String)?
-    private var previousFunction = ""
+    /// The last two kinds each frame executed, so the sequences of one
+    /// goroutine are not mixed with another's when the VM switches. The
+    /// frame is kept so that its identifier is not reused.
+    private var previous: [ObjectIdentifier: (AnyObject, String, String)] = [:]
 
     public init() {}
 
-    func record(_ function: GoBytecodeFunction, programCounter: Int) {
+    func record(_ function: GoBytecodeFunction, programCounter: Int, frame: AnyObject) {
         instructions += 1
         let kind: String
         if let names = kinds[function.name] {
@@ -31,14 +33,15 @@ public final class GoExecutionProfile: @unchecked Sendable {
         }
         byKind[kind, default: 0] += 1
         byFunction[function.name, default: 0] += 1
-        if previousFunction != function.name { previous = nil }
-        previousFunction = function.name
-        if let (first, second) = previous {
+        let id = ObjectIdentifier(frame)
+        if let (_, first, second) = previous[id] {
             pairs[second + " ; " + kind, default: 0] += 1
-            triples[first + " ; " + second + " ; " + kind, default: 0] += 1
-            previous = (second, kind)
+            if !first.isEmpty {
+                triples[first + " ; " + second + " ; " + kind, default: 0] += 1
+            }
+            previous[id] = (frame, second, kind)
         } else {
-            previous = ("", kind)
+            previous[id] = (frame, "", kind)
         }
     }
 

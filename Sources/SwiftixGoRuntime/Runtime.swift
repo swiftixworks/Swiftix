@@ -1212,12 +1212,24 @@ public struct GoVirtualMachine: Sendable {
             else {
                 throw GoRuntimeError.resourceLimitExceeded("live frame locals")
             }
+            // The metadata of a function already called passed the check
+            // below; comparing the arrays costs nothing when they are the
+            // same arrays, as they are for every call of an image function.
+            let checked = vm.checkedFrameFunctions[function.name]
+            let metadataChecked = checked.map {
+                $0.localCount == function.localCount
+                    && $0.instructions.count == function.instructions.count
+                    && $0.rootLocalIndices == function.rootLocalIndices
+                    && $0.safepointProgramCounters == function.safepointProgramCounters
+            } ?? false
             let frame = try Frame(
                 function: function,
                 stackBase: stackBase,
                 arguments: arguments,
                 heap: &heap,
-                isDeferredCall: isDeferredCall)
+                isDeferredCall: isDeferredCall,
+                metadataChecked: metadataChecked)
+            if !metadataChecked { vm.checkedFrameFunctions[function.name] = function }
             vm.liveFrameLocalCount += function.localCount
             return frame
         }
@@ -1338,8 +1350,10 @@ public struct GoVirtualMachine: Sendable {
 
         func resumeNextGoroutine() -> Bool {
             guard !vm.runQueue.isEmpty else { return false }
-            let next = vm.runQueue.removeFirst()
-            guard let context = vm.goroutines.removeValue(forKey: next) else { return false }
+            let (next, queued) = vm.runQueue.removeFirst()
+            guard let context = queued ?? vm.goroutines.removeValue(forKey: next) else {
+                return false
+            }
             vm.currentGoroutineID = next
             vm.frames = context.frames
             vm.stack = context.stack
@@ -1383,8 +1397,9 @@ public struct GoVirtualMachine: Sendable {
                 vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
                 blockedGoroutines.insert(vm.currentGoroutineID)
             } else if cooperative, quantumEnded {
-                vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
-                vm.runQueue.append(vm.currentGoroutineID)
+                vm.runQueue.append(
+                    vm.currentGoroutineID,
+                    context: GoroutineContext(frames: vm.frames, stack: vm.stack))
             } else {
                 // The current goroutine keeps running unless others are ready.
                 if quantumEnded {
@@ -1392,8 +1407,9 @@ public struct GoVirtualMachine: Sendable {
                     if let asynchronousError { throw asynchronousError }
                 }
                 if vm.runQueue.isEmpty { return }
-                vm.goroutines[vm.currentGoroutineID] = GoroutineContext(frames: vm.frames, stack: vm.stack)
-                vm.runQueue.append(vm.currentGoroutineID)
+                vm.runQueue.append(
+                    vm.currentGoroutineID,
+                    context: GoroutineContext(frames: vm.frames, stack: vm.stack))
                 try driveEventLoopUntilRunnable()
                 return
             }
@@ -3799,7 +3815,8 @@ public struct GoVirtualMachine: Sendable {
         func startGoroutine(calling value: GoValue) throws {
             let target = try functionValueTarget(value)
             guard resourceLimits.maximumGoroutines >= 2,
-                vm.goroutines.count <= resourceLimits.maximumGoroutines - 2
+                vm.goroutines.count + vm.runQueue.contextCount
+                    <= resourceLimits.maximumGoroutines - 2
             else {
                 throw GoRuntimeError.resourceLimitExceeded("goroutines")
             }
@@ -4487,7 +4504,7 @@ public struct GoVirtualMachine: Sendable {
             }
 
             for frame in vm.frames { appendRoots(from: frame) }
-            for context in vm.goroutines.values {
+            for context in vm.goroutines.values + vm.runQueue.contexts {
                 rootValues.append(contentsOf: context.stack)
                 for frame in context.frames { appendRoots(from: frame) }
             }
@@ -5102,8 +5119,7 @@ public struct GoVirtualMachine: Sendable {
                 }
                 #if SWIFTIX_GO_PROFILE
                 GoExecutionProfile.current?.record(
-                    vm.frames[frameIndex].function,
-                    programCounter: vm.frames[frameIndex].programCounter - 1)
+                    frame.function, programCounter: programCounter, frame: frame)
                 #endif
                 switch instruction {
                 case .push(let value):
@@ -5307,7 +5323,8 @@ public struct GoVirtualMachine: Sendable {
                     }
                     vm.stack.removeSubrange(argumentStart...)
                     guard resourceLimits.maximumGoroutines >= 2,
-                        vm.goroutines.count <= resourceLimits.maximumGoroutines - 2
+                        vm.goroutines.count + vm.runQueue.contextCount
+                            <= resourceLimits.maximumGoroutines - 2
                     else {
                         throw GoRuntimeError.resourceLimitExceeded("goroutines")
                     }
@@ -7419,8 +7436,21 @@ public struct GoVirtualMachine: Sendable {
                 {
                     performGarbageCollection()
                 }
-                try reportRuntimeMemoryIfChanged()
-                try scheduleNext(requeueCurrent: !vm.currentBlocked)
+                // Both calls below do nothing on most instructions; these
+                // tests say when, without the calls.
+                if processContext != nil,
+                    !vm.heap.memoryMatches(vm.lastRuntimeMemoryReport)
+                {
+                    try reportRuntimeMemoryIfChanged()
+                }
+                if vm.currentBlocked || vm.currentParked || vm.yieldRequested
+                    || !vm.runQueue.isEmpty
+                    || (vm.executed > 0
+                        && vm.executed != vm.lastEventLoopYieldInstruction
+                        && vm.executed.isMultiple(of: instructionQuantum))
+                {
+                    try scheduleNext(requeueCurrent: !vm.currentBlocked)
+                }
             }
             if testFailureCount > 0 { throw GoRuntimeError.testFailure }
         }
@@ -7807,6 +7837,14 @@ private struct ManagedHeap {
         return allocationsSinceCollection >= liveBytesAfterCollection / 64
     }
 
+    /// Whether `report` has the live bytes, live cells and collections the
+    /// heap has now: when it does, the kernel already knows them.
+    func memoryMatches(_ report: (bytes: Int, cells: Int, collections: Int)?) -> Bool {
+        guard let report else { return false }
+        return report.bytes == liveBytes && report.cells == liveCells
+            && report.collections == collectionCount
+    }
+
     var statistics: GoRuntimeStatistics {
         GoRuntimeStatistics(
             heapAllocations: totalAllocations,
@@ -8077,6 +8115,21 @@ private struct ManagedHeap {
         liveBytesAfterCollection = liveBytes
     }
 
+    /// `estimatedBytes` of a value that is a pointer and nothing else: the
+    /// additions there are never negative, so checking the sum once is the
+    /// same as checking each step.
+    private static func pointerValueBytes(_ pointer: GoPointer, maximum: Int) throws -> Int {
+        guard maximum >= 32, pointer.path.count <= (maximum - 32) / 16 else {
+            throw GoRuntimeError.resourceLimitExceeded("heap bytes")
+        }
+        var total = 32 + pointer.path.count * 16
+        for component in pointer.path {
+            if case .field(let name) = component { total += name.utf8.count }
+        }
+        guard total <= maximum else { throw GoRuntimeError.resourceLimitExceeded("heap bytes") }
+        return total
+    }
+
     private static func estimatedBytes(of root: GoValue, maximum: Int) throws -> Int {
         // Most values stored are scalars and strings: measure them without
         // the worklist below, with the same limit checks.
@@ -8090,11 +8143,18 @@ private struct ManagedHeap {
                 throw GoRuntimeError.resourceLimitExceeded("heap bytes")
             }
             return 32 + count
+        case .pointer(let pointer):
+            return try pointerValueBytes(pointer, maximum: maximum)
+        case .map(let map):
+            return try pointerValueBytes(map.storage, maximum: maximum)
+        case .channel(let channel):
+            return try pointerValueBytes(channel.storage, maximum: maximum)
         default:
             break
         }
         var total = 0
         var worklist = [root]
+        worklist.reserveCapacity(8)
 
         func add(_ count: Int) throws {
             guard count >= 0, total <= maximum, count <= maximum - total else {
@@ -8360,7 +8420,7 @@ private final class GoExecutionState {
     @exclusivity(unchecked) var lastEventLoopYieldInstruction = 0
     @exclusivity(unchecked) var currentGoroutineID = 0
     @exclusivity(unchecked) var goroutines = GoIntTable<GoroutineContext>()
-    @exclusivity(unchecked) var runQueue = GoRunQueue()
+    @exclusivity(unchecked) var runQueue = GoRunQueue<GoroutineContext>()
     @exclusivity(unchecked) var currentBlocked = false
     /// True once the current goroutine's context is already stored in
     /// `goroutines` (parked, and possibly woken again) within this
@@ -8369,6 +8429,9 @@ private final class GoExecutionState {
     @exclusivity(unchecked) var yieldRequested = false
     @exclusivity(unchecked) var sliceStartInstruction = 0
     @exclusivity(unchecked) var liveFrameLocalCount = 0
+    /// The last function of each name whose frame metadata passed the check
+    /// in `Frame.init`.
+    @exclusivity(unchecked) var checkedFrameFunctions: [String: GoBytecodeFunction] = [:]
     @exclusivity(unchecked) var lastRuntimeMemoryReport: (bytes: Int, cells: Int, collections: Int)?
 
     init(heap: ManagedHeap) {
@@ -8471,7 +8534,8 @@ private final class Frame {
         stackBase: Int,
         arguments: [GoValue],
         heap: inout ManagedHeap,
-        isDeferredCall: Bool = false
+        isDeferredCall: Bool = false,
+        metadataChecked: Bool = false
     ) throws {
         guard arguments.count == function.parameterCount else {
             throw GoRuntimeError.argumentCountMismatch(
@@ -8482,7 +8546,7 @@ private final class Frame {
         guard function.localCount >= function.parameterCount else {
             throw GoRuntimeError.invalidLocal(function.parameterCount - 1)
         }
-        guard function.rootLocalIndices.allSatisfy({
+        guard metadataChecked || function.rootLocalIndices.allSatisfy({
             $0 >= 0 && $0 < function.localCount
         }), function.safepointProgramCounters.allSatisfy({
             $0 >= 0 && $0 <= function.instructions.count

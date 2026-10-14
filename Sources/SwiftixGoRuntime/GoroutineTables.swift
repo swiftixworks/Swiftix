@@ -93,29 +93,61 @@ struct GoIntTable<Value> {
     }
 }
 
-/// The identifiers of the runnable goroutines, first in first out, with a
-/// `removeFirst` that does not shift the rest.
-struct GoRunQueue {
-    private var items: [Int] = []
+/// The runnable goroutines, first in first out, with a `removeFirst` that
+/// does not shift the rest.
+///
+/// A goroutine the scheduler switches away from while it can still run is
+/// queued with its context, so the switch does not store it in the table of
+/// parked goroutines only to take it out again; one woken from the table is
+/// queued by identifier alone.
+struct GoRunQueue<Context> {
+    /// A ring of `capacity` entries, `count` of them in use from `head`.
+    private var slots: [(id: Int, context: Context?)] = []
     private var head = 0
+    private var count = 0
+    /// How many queued entries carry their context.
+    private(set) var contextCount = 0
 
-    var isEmpty: Bool { head == items.count }
+    var isEmpty: Bool { count == 0 }
 
     mutating func append(_ id: Int) {
-        items.append(id)
+        enqueue((id, nil))
     }
 
-    mutating func removeFirst() -> Int {
-        precondition(head < items.count, "removeFirst from an empty run queue")
-        let id = items[head]
-        head += 1
-        if head == items.count {
-            items.removeAll(keepingCapacity: true)
-            head = 0
-        } else if head >= 64, head * 2 >= items.count {
-            items.removeFirst(head)
+    mutating func append(_ id: Int, context: Context) {
+        enqueue((id, context))
+        contextCount += 1
+    }
+
+    private mutating func enqueue(_ entry: (id: Int, context: Context?)) {
+        if count == slots.count {
+            // Unroll the ring into a buffer twice the size.
+            var grown: [(id: Int, context: Context?)] = []
+            grown.reserveCapacity(max(8, slots.count * 2))
+            for offset in 0..<count {
+                grown.append(slots[(head + offset) % slots.count])
+            }
+            while grown.count < max(8, slots.count * 2) { grown.append((0, nil)) }
+            slots = grown
             head = 0
         }
-        return id
+        slots[(head + count) % slots.count] = entry
+        count += 1
+    }
+
+    mutating func removeFirst() -> (id: Int, context: Context?) {
+        precondition(count > 0, "removeFirst from an empty run queue")
+        // Move the entry out, leaving an empty slot, without a copy.
+        var first: (id: Int, context: Context?) = (0, nil)
+        swap(&first, &slots[head])
+        head = (head + 1) % slots.count
+        count -= 1
+        if first.context != nil { contextCount -= 1 }
+        return first
+    }
+
+    /// The contexts the queue holds, for the collector's roots.
+    var contexts: [Context] {
+        (0..<count).compactMap { slots[(head + $0) % slots.count].context }
     }
 }
