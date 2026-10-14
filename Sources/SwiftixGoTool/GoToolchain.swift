@@ -138,7 +138,13 @@ public enum GoToolchain {
             ) { text in
                 _ = context.write(1, Array(text.utf8))
             }
-            context.exit(exitCode)
+            // Go's `go run` reports a program's nonzero status and fails
+            // with its own.
+            guard exitCode == 0 else {
+                fail(context, "exit status \(exitCode)", status: 1)
+                return
+            }
+            context.exit(0)
         } catch let GoRuntimeError.panicError(message) {
             // Go's `go run` reports how the program ended after its trace.
             fail(

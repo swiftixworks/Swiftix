@@ -77,7 +77,9 @@ struct GoToolCommandTests: GoTestHarness {
             })
 
         #expect(output.contains("from-run\n"))
-        #expect(output.contains("run=7"))
+        // As Go's: `go run` reports the program's status and fails with 1.
+        #expect(output.contains("exit status 7\n"))
+        #expect(output.contains("run=1"))
         #expect(output.contains("from-image\n"))
         #expect(output.contains("image=9"))
     }
