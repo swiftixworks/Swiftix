@@ -615,7 +615,15 @@ extension FunctionChecker {
     /// value wants a type assertion to be a value of a type that implements
     /// it.
     func assignmentCause(of actual: GoType, to expected: GoType) -> String? {
-        if case .interface(let wanted) = underlying(expected), !wanted.isEmpty {
+        if case .interface(var wanted) = underlying(expected), !wanted.isEmpty {
+            // A handle of the library is Go's interface of the name, which
+            // has methods the dialect lacks: a type of the program is
+            // said to lack the first of them.
+            if case .named(let name) = expected, GoLibraryTypes.isHandle(expected),
+                !isInterface(actual)
+            {
+                wanted = GoLibraryTypes.goMethods(ofHandle: name)
+            }
             return implementationCause(of: actual, for: expected, methods: wanted)
         }
         if isInterface(actual), !isInterface(expected), isAssignable(expected, to: actual) {

@@ -1882,6 +1882,11 @@ public struct GoVirtualMachine: Sendable {
             let writeResults: (Int, String?) -> [GoValue] = { count, failure in
                 [.int(Int64(count)), errorValue(failure)]
             }
+            // A nil `*os.File` is refused, as Go's methods refuse it.
+            if operands[0] == .nilValue, name.hasPrefix("$os.File.") {
+                stack.append(contentsOf: [.int(0), errorValue(GoFiles.invalidFile)])
+                return true
+            }
             // A file the program closed fails as it does in Go instead of
             // reaching whatever now owns its descriptor number.
             if case .int(let handle) = operands[0], handle >= GoFiles.firstHandle,
@@ -2853,7 +2858,8 @@ public struct GoVirtualMachine: Sendable {
             case .structure(let structure):
                 return structure.typeName.map { ($0, value) }
             default:
-                return nil
+                // A connection or a listener, which travels as it is.
+                return GoLibraryMethods.owner(ofHandle: value).map { ($0, value) }
             }
         }
 
@@ -3553,8 +3559,11 @@ public struct GoVirtualMachine: Sendable {
                 _ operation: String
             ) throws -> (file: GoFiles.OpenFile, process: ProcessContext)? {
                 guard let file = try resolveFile(operands[0]) else {
-                    let reason = operands[0] == .nilValue ? GoFiles.invalidFile : GoFiles.closedFile
-                    methodFailure = errorValue("\(operation): \(reason)")
+                    // Go's methods give a nil file `ErrInvalid` as it is,
+                    // and name the operation for a file that was closed.
+                    methodFailure = errorValue(
+                        operands[0] == .nilValue
+                            ? GoFiles.invalidFile : "\(operation): \(GoFiles.closedFile)")
                     return nil
                 }
                 guard let processContext else {
@@ -5595,6 +5604,7 @@ public struct GoVirtualMachine: Sendable {
                         fd: fd, network: "tcp", localAddr: address)))
                     stack.append(.nilValue)
                 case .netAccept:
+                    if stack.last == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .netListener(let listener) = try pop(&stack) else {
                         throw GoRuntimeError.typeMismatch
                     }
@@ -5630,6 +5640,7 @@ public struct GoVirtualMachine: Sendable {
                     }
                     currentBlocked = true
                 case .netRead:
+                    if stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .slice(let buf) = try pop(&stack),
                         case .netConn(let conn) = try pop(&stack)
                     else { throw GoRuntimeError.typeMismatch }
@@ -5694,6 +5705,7 @@ public struct GoVirtualMachine: Sendable {
                     }
                     currentBlocked = true
                 case .netWrite:
+                    if stack.dropLast().last == .nilValue { throw GoRuntimePanic.nilDereference }
                     guard case .slice(let buf) = try pop(&stack),
                         case .netConn(let conn) = try pop(&stack)
                     else { throw GoRuntimeError.typeMismatch }
@@ -5728,6 +5740,7 @@ public struct GoVirtualMachine: Sendable {
                     switch value {
                     case .netConn(let conn): fd = conn.fd
                     case .netListener(let ln): fd = ln.fd
+                    case .nilValue: throw GoRuntimePanic.nilDereference
                     default: throw GoRuntimeError.typeMismatch
                     }
                     if let processContext {
@@ -6194,6 +6207,10 @@ public struct GoVirtualMachine: Sendable {
                         concreteValue = iface.value
                     } else if case .structure(let sv) = receiver, let tn = sv.typeName {
                         concreteTypeName = tn
+                        concreteValue = receiver
+                    } else if let owner = GoLibraryMethods.owner(ofHandle: receiver) {
+                        // A handle of the library, whose methods the VM has.
+                        concreteTypeName = owner
                         concreteValue = receiver
                     } else {
                         throw GoRuntimeError.typeMismatch

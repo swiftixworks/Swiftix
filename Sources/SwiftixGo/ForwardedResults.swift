@@ -80,8 +80,6 @@ extension GoBuiltinFunction {
         case .fmtPrint, .fmtPrintln, .strconvAtoi: return [.int, failure]
         case .userlandReadInput, .userlandReadStdin: return [.string, .int]
         case .userlandWindowSize: return [.int, .int]
-        case .contextWithCancel, .contextWithTimeout:
-            return [.named("context.Context"), .named("context.CancelFunc")]
         case .netDial: return [.named("net.Conn"), failure]
         case .netListen: return [.named("net.Listener"), failure]
         case .netLookupHost: return [.slice(.string), failure]

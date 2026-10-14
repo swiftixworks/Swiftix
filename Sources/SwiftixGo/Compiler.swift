@@ -3326,12 +3326,6 @@ struct IRLowerer {
                     break
                 }
             }
-            // Cancel function call: a local variable of type context.CancelFunc
-            if let binding = lookup(functionName), binding.type == .named("context.CancelFunc") {
-                let cancelFunc = binding.register
-                operations.append(.cancelContext(ctx: cancelFunc))
-                return nil
-            }
             // An argument passed to an interface parameter is converted.
             let registers = try lowerArguments(
                 arguments, parameters: functionParameterTypes[functionName])
@@ -3375,14 +3369,6 @@ struct IRLowerer {
             case ("sync.WaitGroup", "Wait"):
                 operations.append(.waitGroupWait(waitGroup: receiver))
                 return nil
-            case ("context.Context", "Done"):
-                let destination = allocateRegister()
-                operations.append(.contextDone(destination: destination, ctx: receiver))
-                return destination
-            case ("context.Context", "Err"):
-                let destination = allocateRegister()
-                operations.append(.contextErr(destination: destination, ctx: receiver))
-                return destination
             case ("net.Conn", "Write"):
                 guard let data = arguments.first else { break }
                 let buf = try lower(data)
@@ -3509,30 +3495,6 @@ struct IRLowerer {
             case .runtimeGC:
                 operations.append(.garbageCollect)
                 return nil
-            case .contextBackground:
-                let destination = allocateRegister()
-                operations.append(.contextBackground(destination: destination))
-                return destination
-            case .contextWithCancel:
-                let parent = registers.first!
-                let ctxDest = allocateRegister()
-                let cancelDest = allocateRegister()
-                operations.append(.contextWithCancel(
-                    ctxDestination: ctxDest,
-                    cancelDestination: cancelDest,
-                    parent: parent))
-                return ctxDest
-            case .contextWithTimeout:
-                let parent = registers[0]
-                let duration = registers[1]
-                let ctxDest = allocateRegister()
-                let cancelDest = allocateRegister()
-                operations.append(.contextWithTimeout(
-                    ctxDestination: ctxDest,
-                    cancelDestination: cancelDest,
-                    parent: parent,
-                    duration: duration))
-                return ctxDest
             case .netDial:
                 let network = registers[0]
                 let address = registers[1]
@@ -3747,10 +3709,6 @@ struct IRLowerer {
             let builtin = GoStandardLibrary.resolve(package: packageName, member: member)
         {
             switch builtin {
-            case .contextWithCancel:
-                return [.named("context.Context"), .named("context.CancelFunc")]
-            case .contextWithTimeout:
-                return [.named("context.Context"), .named("context.CancelFunc")]
             case .netDial:
                 return [.named("net.Conn"), GoPredeclared.errorType]
             case .netListen:
@@ -3823,32 +3781,12 @@ struct IRLowerer {
         if let results = try lowerValueCall(callee: callee, arguments: arguments) {
             return results
         }
-        // Handle context.WithCancel / context.WithTimeout as multi-return builtins
+        // The builtins of the library that give several results.
         if case .selector(let base, let member, _) = callee,
             case .identifier(let packageName, _) = base,
             let builtin = GoStandardLibrary.resolve(package: packageName, member: member)
         {
             switch builtin {
-            case .contextWithCancel:
-                let parent = try lower(arguments[0])
-                let ctxDest = allocateRegister()
-                let cancelDest = allocateRegister()
-                operations.append(.contextWithCancel(
-                    ctxDestination: ctxDest,
-                    cancelDestination: cancelDest,
-                    parent: parent))
-                return [ctxDest, cancelDest]
-            case .contextWithTimeout:
-                let parent = try lower(arguments[0])
-                let duration = try lower(arguments[1])
-                let ctxDest = allocateRegister()
-                let cancelDest = allocateRegister()
-                operations.append(.contextWithTimeout(
-                    ctxDestination: ctxDest,
-                    cancelDestination: cancelDest,
-                    parent: parent,
-                    duration: duration))
-                return [ctxDest, cancelDest]
             case .netDial:
                 let network = try lower(arguments[0])
                 let address = try lower(arguments[1])
@@ -4746,12 +4684,10 @@ struct IRLowerer {
         switch type {
         case .named(let name)
             where name == "sync.Mutex" || name == "sync.WaitGroup"
-                || name == "context.Context" || name == "context.CancelFunc"
                 || name == "net.Conn" || name == "net.Listener":
             return name
         case .pointer(.named(let name))
             where name == "sync.Mutex" || name == "sync.WaitGroup"
-                || name == "context.Context" || name == "context.CancelFunc"
                 || name == "net.Conn" || name == "net.Listener":
             return name
         default:
@@ -4798,10 +4734,13 @@ struct IRLowerer {
             var name = ""
             if case .named(let symbol) = type { name = symbol }
             let wanted = methods.sorted { $0.name < $1.name }
+            // No type of the program is a handle of the library, whatever
+            // methods it has: the VM knows the one type that is.
+            let owners = GoLibraryTypes.isHandle(type) ? [] : implementers(of: wanted)
             return GoPredeclared.interfaceTarget
                 + wanted.map { "\($0.name):\($0.parameters.count):\($0.results.count)" }
                 .joined(separator: ",") + ";" + name
-                + implementers(of: wanted).map { "\n" + $0 }.joined()
+                + owners.map { "\n" + $0 }.joined()
         }
         return concreteTypeName(type) ?? typeDescriptor(for: type)
     }

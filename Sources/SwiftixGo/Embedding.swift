@@ -494,6 +494,13 @@ extension GoEmbedding {
         case "os.File":
             for method in fileMethods { shape.methods[method] = true }
             shape.requiresPointer = true
+        case GoLibraryTypes.connectionName, GoLibraryTypes.listenerName:
+            // A handle is an interface, and lends its methods as one does.
+            guard case .interface(let methods)? = GoLibraryTypes.handleInterface(of: name) else {
+                return nil
+            }
+            shape.kind = .interface
+            for method in methods { shape.methods[method.name] = false }
         default:
             return nil
         }
@@ -740,6 +747,14 @@ extension GoEmbedding {
         case .interface:
             if promotion.holder == "error" {
                 return ([], [.named("string", position: position)])
+            }
+            if case .interface(let lent)? = GoLibraryTypes.handleInterface(of: promotion.holder) {
+                // A handle of the library, whose methods the library knows.
+                guard let method = lent.first(where: { $0.name == name }) else { return nil }
+                let parameters = method.parameters.map { written($0, at: position) }
+                let results = method.results.map { written($0, at: position) }
+                guard !parameters.contains(nil), !results.contains(nil) else { return nil }
+                return (parameters.compactMap { $0 }, results.compactMap { $0 })
             }
             var type = declarations[promotion.holder]
             var seen: Set<String> = [promotion.holder]

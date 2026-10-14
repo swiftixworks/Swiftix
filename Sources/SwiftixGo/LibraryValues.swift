@@ -48,17 +48,12 @@ enum GoLibraryValue {
             return nil
         }
         let failure = GoPredeclared.errorType
-        let context = GoType.named("context.Context")
-        let cancel = GoType.named("context.CancelFunc")
         let ticks = GoType.channel(direction: .receiveOnly, element: GoPredeclared.time)
         let signature: (parameters: [GoType], results: [GoType])
         switch builtin {
         case .fmtPrint, .fmtPrintln: signature = ([operands], [.int, failure])
         case .timeAfter, .timeTick: signature = ([GoLibraryTypes.duration], [ticks])
         case .timeSleep: signature = ([GoLibraryTypes.duration], [])
-        case .contextBackground: signature = ([], [context])
-        case .contextWithCancel: signature = ([context], [context, cancel])
-        case .contextWithTimeout: signature = ([context, GoLibraryTypes.duration], [context, cancel])
         case .netDial: signature = ([.string, .string], [.named("net.Conn"), failure])
         case .netListen: signature = ([.string, .string], [.named("net.Listener"), failure])
         case .netLookupHost: signature = ([.string], [.slice(.string), failure])

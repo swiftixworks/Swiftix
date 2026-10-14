@@ -292,6 +292,8 @@ enum GoLibraryMethods {
                 instructions: (0..<operandCount).map(GoInstruction.load)
                     + [.call(native, argumentCount: operandCount), .returnValues(count: 1)])
         }
+        // And those of the handles: a connection, a listener, a file.
+        functions.merge(handleFunctions) { first, _ in first }
         return functions
     }()
 
@@ -327,10 +329,12 @@ enum GoLibraryMethods {
     /// Whether the dynamic type `owner` (`T` or `*T`) is a library type
     /// that implements `target`.
     static func implements(_ owner: String, _ target: GoErrors.InterfaceTarget) -> Bool {
-        let base = owner.hasPrefix("*") ? String(owner.dropFirst()) : owner
-        guard base == durationTypeName, !target.methods.isEmpty,
-            !target.implementers.contains(refusalMark + base)
-        else { return false }
+        guard isLibraryType(owner), !target.methods.isEmpty else { return false }
+        // A handle type is an interface with one type that implements it.
+        if let only = handleInterfaces[target.typeName] { return owner == only }
+        // A pointer to a duration has the methods of a duration.
+        let base = owner == "*" + durationTypeName ? durationTypeName : owner
+        guard !target.implementers.contains(refusalMark + base) else { return false }
         return target.methods.allSatisfy { wanted in
             guard let function = functions[base + "." + wanted.name] else { return false }
             return function.parameterCount == wanted.parameterCount + 1

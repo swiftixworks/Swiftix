@@ -1515,15 +1515,18 @@ struct GoDurationTests: GoTestHarness {
         #expect(GoTypeDescriptor.name(of: descriptor.type) == "time.Duration")
         #expect(GoTypeDescriptor.methodOwner(ofTypeName: boxes[0]) == "time.Duration")
 
+        let durationFunctions = GoLibraryMethods.functions.keys.filter {
+            $0.hasPrefix("time.Duration.")
+        }
         #expect(
-            GoLibraryMethods.functions.keys.sorted() == [
+            durationFunctions.sorted() == [
                 "time.Duration.Abs", "time.Duration.Hours", "time.Duration.Microseconds",
                 "time.Duration.Milliseconds", "time.Duration.Minutes",
                 "time.Duration.Nanoseconds", "time.Duration.Round", "time.Duration.Seconds",
                 "time.Duration.String", "time.Duration.Truncate",
             ])
         #expect(
-            GoLibraryMethods.functions.keys.sorted()
+            durationFunctions.sorted()
                 == GoLibraryTypes.durationMethods.map { "time.Duration." + $0 }.sorted())
         let round = try #require(GoLibraryMethods.functions["time.Duration.Round"])
         #expect(round.parameterCount == 2)

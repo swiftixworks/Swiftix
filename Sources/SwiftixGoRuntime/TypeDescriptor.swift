@@ -175,7 +175,10 @@ struct GoTypeDescriptor: Equatable, Sendable {
                 return String(Unicode.Scalar(kind.rawValue))
             }
             if name.hasPrefix("*") { return "*" + encoded(name.dropFirst()) }
-            return "N\(name.utf8.count):" + name
+            // A type of the library without a definition is boxed as one
+            // known by name only.
+            let kind = GoLibraryMethods.opaqueTypeNames.contains(String(name)) ? "O" : "N"
+            return "\(kind)\(name.utf8.count):" + name
         }
         // A library error is boxed under its own name.
         return typeName == "error" ? typeName : marker + encoded(typeName[...])
@@ -204,6 +207,7 @@ struct GoTypeDescriptor: Equatable, Sendable {
         switch descriptor.type {
         case .named(let symbol): return symbol
         case .pointer(.named(let symbol)): return "*" + symbol
+        case .pointer(.other("os.File")): return GoLibraryMethods.fileTypeName
         default: return nil
         }
     }

@@ -343,10 +343,10 @@ struct GoFileSystemTests: GoTestHarness {
                 open /plain: file exists
                 open /: is a directory
                 true open /: is a directory
-                close: invalid argument sync: invalid argument
-                0 seek: invalid argument
-                0 readat: invalid argument
-                0 writeat: invalid argument
+                invalid argument invalid argument
+                0 invalid argument
+                0 invalid argument
+                0 invalid argument
                 0 read /dev/stdout: bad file descriptor
                 """)
     }

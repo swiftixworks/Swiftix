@@ -1718,6 +1718,11 @@ private struct FormatPrinter {
             trimTrailingWhitespace()
             append("<-")
             append(" ")
+        // Before `chan` the arrow is part of a type, `<-chan T`, wherever
+        // the type is written: after a result list or a name as well.
+        case "<-" where !isUnaryOperator && next?.text == "chan":
+            if let before = previous?.text, !["(", "[", "]", "*"].contains(before) { ensureSpace() }
+            append("<-")
         case "<-" where isUnaryOperator:
             if needsSpaceBeforeUnary() { ensureSpace() }
             append("<-")

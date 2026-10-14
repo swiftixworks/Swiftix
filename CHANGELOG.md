@@ -279,6 +279,21 @@ format, behavior and platform changes are recorded here.
   and `max` of floats; `time.Duration`'s `Seconds`, `Minutes`, and `Hours`.
 - Array lengths that are constant expressions: `[n]T`, `[2 * n]T`,
   `[len("abc")]T`. `var a [n]int` was `expected array length`.
+- `context` as Go has it, written in Go and linked with the program:
+  `WithCancel`, `WithTimeout`, `WithDeadline`, `WithValue`, `TODO`,
+  `ctx.Done()` as a `<-chan struct{}`, `ctx.Err()` with `context.Canceled`
+  and `context.DeadlineExceeded`, `ctx.Value`, `ctx.Deadline`,
+  `WithCancelCause`, `Cause`, `AfterFunc`, `WithoutCancel`.
+  `context.Context` is an interface a program implements and embeds. A
+  receive from `ctx.Done()` was `receive from non-channel`, and `defer
+  cancel()` ended the run with `missing function: cancel`.
+- `net.Conn`, `net.Listener`, and `*os.File` are values of the interfaces
+  their methods satisfy (`io.Reader`, `io.Writer`, `io.Closer`, a program's
+  own), by assignment, assertion, and type switch, with `nil` for a zero
+  value; a struct that embeds one has its methods. `var w io.Writer =
+  os.Stdout` was refused, and `func dial() (net.Conn, error)` was
+  `unsupported zero value type`.
+
 
 ### Changed
 
@@ -497,6 +512,10 @@ format, behavior and platform changes are recorded here.
   that uses `net/http` for its status constants alone is linked with no
   function of it. Their Go text is the files under `Sources/SwiftixGoLibrary`;
   `Scripts/generate-go-library.py` writes the Swift file the build reads.
+- A program that imports `context` is linked with the package's Go source
+  and compiles to a different, larger image. A method of a nil `*os.File`
+  returns `invalid argument`, as Go does.
+
 
 ### Fixed
 
@@ -627,6 +646,9 @@ format, behavior and platform changes are recorded here.
   string as S value`, and so were `const GET Method = "GET"`, a `Method` map
   key or argument written as a string, and `type Flag bool; var f Flag =
   true`.
+- `gofmt` writes `<-chan T` after a result list or a name without a blank
+  inside the arrow (`func f() <-chan int`; it wrote `<- chan int`).
+
 
 ## 0.13.1 — 2026-10-08
 

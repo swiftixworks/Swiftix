@@ -8,9 +8,6 @@ enum GoBuiltinFunction: Sendable, Equatable {
     case timeAfter
     case timeSleep
     case timeTick
-    case contextBackground
-    case contextWithCancel
-    case contextWithTimeout
     case netDial
     case netListen
     case netLookupHost
@@ -51,9 +48,6 @@ enum GoStandardLibrary {
         case ("time", "After"): return .timeAfter
         case ("time", "Sleep"): return .timeSleep
         case ("time", "Tick"): return .timeTick
-        case ("context", "Background"): return .contextBackground
-        case ("context", "WithCancel"): return .contextWithCancel
-        case ("context", "WithTimeout"): return .contextWithTimeout
         case ("net", "Dial"): return .netDial
         case ("net", "Listen"): return .netListen
         case ("net", "LookupHost"): return .netLookupHost
@@ -490,6 +484,7 @@ enum GoPredeclared {
         // type is its own underlying type: it is no integer.
         GoNumericKind(typeName: name).flatMap { $0.isInteger ? .int : nil }
             ?? GoLibraryTypes.underlying(of: name)
+            ?? GoLibraryTypes.handleInterface(of: name)
     }
 
     /// Go numeric types this toolchain does not implement.

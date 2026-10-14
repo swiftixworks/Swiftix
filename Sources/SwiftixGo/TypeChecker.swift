@@ -593,7 +593,6 @@ public enum GoTypeChecker {
             case "error": return builtinErrorType()
             case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
-                "context.Context", "context.CancelFunc",
                 "net.Conn", "net.Listener",
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
@@ -1088,7 +1087,13 @@ struct FunctionChecker {
                 isCalled: true)
         else { return nil }
         if single {
-            return [try type(of: .call(callee: promoted, arguments: arguments, position: position))]
+            // Whether one value is wanted was settled for the call as the
+            // source writes it: as a statement it may have several results.
+            return [
+                try callType(
+                    of: .call(callee: promoted, arguments: arguments, position: position),
+                    callee: promoted, arguments: arguments, position: position)
+            ]
         }
         return try callResultTypes(callee: promoted, arguments: arguments, position: position)
     }
@@ -2748,16 +2753,6 @@ struct FunctionChecker {
             return results.first ?? .void
         }
         guard let signature = functionSignatures[name] else {
-            // Allow calling variables of function type (e.g., context.CancelFunc)
-            if let binding = lookup(name),
-                binding.type == .named("context.CancelFunc")
-            {
-                use(name)
-                try checkArguments(
-                    arguments, of: .identifier(name, position: namePosition), declared: [],
-                    position: position)
-                return .void
-            }
             throw GoDiagnostic(
                 position: namePosition, message: uncallableMessage(name) ?? "undefined: \(name)")
         }
@@ -2846,34 +2841,6 @@ struct FunctionChecker {
                 arguments, of: callee, declared: [GoLibraryTypes.duration],
                 position: position)
             return .channel(direction: .receiveOnly, element: GoPredeclared.time)
-        }
-        if case .identifier(let packageName, _) = base,
-            packageName == "context",
-            importedPaths.contains("context"),
-            name == "Background"
-        {
-            try checkArguments(arguments, of: callee, declared: [], position: position)
-            return .named("context.Context")
-        }
-        if case .identifier(let packageName, _) = base,
-            packageName == "context",
-            importedPaths.contains("context"),
-            name == "WithCancel"
-        {
-            try checkArguments(
-                arguments, of: callee, declared: [.named("context.Context")],
-                position: position)
-            return .named("context.Context")
-        }
-        if case .identifier(let packageName, _) = base,
-            packageName == "context",
-            importedPaths.contains("context"),
-            name == "WithTimeout"
-        {
-            try checkArguments(
-                arguments, of: callee, declared: [.named("context.Context"), GoLibraryTypes.duration],
-                position: position)
-            return .named("context.Context")
         }
         if case .identifier(let packageName, _) = base,
             packageName == "net",
@@ -2969,18 +2936,6 @@ struct FunctionChecker {
                     break
                 }
             }
-            if syncReceiverName == "context.Context" {
-                switch name {
-                case "Done":
-                    try checkArguments(arguments, of: callee, declared: [], position: position)
-                    return .channel(direction: .receiveOnly, element: .int)
-                case "Err":
-                    try checkArguments(arguments, of: callee, declared: [], position: position)
-                    return GoPredeclared.errorType
-                default:
-                    break
-                }
-            }
             if syncReceiverName == "net.Conn" {
                 switch name {
                 case "Read", "Write":
@@ -2989,8 +2944,12 @@ struct FunctionChecker {
                             arguments, of: callee, declared: [.slice(GoPredeclared.byte)],
                             position: position)
                     }
-                    if try type(of: arguments[0]) != .slice(GoPredeclared.byte) {
-                        try requireArgument(arguments[0], as: .slice(.int), of: callee)
+                    // A `[]int` is taken as it always was here; what is
+                    // neither is refused as Go refuses it.
+                    let buffer = try type(of: arguments[0])
+                    if buffer != .slice(GoPredeclared.byte), buffer != .slice(.int) {
+                        try requireArgument(
+                            arguments[0], as: .slice(GoPredeclared.byte), of: callee)
                     }
                     return .int
                 case "Close":
@@ -3591,7 +3550,6 @@ struct FunctionChecker {
             case "error": return builtinErrorType()
             case "byte", "uint8": return GoPredeclared.byte
             case "testing.T", "sync.Mutex", "sync.WaitGroup",
-                "context.Context", "context.CancelFunc",
                 "net.Conn", "net.Listener",
                 "http.Response", "http.ResponseWriter", "http.Request",
                 "time.Time", "os.File":
@@ -4097,6 +4055,8 @@ struct FunctionChecker {
 
     func isAssignable(_ actual: GoType, to expected: GoType) -> Bool {
         if actual == expected { return true }
+        // Only the library has values of a handle type.
+        if GoLibraryTypes.isHandle(expected) { return actual == .nilType }
         if actual == .nilType
             && (isPointer(expected) || isSlice(expected) || isMap(expected) || isChannel(expected)
                 || isFunction(expected))
@@ -4135,7 +4095,7 @@ struct FunctionChecker {
             return methods.allSatisfy(own.contains)
         }
         for method in methods {
-            if let library = GoLibraryTypes.method(of: type, named: method.name) {
+            if let library = GoLibraryTypes.interfaceMethod(of: type, named: method.name) {
                 // A method of a library type, which the VM provides.
                 guard library.parameters == method.parameters, library.results == method.results
                 else { return false }
@@ -4354,25 +4314,6 @@ struct FunctionChecker {
                     try stringsCallResult(
                         name, callee: callee, arguments: arguments, position: position)
                 ]
-            }
-            if case .identifier(let packageName, _) = base,
-                packageName == "context",
-                importedPaths.contains("context")
-            {
-                switch name {
-                case "WithCancel":
-                    try checkArguments(
-                        arguments, of: callee, declared: [.named("context.Context")],
-                        position: position)
-                    return [.named("context.Context"), .named("context.CancelFunc")]
-                case "WithTimeout":
-                    try checkArguments(
-                        arguments, of: callee, declared: [.named("context.Context"), GoLibraryTypes.duration],
-                        position: position)
-                    return [.named("context.Context"), .named("context.CancelFunc")]
-                default:
-                    break
-                }
             }
             if case .identifier(let packageName, _) = base,
                 packageName == "net",
