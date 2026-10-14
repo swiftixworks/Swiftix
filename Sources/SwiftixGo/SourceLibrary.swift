@@ -134,6 +134,7 @@ enum GoSourceLibrary {
         case "url": return GoStandardLibrary.urlNativeFunction(name)
         case "bufio", "bytes":
             return GoStandardLibrary.bytesNativeFunction(package: package, member: name)
+        case "strconv": return GoNumberLibrary.parsingFunction(name)
         default: return nil
         }
     }

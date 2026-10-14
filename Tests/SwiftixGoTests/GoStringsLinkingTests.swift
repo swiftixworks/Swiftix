@@ -30,9 +30,9 @@ struct GoStringsLinkingTests: GoTestHarness {
     @Test func aProgramOfTheNativesGetsNoText() throws {
         let names = try functionNames(
             """
-            n, err := strconv.Atoi(strings.TrimSpace(" 42 "))
+            n, err := strconv.FormatInt(42, 10), error(nil)
             parts := strings.Split(strings.ToUpper("a,b"), ",")
-            fmt.Println(n, err, strings.Join(parts, "-"), strconv.Itoa(n), strings.Index("abc", "c"))
+            fmt.Println(n, err, strings.Join(parts, "-"), strconv.Itoa(len(n)), strings.Index("abc", "c"))
             fmt.Println(strconv.FormatInt(255, 16), strings.HasPrefix("abc", "a"), strings.Fields(" a b "))
             """, imports: ["fmt", "strconv", "strings"])
 

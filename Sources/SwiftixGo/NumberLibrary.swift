@@ -153,3 +153,14 @@ enum GoNumberLibrary {
         "$sort.Float64s",
     ]
 }
+
+extension GoNumberLibrary {
+    /// The natives that read a number, as the Go text of `strconv` calls
+    /// them: `native.ParseInt(s, base, bitSize)` is `$strconv.ParseInt`.
+    /// They fail with the text of Go's error, which the text makes Go's
+    /// `*strconv.NumError`; a program's `strconv.ParseInt` is the text's.
+    static func parsingFunction(_ name: String) -> GoNativeFunction? {
+        guard ["ParseInt", "ParseUint", "ParseFloat"].contains(name) else { return nil }
+        return nativeFunction(package: "strconv", member: name)
+    }
+}

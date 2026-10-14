@@ -1099,6 +1099,9 @@ private struct PackageDependencyAnalyzer {
         if let receiver = function.receiver {
             localTypes[receiver.name] = compilerResolve(receiver.type)
         }
+        for (name, type) in zip(function.resultNames, function.resultTypes) {
+            if let name { localTypes[name] = compilerResolve(type) }
+        }
         return dependencies(
             of: function.body,
             localTypes: localTypes,
@@ -1156,11 +1159,13 @@ private struct PackageDependencyAnalyzer {
                     of: expression,
                     localTypes: localTypes,
                     visitingFunctions: &visitingFunctions))
-        case .multiDeclaration(_, let expression, _):
-            return dependencies(
+        case .multiDeclaration(let names, let expression, _):
+            let result = dependencies(
                 of: expression,
                 localTypes: localTypes,
                 visitingFunctions: &visitingFunctions)
+            Self.declareLocals(names, in: &localTypes)
+            return result
         case .multiAssignment(let targets, let expression, _):
             var result = dependencies(
                 of: expression,
@@ -1251,15 +1256,17 @@ private struct PackageDependencyAnalyzer {
                         visitingFunctions: &visitingFunctions))
             }
             return result
-        case .forRangeStatement(_, _, let collection, let body, _):
+        case .forRangeStatement(let indexName, let valueName, let collection, let body, _):
             var result = dependencies(
                 of: collection,
                 localTypes: localTypes,
                 visitingFunctions: &visitingFunctions)
+            var loopLocalTypes = localTypes
+            Self.declareLocals([indexName, valueName].compactMap { $0 }, in: &loopLocalTypes)
             result.formUnion(
                 dependencies(
                     of: body,
-                    localTypes: localTypes,
+                    localTypes: loopLocalTypes,
                     visitingFunctions: &visitingFunctions))
             return result
         case .switchStatement(let expression, let cases, _):
@@ -1302,6 +1309,17 @@ private struct PackageDependencyAnalyzer {
                     visitingFunctions: &visitingFunctions))
             }
             return result
+        }
+    }
+
+    /// Notes `names` as variables of the function, which a package-level
+    /// variable of the same name is not: `x, err := f()` in a function a
+    /// package-level initializer calls does not make it depend on a
+    /// package-level `err`. A name already local keeps its type; the type
+    /// of a new one is not worked out.
+    private static func declareLocals(_ names: [String], in localTypes: inout [String: GoType]) {
+        for name in names where name != "_" && localTypes[name] == nil {
+            localTypes[name] = .interface([])
         }
     }
 

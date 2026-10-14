@@ -80,6 +80,58 @@ func main() {
 			fail("AppendInt(%d, %d): text %s, Go %s", i, base, got, want)
 		}
 	}
+	numbers := []string{"", "0", "12", "-12", "+7", "x", "1x", "0x1f", "0b101", "0o17", "017", "1_000", "_1", "300", "-129", "255", "256",
+		"9223372036854775807", "9223372036854775808", "-9223372036854775808", "-9223372036854775809", "18446744073709551615",
+		"18446744073709551616", "99999999999999999999", "1.5", "1e400", "-1e400", "1e-400", "inf", "-Inf", "NaN", "3.4e39",
+		"0x1p-2", "1e", ".", "１", "\"q\"", "é"}
+	sameError := func(name string, got, want error) {
+		if (got == nil) != (want == nil) {
+			fail("%s: text %v, Go %v", name, got, want)
+			return
+		}
+		if got == nil {
+			return
+		}
+		var mine *library.NumError
+		var real *strconv.NumError
+		if !errors.As(got, &mine) || !errors.As(want, &real) || got.Error() != want.Error() || mine.Func != real.Func ||
+			mine.Num != real.Num || (real.Err == strconv.ErrSyntax) != (mine.Err == library.ErrSyntax) ||
+			(real.Err == strconv.ErrRange) != (mine.Err == library.ErrRange) || mine.Err.Error() != real.Err.Error() {
+			fail("%s: text %#v, Go %#v", name, got, want)
+		}
+	}
+	for _, s := range numbers {
+		a, e1 := library.Atoi(s)
+		b, e2 := strconv.Atoi(s)
+		if a != b {
+			fail("Atoi(%q): text %d, Go %d", s, a, b)
+		}
+		sameError(fmt.Sprintf("Atoi(%q)", s), e1, e2)
+		for _, base := range []int{0, 2, 8, 10, 16, 36, 1, 37} {
+			for _, size := range []int{0, 8, 16, 32, 64, 65, -1} {
+				i, e1 := library.ParseInt(s, base, size)
+				j, e2 := strconv.ParseInt(s, base, size)
+				if i != j {
+					fail("ParseInt(%q, %d, %d): text %d, Go %d", s, base, size, i, j)
+				}
+				sameError(fmt.Sprintf("ParseInt(%q, %d, %d)", s, base, size), e1, e2)
+				u, e1 := library.ParseUint(s, base, size)
+				v, e2 := strconv.ParseUint(s, base, size)
+				if u != v {
+					fail("ParseUint(%q, %d, %d): text %d, Go %d", s, base, size, u, v)
+				}
+				sameError(fmt.Sprintf("ParseUint(%q, %d, %d)", s, base, size), e1, e2)
+			}
+		}
+		for _, size := range []int{32, 64} {
+			f, e1 := library.ParseFloat(s, size)
+			g, e2 := strconv.ParseFloat(s, size)
+			if fmt.Sprint(f) != fmt.Sprint(g) {
+				fail("ParseFloat(%q, %d): text %v, Go %v", s, size, f, g)
+			}
+			sameError(fmt.Sprintf("ParseFloat(%q, %d)", s, size), e1, e2)
+		}
+	}
 	for _, s := range []string{"1", "t", "T", "TRUE", "true", "True", "0", "f", "F", "FALSE", "false", "False", "", "tRUE", "yes", "2", "truE", " true", "é\"\n"} {
 		got, err1 := library.ParseBool(s)
 		want, err2 := strconv.ParseBool(s)
