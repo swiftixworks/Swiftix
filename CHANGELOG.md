@@ -419,6 +419,47 @@ format, behavior and platform changes are recorded here.
   `WithPadding`, `Strict`, `Encode`, `Decode`, `EncodeToString`,
   `DecodeString`, `AppendEncode`, `AppendDecode`, `EncodedLen`, `DecodedLen`,
   `CorruptInputError`) (was `package encoding/base64 is not available`).
+- Swiftix Go `flag`, Go's text: flag sets, every kind of flag, `Var`,
+  `Func`, `BoolFunc`, `TextVar`, `Getter`, the usage text with its defaults,
+  and `ContinueOnError`, `ExitOnError`, and `PanicOnError` (was `package flag
+  is not available`).
+- `os/signal` (`Notify`, `Stop`, `Ignore`, `Ignored`, `Reset`,
+  `NotifyContext`), `os.Signal`, `os.Interrupt`, `os.Kill`, `os.FindProcess`,
+  `Process.Signal` and `Kill`, and `syscall.Signal`, `syscall.Kill`,
+  `syscall.Getpid`, and the signals with Linux's numbers and texts.
+- `path`, `path/filepath` (with `Walk`, `WalkDir`, `Glob`, `Rel`, `Abs`, and
+  `EvalSymlinks`), and `io/fs`'s `FS`, `File`, `DirEntry`, `FileInfo`,
+  `FileMode`, `ReadDir`, `Stat`, `ReadFile`, `WalkDir`, `Glob`, and `Sub`.
+- `os.Stat`, `Lstat`, `ReadDir`, `MkdirAll`, `RemoveAll`, `Chmod`, `Chdir`,
+  `Symlink`, `Readlink`, `TempDir`, `MkdirTemp`, `CreateTemp`, `DirFS`, the
+  `Mode` constants, and a file's `Name`, `Stat`, `ReadDir`, `Readdir`, and
+  `Readdirnames`; `os.Open` opens a directory (was `open /: is a
+  directory`).
+- `math/rand`, whose generator made from a seed draws Go's sequence, and
+  `math.Log` and `math.Exp` with Go's bits on arm64.
+- `container/list`, `container/heap`, `container/ring`, `encoding/binary`
+  (fixed-size values), `hash`, `hash/crc32`, `hash/fnv`, `math/bits`, `mime`,
+  `sync.OnceFunc`, `errors.ErrUnsupported`, and base64's `NewEncoder` and
+  `NewDecoder`.
+- `io` is Go's: `CopyN`, `CopyBuffer`, `LimitReader`, `SectionReader`,
+  `TeeReader`, `MultiReader`, `MultiWriter`, `Pipe`, `OffsetWriter`, and the
+  interfaces `Seeker`, `ReaderAt`, `WriterAt`, `ByteReader`, `ByteScanner`,
+  `ByteWriter`, `RuneReader`, and `RuneScanner`.
+- `net/http`: `RoundTripper`, `Transport` (its `DialContext` used),
+  `DefaultTransport`, `Client.Transport`, `ResponseController`,
+  `ErrNotSupported`, `Hijacker`, `CloseNotifier`, `Header.Write` and
+  `WriteSubset`, `Response.Write`, `Request.TLS` (always nil),
+  `Server.ErrorLog`, `ParseTime`, and `FileServer`, `FileServerFS`, `FS`,
+  `Dir`, `ServeFile`, `ServeFileFS`, and `ServeContent` with ranges and the
+  conditional headers; `net.Dialer`; and `net/http/httputil`'s
+  `ReverseProxy` (`NewSingleHostReverseProxy`, `Director`, `Rewrite`,
+  `ModifyResponse`, `ErrorHandler`).
+- The builtins `print` and `println`, on standard error as Go's runtime
+  writes (were undefined).
+- A pointer converts to a pointer type that is not named when what the two
+  point to has one underlying type (`(*T)(p)` for a `*bool`), `new` takes
+  every numeric type, and `os.Args` is a variable that can be assigned and
+  written into.
 
 
 ### Changed
@@ -644,7 +685,7 @@ format, behavior and platform changes are recorded here.
 - A program that uses `strings.NewReader` (and so `http.NewRequest`) or
   `io.Copy` is linked with more of the library and compiles to a larger
   image.
-- The Go tool reports `go1.24-swiftix.0.7`, so images cached by an earlier
+- The Go tool reports `go1.24-swiftix.0.8`, so images cached by an earlier
   tool are built again rather than replayed. The coreutils, sysutils, and
   editors packages are rebuilt for the `os` file functions linked from Go
   text and for the pass that removes temporaries.
@@ -696,6 +737,16 @@ format, behavior and platform changes are recorded here.
   (was `invalid array length time.Second / time.Millisecond`). A duration
   constant that overflows is Go's compile error; `const big = 1000000 *
   time.Hour * 1000` printed `801362h40m26.63743488s`.
+- `io.Copy` and `CopyN` give an `int64` and copy through a 32 KB buffer, as
+  Go's (`Copy` gave an `int` and copied in 4096-byte pieces), and a
+  `*os.File`'s `Seek`, `ReadAt`, and `WriteAt` take and give `int64` offsets
+  (they took and gave `int`). `os.Mkdir`, `WriteFile`, and `OpenFile` take an
+  `fs.FileMode`.
+- The host's `go run` starts the program as PID 2, after an init process, as
+  a program Go's `go run` starts is never PID 1; a signal the program sends
+  itself and does not handle ends it (`signal: terminated`, status 1 under
+  `go run`, 128 plus the signal as a process).
+- `math.NaN` is Go's NaN (`0x7FF8000000000001`).
 
 
 ### Fixed
@@ -884,6 +935,19 @@ format, behavior and platform changes are recorded here.
 - A constant of a defined type that overflows is `a * 4 (constant
   18446744073709551616 of int64 type D) overflows int64` (was `constant
   18446744073709551616 overflows D`).
+- A method may be named `init` (was `func init must have no arguments and
+  no return values`).
+- An exported method that an embedded field of an unexported type of
+  another package lends is selected, as `binary.NativeEndian.Uint16` (was
+  `cannot refer to unexported field`).
+- `gofmt` keeps the empty lines of a block comment and moves its lines as
+  Go's printer does; writes the semicolons of `for`, `if`, and `switch`
+  headers as Go does (`for ;; {` is `for {`); puts a comment before a case
+  label where Go's printer puts it; and puts no empty line before a comment
+  inside a package variable's value.
+- The pass that removes temporaries moves overlapping temporaries in one
+  round: a literal of 607 integers took 37 seconds to compile, and
+  `math/rand` two minutes.
 
 
 ## 0.13.1 — 2026-10-08
