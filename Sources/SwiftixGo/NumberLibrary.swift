@@ -124,7 +124,8 @@ enum GoNumberLibrary {
         }
         switch (package, member) {
         case ("math", "Sqrt"), ("math", "Floor"), ("math", "Ceil"), ("math", "Trunc"),
-            ("math", "Round"), ("math", "RoundToEven"), ("math", "Abs"):
+            ("math", "Round"), ("math", "RoundToEven"), ("math", "Abs"), ("math", "Log"),
+            ("math", "Exp"):
             return function([float], [float])
         case ("math", "Max"), ("math", "Min"), ("math", "Pow"), ("math", "Mod"),
             ("math", "Copysign"):
@@ -163,6 +164,7 @@ enum GoNumberLibrary {
         "$strings.ContainsRune", "$strings.IndexRune", "$strings.IndexByte",
         "$math.Sqrt", "$math.Floor", "$math.Ceil", "$math.Trunc", "$math.Round",
         "$math.RoundToEven", "$math.Abs", "$math.Max", "$math.Min", "$math.Pow", "$math.Mod",
+        "$math.Log", "$math.Exp",
         "$math.Copysign", "$math.Inf", "$math.NaN", "$math.IsNaN", "$math.Signbit",
         "$math.IsInf", "$math.Float64bits", "$math.Float64frombits", "$math.Float32bits",
         "$math.Float32frombits", "$strconv.ParseFloat", "$strconv.FormatFloat",

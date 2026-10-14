@@ -4294,6 +4294,16 @@ public struct GoVirtualMachine: Sendable {
         /// `$flag.zero`: the zero of a value's dynamic type (see
         /// `GoZeroValues`).
         func executeZeroNative(_ name: String, argumentCount: Int) throws -> Bool {
+            if name == "$rand.random" {
+                // The run-time random numbers `math/rand` draws from when it
+                // was given no seed, as Go's runtime gives them.
+                guard argumentCount == 0 else {
+                    throw GoRuntimeError.argumentCountMismatch(
+                        function: name, expected: 0, actual: argumentCount)
+                }
+                vm.stack.append(.int(Int64(bitPattern: UInt64.random(in: .min ... .max))))
+                return true
+            }
             if name == "$os.setArgs" {
                 guard argumentCount == 1, let value = vm.stack.popLast() else {
                     throw GoRuntimeError.argumentCountMismatch(

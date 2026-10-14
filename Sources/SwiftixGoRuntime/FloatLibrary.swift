@@ -105,6 +105,82 @@ enum GoFloat {
     static func pow(_ x: Double, _ y: Double) -> Double {
         GoMath.pow(x, y)
     }
+
+    /// The NaN Go's `math.NaN` returns, which is not the one Swift's `.nan` is.
+    static let goNaN = GoMath.nan
+
+    /// `math.Log(x)`, bit for bit as Go 1.24.5 computes it on arm64: the
+    /// pure Go `log` of `math/log.go` with the multiplications its compiler
+    /// fuses with an addition there, read from its machine code.
+    static func log(_ x: Double) -> Double {
+        let ln2Hi = 6.93147180369123816490e-01
+        let ln2Lo = 1.90821492927058770002e-10
+        let l1 = 6.666666666666735130e-01
+        let l2 = 3.999999999940941908e-01
+        let l3 = 2.857142874366239149e-01
+        let l4 = 2.222219843214978396e-01
+        let l5 = 1.818357216161805012e-01
+        let l6 = 1.531383769920937332e-01
+        let l7 = 1.479819860511658591e-01
+        if x.isNaN || x == .infinity { return x }
+        if x < 0 { return goNaN }
+        if x == 0 { return -.infinity }
+        var (f1, ki) = GoMath.fraction(x)
+        if f1 < 1.41421356237309504880168872420969808 / 2 {
+            f1 *= 2
+            ki -= 1
+        }
+        let f = f1 - 1
+        let k = Double(ki)
+        let s = f / (2 + f)
+        let s2 = s * s
+        let s4 = s2 * s2
+        let c = l1.addingProduct(s4, l3.addingProduct(s4, l5.addingProduct(s4, l7)))
+        let t2 = s4 * l2.addingProduct(s4, l4.addingProduct(s4, l6))
+        let r = t2.addingProduct(s2, c)  // t1 + t2, t1 = s2 * c
+        let halfF = 0.5 * f  // hfsq = halfF * f, fused where it is used
+        let inner = (k * ln2Lo).addingProduct(s, r.addingProduct(halfF, f))
+        let difference = (-inner).addingProduct(halfF, f) - f
+        return (-difference).addingProduct(k, ln2Hi)
+    }
+
+    /// `math.Exp(x)`, bit for bit as Go 1.24.5 computes it on arm64: the
+    /// assembly `archExp` of `math/exp_arm64.s`, step by step.
+    static func exp(_ x: Double) -> Double {
+        let ln2Hi = 6.93147180369123816490e-01
+        let ln2Lo = 1.90821492927058770002e-10
+        let log2e = 1.44269504088896338700e+00
+        let p1 = 1.66666666666666657415e-01
+        let p2 = -2.77777777770155933842e-03
+        let p3 = 6.61375632143793436117e-05
+        let p4 = -1.65339022054652515390e-06
+        let p5 = 4.13813679705723846039e-08
+        if x != x { return x }
+        if x > 7.09782712893383973096e+02 { return .infinity }
+        if x < -7.45133219101941108420e+02 { return 0 }
+        if x.magnitude < Double(bitPattern: 0x3e30_0000_0000_0000) { return 1 + x }
+        // k: Log2e*x - 0.5 below zero, Log2e*x + 0.5 above, each fused.
+        let k = x < 0 ? (-0.5).addingProduct(log2e, x) : 0.5.addingProduct(log2e, x)
+        let ki = Int64(k.rounded(.towardZero))
+        let kf = Double(ki)
+        let hi = x.addingProduct(-kf, ln2Hi)
+        let lo = kf * ln2Lo
+        let r = hi - lo
+        let t = r * r
+        let poly = p1.addingProduct(t, p2.addingProduct(t, p3.addingProduct(t, p4.addingProduct(t, p5))))
+        let c = r.addingProduct(-t, poly)
+        let y = 1 - ((lo - (r * c) / (2 - c)) - hi)
+        // Ldexp(y, k) inline, without its checks.
+        let bits = y.bitPattern
+        var exponent = Int64(bitPattern: bits >> 52) &+ ki
+        var m = 1.0
+        if exponent < 1 {
+            exponent &+= 52
+            m = Double(bitPattern: 0x3cb0_0000_0000_0000)
+        }
+        let result = Double(bitPattern: UInt64(bitPattern: exponent << 52) | (bits & 0x000f_ffff_ffff_ffff))
+        return m * result
+    }
 }
 
 /// The most digits or padding bytes one call may be asked for. `fmt` refuses
@@ -1879,6 +1955,9 @@ private enum GoMath {
         }
         return (value, 0)
     }
+
+    /// Go's `Frexp`, for the other functions of `math` here.
+    static func fraction(_ value: Double) -> (Double, Int) { frexp(value) }
 
     /// Go's `frexp`: a fraction in [0.5, 1) and a power of two.
     private static func frexp(_ value: Double) -> (Double, Int) {

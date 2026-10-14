@@ -84,6 +84,7 @@ enum GoNumeric {
         "$num.ftou": 1, "$num.fmin": 2, "$num.fmax": 2,
         "$math.Sqrt": 1, "$math.Floor": 1, "$math.Ceil": 1, "$math.Trunc": 1, "$math.Round": 1,
         "$math.RoundToEven": 1, "$math.Abs": 1, "$math.Max": 2, "$math.Min": 2, "$math.Pow": 2,
+        "$math.Log": 1, "$math.Exp": 1,
         "$math.Mod": 2, "$math.Inf": 1, "$math.NaN": 0, "$math.IsNaN": 1, "$math.IsInf": 2,
         "$math.Signbit": 1, "$math.Copysign": 2, "$math.Float64bits": 1,
         "$math.Float64frombits": 1, "$math.Float32bits": 1, "$math.Float32frombits": 1,
@@ -168,9 +169,11 @@ enum GoNumeric {
         case "$math.RoundToEven": return bits(number(0).rounded(.toNearestOrEven))
         case "$math.Abs": return bits(number(0).magnitude)
         case "$math.Pow": return bits(GoFloat.pow(number(0), number(1)))
+        case "$math.Log": return bits(GoFloat.log(number(0)))
+        case "$math.Exp": return bits(GoFloat.exp(number(0)))
         case "$math.Mod": return bits(number(0).truncatingRemainder(dividingBy: number(1)))
         case "$math.Inf": return bits(operands[0] >= 0 ? .infinity : -.infinity)
-        case "$math.NaN": return bits(.nan)
+        case "$math.NaN": return bits(GoFloat.goNaN)
         case "$math.IsNaN": return .bool(number(0).isNaN)
         case "$math.IsInf":
             let value = number(0)

@@ -140,6 +140,12 @@ enum GoSourceLibrary {
         case "os": return GoStandardLibrary.fileSystemNative(name)
         case "json": return GoJSONLibrary.textNative(name)
         case "signal", "syscall": return GoSignalNatives.textNative(package: package, name: name)
+        case "rand" where name == "random":
+            // The runtime's random numbers, which Go's `math/rand` draws
+            // from when it has no seed.
+            return GoNativeFunction(
+                symbol: "$rand.random", goName: "math/rand.runtime_rand", parameters: [],
+                results: [GoNumericKind.uint64.type])
         case "flag" where name == "zero":
             // The zero of the dynamic type of a value, which Go's `flag`
             // makes with `reflect`.
@@ -155,7 +161,7 @@ enum GoSourceLibrary {
         ["$sort.length", "$sort.swap"] + GoStandardLibrary.httpNativeCallNames
         + GoStandardLibrary.bytesNativeCallNames + GoNetLibrary.nativeCallNames
         + GoJSONLibrary.nativeCallNames + ["$flag.zero"] + GoSignalNatives.nativeCallNames
-        + GoStandardLibrary.fileMetadataCallNames
+        + GoStandardLibrary.fileMetadataCallNames + ["$rand.random"]
 
     // MARK: What the text declares
 

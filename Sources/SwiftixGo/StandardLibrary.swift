@@ -36,7 +36,7 @@ enum GoStandardLibrary {
         "bufio", "bytes",
         "io/fs", "syscall",
         "encoding", "encoding/base64", "encoding/json",
-        "flag", "os/signal", "path", "path/filepath",
+        "flag", "os/signal", "path", "path/filepath", "math/rand",
     ]
 
     static func resolve(package: String, member: String) -> GoBuiltinFunction? {
