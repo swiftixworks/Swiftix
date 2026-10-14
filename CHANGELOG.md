@@ -293,7 +293,22 @@ format, behavior and platform changes are recorded here.
   value; a struct that embeds one has its methods. `var w io.Writer =
   os.Stdout` was refused, and `func dial() (net.Conn, error)` was
   `unsupported zero value type`.
-
+- `sync.RWMutex` (`Lock`, `Unlock`, `RLock`, `RUnlock`, `TryLock`,
+  `TryRLock`, `RLocker`) as a variable, a field, an embedded field, and
+  through a pointer, with Go's writer preference; `sync.Mutex.TryLock`, the
+  `sync.Locker` interface, and `sync.Cond`.
+- `time.NewTimer`, `time.NewTicker`, and `time.AfterFunc`, with `C`, `Stop`,
+  and `Reset` as Go 1.23 has them, on the logical clock.
+- `os.Getenv`, `LookupEnv`, `Setenv`, `Unsetenv`, `Environ`, `Getpid`,
+  `Hostname`, and `Getwd`, on the environment of the Swiftix process.
+  `ProcessContext.unsetenv`.
+- `errors.Join`, and `Unwrap() []error` on what it gives and on a
+  `fmt.Errorf` with several `%w`.
+- `log`: the standard logger and `log.Logger` with the flag constants,
+  written in Go; the `net/http` server reports through it.
+- `sync/atomic`: the functions for the 32- and 64-bit integers and the typed
+  `Int32`, `Int64`, `Uint32`, `Uint64`, `Bool`, and `Value`; `sync.Map` and
+  `sync.Pool`.
 
 ### Changed
 
@@ -648,7 +663,6 @@ format, behavior and platform changes are recorded here.
   true`.
 - `gofmt` writes `<-chan T` after a result list or a name without a blank
   inside the arrow (`func f() <-chan int`; it wrote `<- chan int`).
-
 
 ## 0.13.1 — 2026-10-08
 
