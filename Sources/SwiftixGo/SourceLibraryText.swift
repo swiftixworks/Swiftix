@@ -8,7 +8,7 @@
 /// mistake in the text can produce, and in the name of a function literal.
 enum GoSourceLibraryText {
     /// The import paths that have text.
-    static let paths: Set<String> = ["context", "io", "net/http", "net/url", "sort", "strings", "sync"]
+    static let paths: Set<String> = ["context", "io", "log", "net/http", "net/url", "sort", "strings", "sync", "sync/atomic"]
 
     /// The package-level names the text of each package declares.
     static let declared: [String: Set<String>] = [
@@ -25,6 +25,13 @@ enum GoSourceLibraryText {
             "Closer", "Copy", "Discard", "ErrShortWrite", "ErrUnexpectedEOF", "NopCloser",
             "ReadAll", "ReadCloser", "ReadWriteCloser", "ReadWriter", "Reader", "StringWriter",
             "WriteCloser", "WriteString", "Writer", "discard", "nopCloser",
+        ],
+        "log": [
+            "Default", "Fatal", "Fatalf", "Fatalln", "Flags", "LUTC", "Ldate", "Llongfile",
+            "Lmicroseconds", "Lmsgprefix", "Logger", "Lshortfile", "LstdFlags", "Ltime", "New",
+            "Output", "Panic", "Panicf", "Panicln", "Prefix", "Print", "Printf", "Println",
+            "SetFlags", "SetOutput", "SetPrefix", "Writer", "clock", "date", "digits", "header",
+            "standardError", "std",
         ],
         "net/http": [
             "CanonicalHeaderKey", "Client", "DefaultClient", "DefaultMaxHeaderBytes",
@@ -100,7 +107,14 @@ enum GoSourceLibraryText {
             "NewReader", "Reader",
         ],
         "sync": [
-            "Once",
+            "Map", "Once", "Pool",
+        ],
+        "sync/atomic": [
+            "AddInt32", "AddInt64", "AddUint32", "AddUint64", "Bool", "CompareAndSwapInt32",
+            "CompareAndSwapInt64", "CompareAndSwapUint32", "CompareAndSwapUint64", "Int32", "Int64",
+            "LoadInt32", "LoadInt64", "LoadUint32", "LoadUint64", "StoreInt32", "StoreInt64",
+            "StoreUint32", "StoreUint64", "SwapInt32", "SwapInt64", "SwapUint32", "SwapUint64",
+            "Uint32", "Uint64", "Value", "lock", "sameType",
         ],
     ]
 
@@ -109,11 +123,13 @@ enum GoSourceLibraryText {
         switch path {
         case "context": return context
         case "io": return io
+        case "log": return log
         case "net/http": return netHttp
         case "net/url": return netUrl
         case "sort": return sort
         case "strings": return strings
         case "sync": return sync
+        case "sync/atomic": return syncAtomic
         default: return nil
         }
     }
@@ -772,6 +788,313 @@ func (d discard) WriteString(s string) (int, error) { return len(s), nil }
 
 // Discard accepts every write and keeps nothing.
 var Discard Writer = discard{}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let log: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/log/log.go",
+            text: #"""
+// Package log is Go's log, written in Go: a Logger formats a line, with the
+// prefix and the date and time its flags ask for, and passes it to its
+// writer in one Write. The functions of the package are the methods of the
+// standard logger, which writes to standard error.
+//
+// Two things differ from Go. The run-time knows no time zone, so the local
+// time a line shows is UTC, with or without LUTC. And it cannot say where a
+// function was called from, so Lshortfile and Llongfile print what Go
+// prints when it cannot say either: ???:0.
+package log
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"sync"
+	"time"
+)
+
+// The flags say what a Logger writes before each message.
+const (
+	Ldate         = 1  // the date: 2009/01/23
+	Ltime         = 2  // the time: 01:23:23
+	Lmicroseconds = 4  // microseconds after the time: 01:23:23.123123
+	Llongfile     = 8  // full file name and line number
+	Lshortfile    = 16 // final file name element and line number
+	LUTC          = 32 // the date and time in UTC rather than local time
+	Lmsgprefix    = 64 // the prefix before the message, not before the line
+	LstdFlags     = 3  // what the standard logger starts with: Ldate | Ltime
+)
+
+// A Logger writes lines to a writer. Each call makes one Write, and calls
+// from several goroutines do not interleave.
+type Logger struct {
+	mu     sync.Mutex // held while a line is written, and while out changes
+	prefix string
+	flag   int
+	out    io.Writer
+}
+
+// standardError is the writer of the standard logger. The *os.File of the
+// run-time is no io.Writer, so this type gives standard error the method.
+type standardError struct{}
+
+func (standardError) Write(p []byte) (int, error) { return os.Stderr.Write(p) }
+
+var std = New(standardError{}, "", LstdFlags)
+
+// New returns a Logger that writes to out, with prefix before each line,
+// or before each message under Lmsgprefix, and with the flags of flag.
+func New(out io.Writer, prefix string, flag int) *Logger {
+	return &Logger{prefix: prefix, flag: flag, out: out}
+}
+
+// Default returns the standard logger, which the functions of the package
+// write through.
+func Default() *Logger { return std }
+
+// digits is i in decimal, with zeros before it up to width digits.
+func digits(i int64, width int) string {
+	s := ""
+	for i >= 10 || width > 1 {
+		s = string(rune('0'+i%10)) + s
+		i /= 10
+		width--
+	}
+	return string(rune('0'+i)) + s
+}
+
+// date is the calendar date in UTC of the instant sec seconds after the
+// Unix epoch, as log writes it: 2009/01/23.
+func date(sec int64) string {
+	days := sec / 86400
+	if sec%86400 < 0 {
+		days--
+	}
+	// Count from 0000-03-01, so that a leap day ends a year, in eras of
+	// the 400 years after which the calendar repeats.
+	z := days + 719468
+	era := z / 146097
+	if z%146097 < 0 {
+		era--
+	}
+	dayOfEra := z - era*146097
+	yearOfEra := (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
+	year := yearOfEra + era*400
+	dayOfYear := dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
+	m := (5*dayOfYear + 2) / 153
+	day := dayOfYear - (153*m+2)/5 + 1
+	month := m + 3
+	if m >= 10 {
+		month = m - 9
+	}
+	if month <= 2 {
+		year++
+	}
+	return digits(year, 4) + "/" + digits(month, 2) + "/" + digits(day, 2)
+}
+
+// clock is the time of day in UTC of that instant, 01:23:23, with the
+// microseconds of nsec after it when micro is set.
+func clock(sec, nsec int64, micro bool) string {
+	s := sec % 86400
+	if s < 0 {
+		s += 86400
+	}
+	text := digits(s/3600, 2) + ":" + digits(s/60%60, 2) + ":" + digits(s%60, 2)
+	if micro {
+		text += "." + digits(nsec/1000, 6)
+	}
+	return text
+}
+
+// header is what comes before the message of a line written at the instant
+// sec seconds and nsec nanoseconds after the Unix epoch.
+func header(prefix string, flag int, sec, nsec int64) string {
+	h := ""
+	if flag&Lmsgprefix == 0 {
+		h = prefix
+	}
+	if flag&Ldate != 0 {
+		h += date(sec) + " "
+	}
+	if flag&(Ltime|Lmicroseconds) != 0 {
+		h += clock(sec, nsec, flag&Lmicroseconds != 0) + " "
+	}
+	if flag&(Lshortfile|Llongfile) != 0 {
+		h += "???:0: "
+	}
+	if flag&Lmsgprefix != 0 {
+		h += prefix
+	}
+	return h
+}
+
+// Output writes s as one line of the log, with a newline after it if it
+// does not end in one. calldepth would say whose file and line to print.
+func (l *Logger) Output(calldepth int, s string) error {
+	var sec, nsec int64
+	// The time is read before the lock is waited for, as in Go.
+	if l.flag&(Ldate|Ltime|Lmicroseconds) != 0 {
+		now := time.Now()
+		sec = now.Unix()
+		nsec = now.UnixNano() - sec*1000000000
+	}
+	line := header(l.prefix, l.flag, sec, nsec) + s
+	if len(s) == 0 || s[len(s)-1] != '\n' {
+		line += "\n"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, err := l.out.Write([]byte(line))
+	return err
+}
+
+// Print writes its operands as fmt.Print does.
+func (l *Logger) Print(v ...any) { l.Output(2, fmt.Sprint(v...)) }
+
+// Printf writes its operands as fmt.Printf does.
+func (l *Logger) Printf(format string, v ...any) { l.Output(2, fmt.Sprintf(format, v...)) }
+
+// Println writes its operands as fmt.Println does.
+func (l *Logger) Println(v ...any) { l.Output(2, fmt.Sprintln(v...)) }
+
+// Fatal is Print and then os.Exit(1).
+func (l *Logger) Fatal(v ...any) {
+	l.Output(2, fmt.Sprint(v...))
+	os.Exit(1)
+}
+
+// Fatalf is Printf and then os.Exit(1).
+func (l *Logger) Fatalf(format string, v ...any) {
+	l.Output(2, fmt.Sprintf(format, v...))
+	os.Exit(1)
+}
+
+// Fatalln is Println and then os.Exit(1).
+func (l *Logger) Fatalln(v ...any) {
+	l.Output(2, fmt.Sprintln(v...))
+	os.Exit(1)
+}
+
+// Panic is Print and then a panic with the message.
+func (l *Logger) Panic(v ...any) {
+	s := fmt.Sprint(v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// Panicf is Printf and then a panic with the message.
+func (l *Logger) Panicf(format string, v ...any) {
+	s := fmt.Sprintf(format, v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// Panicln is Println and then a panic with the message.
+func (l *Logger) Panicln(v ...any) {
+	s := fmt.Sprintln(v...)
+	l.Output(2, s)
+	panic(s)
+}
+
+// Flags returns the flags of the logger.
+func (l *Logger) Flags() int { return l.flag }
+
+// SetFlags sets the flags of the logger.
+func (l *Logger) SetFlags(flag int) { l.flag = flag }
+
+// Prefix returns the prefix of the logger.
+func (l *Logger) Prefix() string { return l.prefix }
+
+// SetPrefix sets the prefix of the logger.
+func (l *Logger) SetPrefix(prefix string) { l.prefix = prefix }
+
+// Writer returns what the logger writes to.
+func (l *Logger) Writer() io.Writer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.out
+}
+
+// SetOutput sets what the logger writes to.
+func (l *Logger) SetOutput(w io.Writer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.out = w
+}
+
+// SetOutput sets what the standard logger writes to.
+func SetOutput(w io.Writer) { std.SetOutput(w) }
+
+// Flags returns the flags of the standard logger.
+func Flags() int { return std.Flags() }
+
+// SetFlags sets the flags of the standard logger.
+func SetFlags(flag int) { std.SetFlags(flag) }
+
+// Prefix returns the prefix of the standard logger.
+func Prefix() string { return std.Prefix() }
+
+// SetPrefix sets the prefix of the standard logger.
+func SetPrefix(prefix string) { std.SetPrefix(prefix) }
+
+// Writer returns what the standard logger writes to.
+func Writer() io.Writer { return std.Writer() }
+
+// Output writes s as one line of the standard logger.
+func Output(calldepth int, s string) error { return std.Output(calldepth+1, s) }
+
+// Print writes to the standard logger as fmt.Print does.
+func Print(v ...any) { std.Output(2, fmt.Sprint(v...)) }
+
+// Printf writes to the standard logger as fmt.Printf does.
+func Printf(format string, v ...any) { std.Output(2, fmt.Sprintf(format, v...)) }
+
+// Println writes to the standard logger as fmt.Println does.
+func Println(v ...any) { std.Output(2, fmt.Sprintln(v...)) }
+
+// Fatal is Print and then os.Exit(1).
+func Fatal(v ...any) {
+	std.Output(2, fmt.Sprint(v...))
+	os.Exit(1)
+}
+
+// Fatalf is Printf and then os.Exit(1).
+func Fatalf(format string, v ...any) {
+	std.Output(2, fmt.Sprintf(format, v...))
+	os.Exit(1)
+}
+
+// Fatalln is Println and then os.Exit(1).
+func Fatalln(v ...any) {
+	std.Output(2, fmt.Sprintln(v...))
+	os.Exit(1)
+}
+
+// Panic is Print and then a panic with the message.
+func Panic(v ...any) {
+	s := fmt.Sprint(v...)
+	std.Output(2, s)
+	panic(s)
+}
+
+// Panicf is Printf and then a panic with the message.
+func Panicf(format string, v ...any) {
+	s := fmt.Sprintf(format, v...)
+	std.Output(2, s)
+	panic(s)
+}
+
+// Panicln is Println and then a panic with the message.
+func Panicln(v ...any) {
+	s := fmt.Sprintln(v...)
+	std.Output(2, s)
+	panic(s)
+}
 
 """#),
     ]
@@ -2960,9 +3283,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	urlpkg "net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -4006,10 +4329,11 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	srv.noKeepAlives = !v
 }
 
-// logf reports what the server cannot tell a client, on standard error
-// after the time, as Go's log package writes it.
+// logf reports what the server cannot tell a client, through the standard
+// logger of the log package, as Go does: a program that sets its output or
+// its flags sets them for these lines too.
 func (srv *Server) logf(format string, args ...any) {
-	fmt.Fprintln(os.Stderr, native.formatTime(int(time.Now().Unix()), 1)+" "+fmt.Sprintf(format, args...))
+	log.Printf(format, args...)
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
@@ -6929,6 +7253,163 @@ func NewReader(s string) *Reader { return &Reader{s: s, i: 0} }
 extension GoSourceLibraryText {
     static let sync: [GoSourceFile] = [
         GoSourceFile(
+            path: "$GOROOT/src/sync/map.go",
+            text: #"""
+package sync
+
+import "sync"
+
+// Map is a map from any key to any value that goroutines may use together
+// without a lock of their own. The zero Map is empty and ready.
+//
+// It is a Go map behind a Mutex. Another goroutine may get its turn after
+// any instruction, so each method holds the lock for the whole of what it
+// does to the map, and gives it back before it compares values a program
+// supplied or calls a function of the program.
+type Map struct {
+	mu sync.Mutex
+	m  map[any]any
+}
+
+// Load returns the value stored for key, and whether there is one.
+func (m *Map) Load(key any) (value any, ok bool) {
+	m.mu.Lock()
+	value, ok = m.m[key]
+	m.mu.Unlock()
+	return value, ok
+}
+
+// Store sets the value for key.
+func (m *Map) Store(key, value any) {
+	m.mu.Lock()
+	if m.m == nil {
+		m.m = map[any]any{}
+	}
+	m.m[key] = value
+	m.mu.Unlock()
+}
+
+// Clear deletes every entry.
+func (m *Map) Clear() {
+	m.mu.Lock()
+	m.m = nil
+	m.mu.Unlock()
+}
+
+// LoadOrStore returns the value stored for key if there is one, and stores
+// and returns value otherwise. loaded says which.
+func (m *Map) LoadOrStore(key, value any) (actual any, loaded bool) {
+	m.mu.Lock()
+	actual, loaded = m.m[key]
+	if !loaded {
+		if m.m == nil {
+			m.m = map[any]any{}
+		}
+		m.m[key] = value
+		actual = value
+	}
+	m.mu.Unlock()
+	return actual, loaded
+}
+
+// LoadAndDelete deletes the value for key and returns what it was, if
+// there was one.
+func (m *Map) LoadAndDelete(key any) (value any, loaded bool) {
+	m.mu.Lock()
+	value, loaded = m.m[key]
+	if loaded {
+		delete(m.m, key)
+	}
+	m.mu.Unlock()
+	return value, loaded
+}
+
+// Delete deletes the value for key.
+func (m *Map) Delete(key any) {
+	m.LoadAndDelete(key)
+}
+
+// Swap stores value for key and returns what it replaced, if anything.
+func (m *Map) Swap(key, value any) (previous any, loaded bool) {
+	m.mu.Lock()
+	previous, loaded = m.m[key]
+	if m.m == nil {
+		m.m = map[any]any{}
+	}
+	m.m[key] = value
+	m.mu.Unlock()
+	return previous, loaded
+}
+
+// CompareAndSwap stores new for key if the value stored for it is old, and
+// says whether it did. old must be comparable.
+func (m *Map) CompareAndSwap(key, old, new any) (swapped bool) {
+	for {
+		held, ok := m.Load(key)
+		// Compared without the lock: values that cannot be compared panic.
+		if !ok || held != old {
+			return false
+		}
+		m.mu.Lock()
+		now, ok := m.m[key]
+		if ok && now == held {
+			m.m[key] = new
+			m.mu.Unlock()
+			return true
+		}
+		m.mu.Unlock()
+		// Another goroutine wrote in between: look again.
+	}
+}
+
+// CompareAndDelete deletes the entry for key if its value is old, and says
+// whether it did. old must be comparable.
+func (m *Map) CompareAndDelete(key, old any) (deleted bool) {
+	for {
+		held, ok := m.Load(key)
+		if !ok || held != old {
+			return false
+		}
+		m.mu.Lock()
+		now, ok := m.m[key]
+		if ok && now == held {
+			delete(m.m, key)
+			m.mu.Unlock()
+			return true
+		}
+		m.mu.Unlock()
+	}
+}
+
+// Range calls f for each key and value of the map, one after another, and
+// stops when f returns false.
+//
+// f may call any method of the map, and so may other goroutines meanwhile.
+// The keys are those the map had when Range was called, in the order they
+// were first stored. No key is visited twice; one that was deleted before
+// its turn is passed over; the value f is given is the one stored when the
+// key's turn comes; and a key stored after Range began is not visited. Go
+// promises no more than that of a Range whose map changes.
+func (m *Map) Range(f func(key, value any) bool) {
+	m.mu.Lock()
+	keys := make([]any, 0, len(m.m))
+	for key := range m.m {
+		keys = append(keys, key)
+	}
+	m.mu.Unlock()
+	for _, key := range keys {
+		value, ok := m.Load(key)
+		if !ok {
+			continue
+		}
+		if !f(key, value) {
+			break
+		}
+	}
+}
+
+"""#),
+        GoSourceFile(
             path: "$GOROOT/src/sync/once.go",
             text: #"""
 // Package sync is the part of sync that is written in Go. Mutex and
@@ -6963,6 +7444,483 @@ func (o *Once) doSlow(f func()) {
 
 func (o *Once) finish() {
 	o.done = true
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/sync/pool.go",
+            text: #"""
+package sync
+
+import "sync"
+
+// A Pool keeps values that are not in use so that they can be used again
+// instead of made anew. Any value in it may be dropped at any time, so a
+// program must not count on getting back what it put.
+//
+// This one keeps everything it is given and hands back the value put most
+// recently, which Go permits and does not promise: Go's pool is emptied by
+// the garbage collector and prefers the values of the calling thread.
+type Pool struct {
+	mu    sync.Mutex
+	items []any
+
+	// New, when it is not nil, makes the value Get returns from an empty
+	// pool.
+	New func() any
+}
+
+// Put adds x to the pool. A nil x is not kept.
+func (p *Pool) Put(x any) {
+	if x == nil {
+		return
+	}
+	p.mu.Lock()
+	p.items = append(p.items, x)
+	p.mu.Unlock()
+}
+
+// Get takes a value out of the pool and returns it. From an empty pool it
+// returns what New returns, or nil when there is no New.
+func (p *Pool) Get() any {
+	p.mu.Lock()
+	if n := len(p.items); n > 0 {
+		x := p.items[n-1]
+		p.items[n-1] = nil
+		p.items = p.items[:n-1]
+		p.mu.Unlock()
+		return x
+	}
+	p.mu.Unlock()
+	if p.New != nil {
+		return p.New()
+	}
+	return nil
+}
+
+"""#),
+    ]
+}
+
+extension GoSourceLibraryText {
+    static let syncAtomic: [GoSourceFile] = [
+        GoSourceFile(
+            path: "$GOROOT/src/sync/atomic/atomic.go",
+            text: #"""
+// Package atomic is sync/atomic written in Go.
+//
+// The scheduler of the run-time may give another goroutine its turn after
+// any instruction, so a statement of Go is not atomic by itself: `x++` in
+// two goroutines loses counts. One store through a pointer is a single
+// instruction, and so is one read. Whatever reads a variable and then
+// writes it (Add, Swap, CompareAndSwap) therefore holds a lock that every
+// writer of this package takes, Store among them, since a store that fell
+// between the read and the write of an Add would be lost. Load takes none:
+// it sees the variable as some writer left it.
+//
+// The lock is one for the whole package, which costs nothing on the single
+// thread goroutines share, and lets the functions work on any variable or
+// struct field a program has the address of.
+package atomic
+
+import "sync"
+
+// lock is held by every operation of the package that writes.
+var lock sync.Mutex
+
+// AddInt32 adds delta to *addr and returns the new value.
+func AddInt32(addr *int32, delta int32) int32 {
+	lock.Lock()
+	sum := *addr + delta
+	*addr = sum
+	lock.Unlock()
+	return sum
+}
+
+// LoadInt32 returns *addr.
+func LoadInt32(addr *int32) int32 {
+	return *addr
+}
+
+// StoreInt32 stores val in *addr.
+func StoreInt32(addr *int32, val int32) {
+	lock.Lock()
+	*addr = val
+	lock.Unlock()
+}
+
+// SwapInt32 stores val in *addr and returns what was there.
+func SwapInt32(addr *int32, val int32) int32 {
+	lock.Lock()
+	old := *addr
+	*addr = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwapInt32 stores val in *addr if it holds old, and says whether
+// it did.
+func CompareAndSwapInt32(addr *int32, old, val int32) bool {
+	lock.Lock()
+	swapped := *addr == old
+	if swapped {
+		*addr = val
+	}
+	lock.Unlock()
+	return swapped
+}
+
+// AddInt64 adds delta to *addr and returns the new value.
+func AddInt64(addr *int64, delta int64) int64 {
+	lock.Lock()
+	sum := *addr + delta
+	*addr = sum
+	lock.Unlock()
+	return sum
+}
+
+// LoadInt64 returns *addr.
+func LoadInt64(addr *int64) int64 {
+	return *addr
+}
+
+// StoreInt64 stores val in *addr.
+func StoreInt64(addr *int64, val int64) {
+	lock.Lock()
+	*addr = val
+	lock.Unlock()
+}
+
+// SwapInt64 stores val in *addr and returns what was there.
+func SwapInt64(addr *int64, val int64) int64 {
+	lock.Lock()
+	old := *addr
+	*addr = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwapInt64 stores val in *addr if it holds old, and says whether
+// it did.
+func CompareAndSwapInt64(addr *int64, old, val int64) bool {
+	lock.Lock()
+	swapped := *addr == old
+	if swapped {
+		*addr = val
+	}
+	lock.Unlock()
+	return swapped
+}
+
+// AddUint32 adds delta to *addr and returns the new value.
+func AddUint32(addr *uint32, delta uint32) uint32 {
+	lock.Lock()
+	sum := *addr + delta
+	*addr = sum
+	lock.Unlock()
+	return sum
+}
+
+// LoadUint32 returns *addr.
+func LoadUint32(addr *uint32) uint32 {
+	return *addr
+}
+
+// StoreUint32 stores val in *addr.
+func StoreUint32(addr *uint32, val uint32) {
+	lock.Lock()
+	*addr = val
+	lock.Unlock()
+}
+
+// SwapUint32 stores val in *addr and returns what was there.
+func SwapUint32(addr *uint32, val uint32) uint32 {
+	lock.Lock()
+	old := *addr
+	*addr = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwapUint32 stores val in *addr if it holds old, and says whether
+// it did.
+func CompareAndSwapUint32(addr *uint32, old, val uint32) bool {
+	lock.Lock()
+	swapped := *addr == old
+	if swapped {
+		*addr = val
+	}
+	lock.Unlock()
+	return swapped
+}
+
+// AddUint64 adds delta to *addr and returns the new value.
+func AddUint64(addr *uint64, delta uint64) uint64 {
+	lock.Lock()
+	sum := *addr + delta
+	*addr = sum
+	lock.Unlock()
+	return sum
+}
+
+// LoadUint64 returns *addr.
+func LoadUint64(addr *uint64) uint64 {
+	return *addr
+}
+
+// StoreUint64 stores val in *addr.
+func StoreUint64(addr *uint64, val uint64) {
+	lock.Lock()
+	*addr = val
+	lock.Unlock()
+}
+
+// SwapUint64 stores val in *addr and returns what was there.
+func SwapUint64(addr *uint64, val uint64) uint64 {
+	lock.Lock()
+	old := *addr
+	*addr = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwapUint64 stores val in *addr if it holds old, and says whether
+// it did.
+func CompareAndSwapUint64(addr *uint64, old, val uint64) bool {
+	lock.Lock()
+	swapped := *addr == old
+	if swapped {
+		*addr = val
+	}
+	lock.Unlock()
+	return swapped
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/sync/atomic/types.go",
+            text: #"""
+package atomic
+
+// An Int32 is an int32 that is read and written atomically. The zero value
+// is zero.
+type Int32 struct {
+	v int32
+}
+
+// Load returns the value.
+func (x *Int32) Load() int32 { return x.v }
+
+// Store stores val.
+func (x *Int32) Store(val int32) { StoreInt32(&x.v, val) }
+
+// Swap stores val and returns the value it replaced.
+func (x *Int32) Swap(val int32) int32 { return SwapInt32(&x.v, val) }
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+func (x *Int32) CompareAndSwap(old, val int32) bool {
+	return CompareAndSwapInt32(&x.v, old, val)
+}
+
+// Add adds delta and returns the new value.
+func (x *Int32) Add(delta int32) int32 { return AddInt32(&x.v, delta) }
+
+// An Int64 is an int64 that is read and written atomically. The zero value
+// is zero.
+type Int64 struct {
+	v int64
+}
+
+// Load returns the value.
+func (x *Int64) Load() int64 { return x.v }
+
+// Store stores val.
+func (x *Int64) Store(val int64) { StoreInt64(&x.v, val) }
+
+// Swap stores val and returns the value it replaced.
+func (x *Int64) Swap(val int64) int64 { return SwapInt64(&x.v, val) }
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+func (x *Int64) CompareAndSwap(old, val int64) bool {
+	return CompareAndSwapInt64(&x.v, old, val)
+}
+
+// Add adds delta and returns the new value.
+func (x *Int64) Add(delta int64) int64 { return AddInt64(&x.v, delta) }
+
+// A Uint32 is a uint32 that is read and written atomically. The zero value
+// is zero.
+type Uint32 struct {
+	v uint32
+}
+
+// Load returns the value.
+func (x *Uint32) Load() uint32 { return x.v }
+
+// Store stores val.
+func (x *Uint32) Store(val uint32) { StoreUint32(&x.v, val) }
+
+// Swap stores val and returns the value it replaced.
+func (x *Uint32) Swap(val uint32) uint32 { return SwapUint32(&x.v, val) }
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+func (x *Uint32) CompareAndSwap(old, val uint32) bool {
+	return CompareAndSwapUint32(&x.v, old, val)
+}
+
+// Add adds delta and returns the new value.
+func (x *Uint32) Add(delta uint32) uint32 { return AddUint32(&x.v, delta) }
+
+// A Uint64 is a uint64 that is read and written atomically. The zero value
+// is zero.
+type Uint64 struct {
+	v uint64
+}
+
+// Load returns the value.
+func (x *Uint64) Load() uint64 { return x.v }
+
+// Store stores val.
+func (x *Uint64) Store(val uint64) { StoreUint64(&x.v, val) }
+
+// Swap stores val and returns the value it replaced.
+func (x *Uint64) Swap(val uint64) uint64 { return SwapUint64(&x.v, val) }
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+func (x *Uint64) CompareAndSwap(old, val uint64) bool {
+	return CompareAndSwapUint64(&x.v, old, val)
+}
+
+// Add adds delta and returns the new value.
+func (x *Uint64) Add(delta uint64) uint64 { return AddUint64(&x.v, delta) }
+
+// A Bool is a boolean that is read and written atomically. The zero value
+// is false.
+type Bool struct {
+	v bool
+}
+
+// Load returns the value.
+func (x *Bool) Load() bool { return x.v }
+
+// Store stores val.
+func (x *Bool) Store(val bool) {
+	lock.Lock()
+	x.v = val
+	lock.Unlock()
+}
+
+// Swap stores val and returns the value it replaced.
+func (x *Bool) Swap(val bool) bool {
+	lock.Lock()
+	old := x.v
+	x.v = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+func (x *Bool) CompareAndSwap(old, val bool) bool {
+	lock.Lock()
+	swapped := x.v == old
+	if swapped {
+		x.v = val
+	}
+	lock.Unlock()
+	return swapped
+}
+
+"""#),
+        GoSourceFile(
+            path: "$GOROOT/src/sync/atomic/value.go",
+            text: #"""
+package atomic
+
+import "fmt"
+
+// A Value holds a value of any one type, read and written atomically. The
+// zero Value holds nothing, and Load returns nil until the first Store.
+// Every value stored must have the type of the first, and none may be nil.
+type Value struct {
+	v any
+}
+
+// sameType says whether a and b, neither nil, have one dynamic type. The
+// dialect has no reflection, so the types are compared by the names fmt
+// prints for them.
+func sameType(a, b any) bool {
+	return fmt.Sprintf("%T", a) == fmt.Sprintf("%T", b)
+}
+
+// Load returns the value most recently stored, or nil if there is none.
+func (v *Value) Load() any { return v.v }
+
+// Store sets the value to val.
+func (v *Value) Store(val any) {
+	if val == nil {
+		panic("sync/atomic: store of nil value into Value")
+	}
+	lock.Lock()
+	if v.v != nil && !sameType(v.v, val) {
+		lock.Unlock()
+		panic("sync/atomic: store of inconsistently typed value into Value")
+	}
+	v.v = val
+	lock.Unlock()
+}
+
+// Swap stores val and returns the value it replaced, nil if there was
+// none.
+func (v *Value) Swap(val any) any {
+	if val == nil {
+		panic("sync/atomic: swap of nil value into Value")
+	}
+	lock.Lock()
+	old := v.v
+	if old != nil && !sameType(old, val) {
+		lock.Unlock()
+		panic("sync/atomic: swap of inconsistently typed value into Value")
+	}
+	v.v = val
+	lock.Unlock()
+	return old
+}
+
+// CompareAndSwap stores val if the value is old, and says whether it did.
+// An old of nil stands for a Value nothing was stored in.
+func (v *Value) CompareAndSwap(old, val any) bool {
+	if val == nil {
+		panic("sync/atomic: compare and swap of nil value into Value")
+	}
+	if old != nil && !sameType(old, val) {
+		panic("sync/atomic: compare and swap of inconsistently typed values")
+	}
+	lock.Lock()
+	held := v.v
+	if held == nil {
+		if old == nil {
+			v.v = val
+		}
+		lock.Unlock()
+		return old == nil
+	}
+	if !sameType(held, val) {
+		lock.Unlock()
+		panic("sync/atomic: compare and swap of inconsistently typed value into Value")
+	}
+	// The lock is given back before the comparison, which panics for
+	// values that cannot be compared, and taken again for the store.
+	lock.Unlock()
+	if held != old {
+		return false
+	}
+	lock.Lock()
+	swapped := v.v == held
+	if swapped {
+		v.v = val
+	}
+	lock.Unlock()
+	return swapped
 }
 
 """#),

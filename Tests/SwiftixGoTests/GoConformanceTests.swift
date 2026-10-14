@@ -197,6 +197,10 @@ struct GoConformanceTests {
     @Test func floatsNamedConstantsAndDurations() throws {
         try expectSameOutput(floatsNamedConstantsAndDurationsSource, floatsNamedConstantsAndDurationsExpected)
     }
+
+    @Test func locksAtomicsLogsTimersAndTheEnvironment() throws {
+        try expectSameOutput(locksAtomicsLogsTimersAndTheEnvironmentSource, locksAtomicsLogsTimersAndTheEnvironmentExpected)
+    }
 }
 
 private let verbsFlagsAndMarkersSource = #"""
@@ -5038,5 +5042,74 @@ failed post of 8589934592 bytes after 42ms
 false true false true true
 f64 2.5; f32 2.5; -40.0°C; method post; enabled true; 90.000s; int;\#u{20}
    2.718|-0.50   |+1.2e+05|0x1p+00|float64 float32
+
+"""#
+
+private let locksAtomicsLogsTimersAndTheEnvironmentSource = #"""
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+type store struct {
+	sync.RWMutex
+	hits  atomic.Int64
+	items map[string]string
+}
+
+func (s *store) get(k string) (string, bool) {
+	s.RLock()
+	defer s.RUnlock()
+	s.hits.Add(1)
+	v, ok := s.items[k]
+	return v, ok
+}
+
+func main() {
+	log.SetFlags(0)
+	log.SetPrefix("kv: ")
+	log.SetOutput(os.Stdout)
+	os.Setenv("KV_MODE", "test")
+	s := &store{items: map[string]string{"a": "1"}}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.get(fmt.Sprint("k", i))
+		}()
+	}
+	wg.Wait()
+	tick := time.NewTicker(5 * time.Millisecond)
+	n := 0
+	for range tick.C {
+		if n++; n == 3 {
+			tick.Stop()
+			break
+		}
+	}
+	done := make(chan struct{})
+	time.AfterFunc(time.Millisecond, func() { close(done) })
+	<-done
+	var seen sync.Map
+	seen.Store("a", 1)
+	v, _ := seen.Load("a")
+	err := errors.Join(errors.New("first"), nil, errors.New("second"))
+	log.Printf("mode=%s hits=%d ticks=%d seen=%v", os.Getenv("KV_MODE"), s.hits.Load(), n, v)
+	log.Println(err)
+}
+"""#
+
+private let locksAtomicsLogsTimersAndTheEnvironmentExpected = #"""
+kv: mode=test hits=8 ticks=3 seen=1
+kv: first
+second
 
 """#

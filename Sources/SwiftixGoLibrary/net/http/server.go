@@ -13,9 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	urlpkg "net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -1059,10 +1059,11 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	srv.noKeepAlives = !v
 }
 
-// logf reports what the server cannot tell a client, on standard error
-// after the time, as Go's log package writes it.
+// logf reports what the server cannot tell a client, through the standard
+// logger of the log package, as Go does: a program that sets its output or
+// its flags sets them for these lines too.
 func (srv *Server) logf(format string, args ...any) {
-	fmt.Fprintln(os.Stderr, native.formatTime(int(time.Now().Unix()), 1)+" "+fmt.Sprintf(format, args...))
+	log.Printf(format, args...)
 }
 
 // ListenAndServe listens on srv.Addr and serves the connections it
